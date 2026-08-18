@@ -278,6 +278,7 @@ def test_release_stream_contracts() -> None:
     watcher = (REPOSITORY / ".github" / "workflows" / "watch-codex-release.yml").read_text(
         encoding="utf-8"
     )
+    assert "GIT_CONFIG_KEY_0: core.autocrlf" in watcher
     assert watcher.count('cron: "0 * * * *"') == 1
     assert watcher.count("Codex source must not live inside the CSA repository") == 2
     assert watcher.count('--branch "$env:UPSTREAM_TAG" --single-branch') == 2
@@ -286,6 +287,7 @@ def test_release_stream_contracts() -> None:
     manager_workflow = (REPOSITORY / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
     )
+    assert "GIT_CONFIG_KEY_0: core.autocrlf" in manager_workflow
     assert "manager-release-candidate:" in manager_workflow
     assert "csa-manager-0.1.0-release-candidate" in manager_workflow
     schema = json.loads(
