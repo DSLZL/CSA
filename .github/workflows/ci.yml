@@ -106,14 +106,21 @@ jobs:
             target: aarch64-apple-darwin
             binary: csa
     runs-on: ${{ matrix.runner }}
-    env:
-      CSA_ROOT: ${{ runner.temp }}/csa
-      CARGO_TARGET_DIR: ${{ runner.temp }}/csa/cargo-target
-      HOME: ${{ runner.temp }}/csa/home
-      CODEX_HOME: ${{ runner.temp }}/csa/codex-home
-      NPM_CONFIG_CACHE: ${{ runner.temp }}/csa/npm-cache
-      NPM_CONFIG_PREFIX: ${{ runner.temp }}/csa/npm-prefix
     steps:
+      - name: Configure ephemeral roots
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "csa"
+          @(
+            "CSA_ROOT=$root"
+            "CARGO_TARGET_DIR=$(Join-Path $root 'cargo-target')"
+            "HOME=$(Join-Path $root 'home')"
+            "CODEX_HOME=$(Join-Path $root 'codex-home')"
+            "NPM_CONFIG_CACHE=$(Join-Path $root 'npm-cache')"
+            "NPM_CONFIG_PREFIX=$(Join-Path $root 'npm-prefix')"
+          ) | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+          @('artifact', 'activation', 'codex-home', 'home', 'npm-cache', 'npm-prefix', 'tarballs') |
+            ForEach-Object { New-Item -ItemType Directory -Force (Join-Path $root $_) | Out-Null }
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
@@ -128,8 +135,6 @@ jobs:
         with:
           toolchain: "1.95.0"
           components: clippy
-      - name: Allocate ephemeral roots
-        run: node -e "for (const p of ['artifact','activation','codex-home','home','npm-cache','npm-prefix','tarballs']) require('node:fs').mkdirSync(require('node:path').join(process.env.CSA_ROOT,p),{recursive:true})"
       - name: Native Rust lane
         run: |
           cargo test --all-targets --target ${{ matrix.target }}
@@ -138,31 +143,35 @@ jobs:
       - name: Launcher contract
         run: node scripts/test_npm_launcher.mjs
       - name: Stage npm packages
-        run: node scripts/stage_npm_packages.mjs --out "${{ env.CSA_ROOT }}/stage" --binary "${{ matrix.id }}=${{ env.CARGO_TARGET_DIR }}/${{ matrix.target }}/release/${{ matrix.binary }}"
+        run: node scripts/stage_npm_packages.mjs --out "${{ runner.temp }}/csa/stage" --binary "${{ matrix.id }}=${{ runner.temp }}/csa/cargo-target/${{ matrix.target }}/release/${{ matrix.binary }}"
       - name: Pack npm candidates
         run: |
-          npm pack "${{ env.CSA_ROOT }}/stage/meta" --json --pack-destination "${{ env.CSA_ROOT }}/tarballs"
-          npm pack "${{ env.CSA_ROOT }}/stage/platforms/${{ matrix.id }}" --json --pack-destination "${{ env.CSA_ROOT }}/tarballs"
+          npm pack "${{ runner.temp }}/csa/stage/meta" --json --pack-destination "${{ runner.temp }}/csa/tarballs"
+          npm pack "${{ runner.temp }}/csa/stage/platforms/${{ matrix.id }}" --json --pack-destination "${{ runner.temp }}/csa/tarballs"
       - name: Temporary-prefix install
         run: |
-          npm install --prefix "${{ env.CSA_ROOT }}/npm-prefix" --offline --no-audit --no-fund "${{ env.CSA_ROOT }}/tarballs/dslzl-csa-${{ matrix.id }}-0.1.0.tgz" "${{ env.CSA_ROOT }}/tarballs/dslzl-csa-0.1.0.tgz"
-          node scripts/test_installed_launcher.mjs "${{ env.CSA_ROOT }}/npm-prefix"
-          npm uninstall --prefix "${{ env.CSA_ROOT }}/npm-prefix" --offline --no-audit --no-fund "@dslzl/csa" "@dslzl/csa-${{ matrix.id }}"
+          npm install --prefix "${{ runner.temp }}/csa/npm-prefix" --offline --no-audit --no-fund "${{ runner.temp }}/csa/tarballs/dslzl-csa-${{ matrix.id }}-0.1.0.tgz" "${{ runner.temp }}/csa/tarballs/dslzl-csa-0.1.0.tgz"
+          node scripts/test_installed_launcher.mjs "${{ runner.temp }}/csa/npm-prefix"
+          npm uninstall --prefix "${{ runner.temp }}/csa/npm-prefix" --offline --no-audit --no-fund "@dslzl/csa" "@dslzl/csa-${{ matrix.id }}"
       - name: Record platform artifact
-        run: python scripts/ci_release.py platform --repository "${{ github.workspace }}" --platform "${{ matrix.id }}" --manager "${{ env.CARGO_TARGET_DIR }}/${{ matrix.target }}/release/${{ matrix.binary }}" --meta-tarball "${{ env.CSA_ROOT }}/tarballs/dslzl-csa-0.1.0.tgz" --npm-tarball "${{ env.CSA_ROOT }}/tarballs/dslzl-csa-${{ matrix.id }}-0.1.0.tgz" --isolation-root "${{ env.CSA_ROOT }}" --output "${{ env.CSA_ROOT }}/artifact/${{ matrix.id }}"
+        run: python scripts/ci_release.py platform --repository "${{ github.workspace }}" --platform "${{ matrix.id }}" --manager "${{ runner.temp }}/csa/cargo-target/${{ matrix.target }}/release/${{ matrix.binary }}" --meta-tarball "${{ runner.temp }}/csa/tarballs/dslzl-csa-0.1.0.tgz" --npm-tarball "${{ runner.temp }}/csa/tarballs/dslzl-csa-${{ matrix.id }}-0.1.0.tgz" --isolation-root "${{ runner.temp }}/csa" --output "${{ runner.temp }}/csa/artifact/${{ matrix.id }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: platform-${{ matrix.id }}
-          path: ${{ env.CSA_ROOT }}/artifact
+          path: ${{ runner.temp }}/csa/artifact
           if-no-files-found: error
 
   payload:
     name: Exact Codex payload
     if: github.event_name == 'workflow_dispatch' && inputs.full_payload
     runs-on: windows-2025
-    env:
-      PAYLOAD_ROOT: ${{ runner.temp }}/csa-payload
     steps:
+      - name: Configure payload root
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "csa-payload"
+          "PAYLOAD_ROOT=$root" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+          New-Item -ItemType Directory -Force $root | Out-Null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
@@ -188,7 +197,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: payload-windows-x64
-          path: ${{ env.PAYLOAD_ROOT }}/payload-result.json
+          path: ${{ runner.temp }}/csa-payload/payload-result.json
           if-no-files-found: error
 
   manager-release-candidate:
@@ -196,9 +205,13 @@ jobs:
     if: github.event_name == 'workflow_dispatch'
     needs: [quality, node-compat, platform]
     runs-on: ubuntu-24.04
-    env:
-      CSA_RELEASE_ROOT: ${{ runner.temp }}/csa-release
     steps:
+      - name: Configure release root
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "csa-release"
+          "CSA_RELEASE_ROOT=$root" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+          New-Item -ItemType Directory -Force $root | Out-Null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
@@ -208,22 +221,22 @@ jobs:
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
           pattern: platform-*
-          path: ${{ env.CSA_RELEASE_ROOT }}/inputs
+          path: ${{ runner.temp }}/csa-release/inputs
           merge-multiple: true
       - name: Build release input
         run: |
-          mkdir -p "${{ env.CSA_RELEASE_ROOT }}/output"
+          mkdir -p "${{ runner.temp }}/csa-release/output"
           python scripts/ci_release.py input \
             --repository "${{ github.workspace }}" \
-            --artifacts "${{ env.CSA_RELEASE_ROOT }}/inputs" \
-            --output "${{ env.CSA_RELEASE_ROOT }}/release-input.json" \
+            --artifacts "${{ runner.temp }}/csa-release/inputs" \
+            --output "${{ runner.temp }}/csa-release/release-input.json" \
             --revision "${{ github.sha }}" \
             --ref "${{ github.ref }}" \
             --repository-url "${{ github.server_url }}/${{ github.repository }}"
       - name: Assemble checksummed manager candidate
-        run: python scripts/assemble_release_candidate.py --repository "${{ github.workspace }}" --input "${{ env.CSA_RELEASE_ROOT }}/release-input.json" --output "${{ env.CSA_RELEASE_ROOT }}/output/csa-manager-0.1.0"
+        run: python scripts/assemble_release_candidate.py --repository "${{ github.workspace }}" --input "${{ runner.temp }}/csa-release/release-input.json" --output "${{ runner.temp }}/csa-release/output/csa-manager-0.1.0"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: csa-manager-0.1.0-release-candidate
-          path: ${{ env.CSA_RELEASE_ROOT }}/output/csa-manager-0.1.0
+          path: ${{ runner.temp }}/csa-release/output/csa-manager-0.1.0
           if-no-files-found: error

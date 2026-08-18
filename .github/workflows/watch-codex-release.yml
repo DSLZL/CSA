@@ -91,20 +91,38 @@ jobs:
       group: csa-upstream-${{ needs.detect.outputs.upstream_commit }}
       cancel-in-progress: false
     env:
-      WATCH_ROOT: ${{ runner.temp }}/csa-watch
-      SOURCE_ROOT: ${{ runner.temp }}/csa-watch/source
-      CARGO_TARGET_DIR: ${{ runner.temp }}/csa-watch/cargo-target
       COMPAT_ID: ${{ needs.detect.outputs.compat_id }}
       COMPAT_TAG: ${{ needs.detect.outputs.compat_release_tag }}
       UPSTREAM_TAG: ${{ needs.detect.outputs.upstream_tag }}
       UPSTREAM_COMMIT: ${{ needs.detect.outputs.upstream_commit }}
       BASE_MANIFEST: ${{ needs.detect.outputs.base_manifest }}
-      ARTIFACT_PATH: ${{ runner.temp }}/csa-watch/cargo-target/x86_64-pc-windows-msvc/release/codex.exe
       GH_TOKEN: ${{ github.token }}
     outputs:
       success: ${{ steps.outcome.outputs.success }}
       stage: ${{ steps.outcome.outputs.stage }}
     steps:
+      - name: Configure isolated build roots
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "csa-watch"
+          $source = Join-Path $root "source"
+          @(
+            "WATCH_ROOT=$root"
+            "SOURCE_ROOT=$source"
+            "CARGO_TARGET_DIR=$(Join-Path $root 'cargo-target')"
+            "ARTIFACT_PATH=$(Join-Path $root 'cargo-target/x86_64-pc-windows-msvc/release/codex.exe')"
+          ) | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+          $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP)
+          $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)
+          $source = [IO.Path]::GetFullPath($source)
+          $separator = [IO.Path]::DirectorySeparatorChar
+          if (-not $source.StartsWith("$runnerTemp$separator", [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Codex source must live below RUNNER_TEMP: $source"
+          }
+          if ($source.Equals($workspace, [StringComparison]::OrdinalIgnoreCase) -or $source.StartsWith("$workspace$separator", [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Codex source must not live inside the CSA repository: $source"
+          }
+          New-Item -ItemType Directory -Force $root, (Join-Path $root 'home'), (Join-Path $root 'codex-home') | Out-Null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
@@ -114,20 +132,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
         with:
           toolchain: "1.95.0"
-      - name: Allocate isolated build roots
-        shell: pwsh
-        run: |
-          $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP)
-          $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)
-          $source = [IO.Path]::GetFullPath($env:SOURCE_ROOT)
-          $separator = [IO.Path]::DirectorySeparatorChar
-          if (-not $source.StartsWith("$runnerTemp$separator", [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Codex source must live below RUNNER_TEMP: $source"
-          }
-          if ($source.Equals($workspace, [StringComparison]::OrdinalIgnoreCase) -or $source.StartsWith("$workspace$separator", [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Codex source must not live inside the CSA repository: $source"
-          }
-          New-Item -ItemType Directory -Force "$env:WATCH_ROOT", "$env:WATCH_ROOT/home", "$env:WATCH_ROOT/codex-home" | Out-Null
       - id: clone
         name: Clone exact upstream tag
         continue-on-error: true
@@ -262,13 +266,13 @@ jobs:
         if: steps.candidate.outcome == 'success'
         with:
           name: compatibility-candidate-${{ needs.detect.outputs.compat_id }}
-          path: ${{ env.WATCH_ROOT }}/release-assets
+          path: ${{ runner.temp }}/csa-watch/release-assets
           if-no-files-found: error
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: steps.outcome.outputs.success == 'false'
         with:
           name: compatibility-failure-patch-${{ needs.detect.outputs.upstream_commit }}
-          path: ${{ env.WATCH_ROOT }}/failure.log
+          path: ${{ runner.temp }}/csa-watch/failure.log
           if-no-files-found: error
       - name: Fail after preserving blocker evidence
         if: steps.outcome.outputs.success == 'false'
@@ -285,19 +289,37 @@ jobs:
       group: csa-upstream-${{ needs.detect.outputs.upstream_commit }}
       cancel-in-progress: false
     env:
-      WATCH_ROOT: ${{ runner.temp }}/csa-watch
-      SOURCE_ROOT: ${{ runner.temp }}/csa-watch/source
-      CARGO_TARGET_DIR: ${{ runner.temp }}/csa-watch/cargo-target
       COMPAT_ID: ${{ needs.detect.outputs.compat_id }}
       COMPAT_TAG: ${{ needs.detect.outputs.compat_release_tag }}
       UPSTREAM_TAG: ${{ needs.detect.outputs.upstream_tag }}
       UPSTREAM_COMMIT: ${{ needs.detect.outputs.upstream_commit }}
-      ARTIFACT_PATH: ${{ runner.temp }}/csa-watch/cargo-target/x86_64-pc-windows-msvc/release/codex.exe
       GH_TOKEN: ${{ github.token }}
     outputs:
       success: ${{ steps.outcome.outputs.success }}
       stage: ${{ steps.outcome.outputs.stage }}
     steps:
+      - name: Configure isolated build roots
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "csa-watch"
+          $source = Join-Path $root "source"
+          @(
+            "WATCH_ROOT=$root"
+            "SOURCE_ROOT=$source"
+            "CARGO_TARGET_DIR=$(Join-Path $root 'cargo-target')"
+            "ARTIFACT_PATH=$(Join-Path $root 'cargo-target/x86_64-pc-windows-msvc/release/codex.exe')"
+          ) | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+          $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP)
+          $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)
+          $source = [IO.Path]::GetFullPath($source)
+          $separator = [IO.Path]::DirectorySeparatorChar
+          if (-not $source.StartsWith("$runnerTemp$separator", [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Codex source must live below RUNNER_TEMP: $source"
+          }
+          if ($source.Equals($workspace, [StringComparison]::OrdinalIgnoreCase) -or $source.StartsWith("$workspace$separator", [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Codex source must not live inside the CSA repository: $source"
+          }
+          New-Item -ItemType Directory -Force $root, (Join-Path $root 'home'), (Join-Path $root 'codex-home') | Out-Null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
@@ -308,20 +330,6 @@ jobs:
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
         with:
           toolchain: "1.95.0"
-      - name: Allocate isolated build roots
-        shell: pwsh
-        run: |
-          $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP)
-          $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)
-          $source = [IO.Path]::GetFullPath($env:SOURCE_ROOT)
-          $separator = [IO.Path]::DirectorySeparatorChar
-          if (-not $source.StartsWith("$runnerTemp$separator", [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Codex source must live below RUNNER_TEMP: $source"
-          }
-          if ($source.Equals($workspace, [StringComparison]::OrdinalIgnoreCase) -or $source.StartsWith("$workspace$separator", [StringComparison]::OrdinalIgnoreCase)) {
-            throw "Codex source must not live inside the CSA repository: $source"
-          }
-          New-Item -ItemType Directory -Force "$env:WATCH_ROOT", "$env:WATCH_ROOT/home", "$env:WATCH_ROOT/codex-home" | Out-Null
       - id: clone
         name: Clone exact reviewed upstream source
         continue-on-error: true
@@ -411,7 +419,7 @@ jobs:
         if: steps.outcome.outputs.success == 'false'
         with:
           name: compatibility-failure-publish-${{ needs.detect.outputs.upstream_commit }}
-          path: ${{ env.WATCH_ROOT }}/failure.log
+          path: ${{ runner.temp }}/csa-watch/failure.log
           if-no-files-found: error
       - name: Fail after preserving blocker evidence
         if: steps.outcome.outputs.success == 'false'
