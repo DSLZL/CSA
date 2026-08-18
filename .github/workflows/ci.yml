@@ -35,7 +35,6 @@ jobs:
           python-version: "3.13"
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
         with:
-          toolchain: "1.95.0"
           components: clippy,rustfmt
       - name: Rust quality
         run: |
@@ -133,7 +132,6 @@ jobs:
           python-version: "3.13"
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
         with:
-          toolchain: "1.95.0"
           components: clippy
       - name: Native Rust lane
         run: |
@@ -179,8 +177,6 @@ jobs:
         with:
           python-version: "3.13"
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
-        with:
-          toolchain: "1.95.0"
       - name: Clone exact upstream tag
         shell: pwsh
         run: |

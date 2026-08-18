@@ -8,6 +8,7 @@ import {
   mkdirSync,
   mkdtempSync,
   readFileSync,
+  realpathSync,
   rmSync,
   writeFileSync,
 } from 'node:fs';
@@ -72,7 +73,7 @@ async function testProcessGroupSignal(env, cwd) {
   }
 }
 
-const temporary = mkdtempSync(path.join(os.tmpdir(), 'csa-launcher-'));
+const temporary = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'csa-launcher-')));
 try {
   const packageRoot = path.join(temporary, 'node_modules', ...selected.package.split('/'));
   const binary = path.resolve(packageRoot, selected.binary);
