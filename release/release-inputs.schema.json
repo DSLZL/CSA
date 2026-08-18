@@ -1,0 +1,86 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://csa.invalid/schemas/release-inputs.schema.json",
+  "title": "CSA release candidate inputs",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema",
+    "release_version",
+    "source",
+    "meta_tarball",
+    "platforms",
+    "signing",
+    "manual_gates"
+  ],
+  "properties": {
+    "schema": { "const": 1 },
+    "release_version": { "type": "string", "pattern": "^[0-9]+\\.[0-9]+\\.[0-9]+$" },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["revision", "ref", "repository"],
+      "properties": {
+        "revision": { "type": "string", "minLength": 1 },
+        "ref": { "type": ["string", "null"] },
+        "repository": { "type": ["string", "null"] }
+      }
+    },
+    "meta_tarball": { "$ref": "#/$defs/path" },
+    "platforms": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["win32-x64", "linux-x64", "linux-arm64", "darwin-x64", "darwin-arm64"],
+      "properties": {
+        "win32-x64": { "$ref": "#/$defs/platform" },
+        "linux-x64": { "$ref": "#/$defs/platform" },
+        "linux-arm64": { "$ref": "#/$defs/platform" },
+        "darwin-x64": { "$ref": "#/$defs/platform" },
+        "darwin-arm64": { "$ref": "#/$defs/platform" }
+      }
+    },
+    "signing": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "reason"],
+      "properties": {
+        "status": { "enum": ["verified", "not_available", "not_executed"] },
+        "reason": { "type": "string", "minLength": 1 },
+        "signature": { "$ref": "#/$defs/path" }
+      }
+    },
+    "manual_gates": {
+      "type": "object",
+      "additionalProperties": { "enum": ["pass", "not_verified", "not_executed"] }
+    }
+  },
+  "$defs": {
+    "path": { "type": "string", "minLength": 1 },
+    "platform": {
+      "oneOf": [
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "manager", "npm_tarball", "evidence", "reproduce"],
+          "properties": {
+            "status": { "const": "pass" },
+            "manager": { "$ref": "#/$defs/path" },
+            "npm_tarball": { "$ref": "#/$defs/path" },
+            "evidence": { "$ref": "#/$defs/path" },
+            "reproduce": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+          }
+        },
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["status", "reason", "reproduce"],
+          "properties": {
+            "status": { "const": "not_verified" },
+            "reason": { "type": "string", "minLength": 1 },
+            "reproduce": { "type": "array", "minItems": 1, "items": { "type": "string", "minLength": 1 } }
+          }
+        }
+      ]
+    }
+  }
+}

@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "algorithm": "sha256",
+  "content": "git_blob",
+  "commit": "be6e8eac029b183056b7e4402879f15d2c85f61b",
+  "present": {
+    "codex-rs/analytics/src/reducer.rs": "0f139ac5c7891afb8c8593245fb05364115667d7f648c73217af3a4140590ca7",
+    "codex-rs/app-server-protocol/src/protocol/v2/item.rs": "46a6b8fcacc8074a9711abcc1f9186250f27af146b0ef60d6f036a80a9d643f9",
+    "codex-rs/core/src/agent/control.rs": "fc7f32488f1de23becbc5899f7078c015995e2e9197db9344c6e77282edce4d6",
+    "codex-rs/core/src/agent/control/spawn.rs": "45c2d7b8da7c6ece75786cc5dba9cfdaedac3aca19186cc6c0af1a7e369a1725",
+    "codex-rs/core/src/agent/mod.rs": "fb73c931b6a364a0f970e304eb45776de81c55eff616d2c7faf221b706eddfed",
+    "codex-rs/core/src/session/mod.rs": "fb464d6b5bff21036c46611643a22e8e2a32d8cfb28c9aeef690656823aca5d0",
+    "codex-rs/core/src/session/tests.rs": "149260f92a57e4330c358a7c820dff93ee2395ccb0d21bf72de88bcc7c0850cb",
+    "codex-rs/core/src/test_support.rs": "f0128850968b5b55b11e5477e4cd19fd0ae14864e45fb3727a3b307af8a51b14",
+    "codex-rs/core/src/tools/handlers/mod.rs": "cc5a936c68e08094c7d0efd9a15877bd64725066b2b124e061da29d947e350cf",
+    "codex-rs/core/src/tools/handlers/multi_agents_spec.rs": "e698adc9665fcc73af8a69be901c825308e2b4a3f23a692579a147cb03fffc99",
+    "codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs": "7295e048671b6ff7aa662a299ef562c3cd4dbe45442a8d03b957d15a705e1460",
+    "codex-rs/core/src/tools/handlers/multi_agents_tests.rs": "017c807d8ecbfe67407142dc2031e396332feaa04046a917a72971d63cbcfbb5",
+    "codex-rs/core/src/tools/handlers/multi_agents_v2.rs": "0aefd72f54be7d0e27fe45fa2fce42bd96ad079dc58455fb9a93ec41b950d445",
+    "codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs": "2a8c4093f8d26a373c79b5ee9b3d326c719fb21b5de3a9351365272142b8b78c",
+    "codex-rs/core/src/tools/handlers/test_sync.rs": "3f86fe6e992efa142d85ed7dc2f2c15c971a88e8b6b4fa513249ee3c4ba2efdc",
+    "codex-rs/core/src/tools/spec_plan.rs": "6321bbdb398cdfd6bdec1bbc48bb179a663bf4a6f7d6bff2d418bb08a8944202",
+    "codex-rs/core/tests/suite/mod.rs": "d126e1aa09282386676fda3bc00d0b26c57c4b60f14d2592ae44a51267e27275",
+    "codex-rs/exec/src/event_processor_with_jsonl_output.rs": "d43476319a61c53369055fdbbd7c093100b23bc93f9b01365db0af4c96df3e2c",
+    "codex-rs/exec/src/exec_events.rs": "c404928e0f2a463e19d1b263081c9d5e0380aec9f651a05ee0766f7bb7527f32",
+    "codex-rs/protocol/src/items.rs": "3a4b770b18c7e661c14c8d1e4cbe4561d75f6a29695b0fdcf5c6648c2bb05ef3",
+    "codex-rs/protocol/src/legacy_events.rs": "76898eee224bdcc18367ce77a69b7174b2b21a9d50aaeeb6e85222abc5912c83",
+    "codex-rs/tui/src/app/agent_status_feed.rs": "76461780221a1aad0a902c5f88035dcbf3a325179a387ca835ac3278208fee09",
+    "codex-rs/tui/src/multi_agents.rs": "5c3db103736b08ff048e771ce4c6be1562acdf24e1529fbfde22739bf6b74910"
+  },
+  "absent": [
+    "codex-rs/core/src/agent/completion.rs",
+    "codex-rs/core/src/tools/handlers/multi_agents_v2/join.rs",
+    "codex-rs/core/tests/suite/multi_agent_join.rs"
+  ]
+}

@@ -1,0 +1,58 @@
+{
+  "schema": 1,
+  "manager_version": "0.1.0",
+  "rust_toolchain": "1.95.0",
+  "node_test_versions": ["22", "24", "26"],
+  "platforms": [
+    {
+      "id": "win32-x64",
+      "runner": "windows-2025",
+      "runner_channel": "ga",
+      "os": "win32",
+      "arch": "x64",
+      "target": "x86_64-pc-windows-msvc",
+      "binary": "csa.exe",
+      "npm_package": "@dslzl/csa-win32-x64"
+    },
+    {
+      "id": "linux-x64",
+      "runner": "ubuntu-24.04",
+      "runner_channel": "ga",
+      "os": "linux",
+      "arch": "x64",
+      "target": "x86_64-unknown-linux-gnu",
+      "binary": "csa",
+      "npm_package": "@dslzl/csa-linux-x64"
+    },
+    {
+      "id": "linux-arm64",
+      "runner": "ubuntu-24.04-arm",
+      "runner_channel": "public_preview",
+      "os": "linux",
+      "arch": "arm64",
+      "target": "aarch64-unknown-linux-gnu",
+      "binary": "csa",
+      "npm_package": "@dslzl/csa-linux-arm64"
+    },
+    {
+      "id": "darwin-x64",
+      "runner": "macos-15-intel",
+      "runner_channel": "ga",
+      "os": "darwin",
+      "arch": "x64",
+      "target": "x86_64-apple-darwin",
+      "binary": "csa",
+      "npm_package": "@dslzl/csa-darwin-x64"
+    },
+    {
+      "id": "darwin-arm64",
+      "runner": "macos-15",
+      "runner_channel": "ga",
+      "os": "darwin",
+      "arch": "arm64",
+      "target": "aarch64-apple-darwin",
+      "binary": "csa",
+      "npm_package": "@dslzl/csa-darwin-arm64"
+    }
+  ]
+}

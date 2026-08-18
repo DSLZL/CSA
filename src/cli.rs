@@ -1,0 +1,456 @@
+use crate::error::{ManagerError, Result};
+use crate::isolation::IsolationRequest;
+use crate::manager::{
+    DoctorOptions, ExecOptions, InstallOptions, OnlineInstallOptions, PrepareOptions,
+};
+use std::collections::VecDeque;
+use std::ffi::OsString;
+use std::path::PathBuf;
+
+pub const USAGE: &str = "\
+csa doctor [--manager-root PATH] [--official PATH] [--official-native PATH] [--manifest PATH]
+csa install [--manager-root PATH] [--official PATH] [--official-native PATH] [--manifest PATH (--artifact PATH | --source PATH)]
+csa uninstall [--manager-root PATH]
+csa prepare [--manager-root PATH] [--official PATH] [--official-native PATH] --manifest PATH (--artifact PATH | --source PATH)
+csa plug [--manager-root PATH]
+csa unplug [--manager-root PATH]
+csa status [--manager-root PATH]
+csa purge [--manager-root PATH]
+csa exec --isolated [--manager-root PATH] --codex-home PATH --cwd PATH --logs-dir PATH --state-dir PATH --record PATH [--npm-prefix PATH] -- [CODEX_ARGS...]";
+
+#[derive(Clone, Debug)]
+pub enum Cli {
+    Doctor(DoctorOptions),
+    Install(InstallOptions),
+    Uninstall { manager_root: Option<PathBuf> },
+    Prepare(PrepareOptions),
+    Plug { manager_root: Option<PathBuf> },
+    Unplug { manager_root: Option<PathBuf> },
+    Status { manager_root: Option<PathBuf> },
+    Purge { manager_root: Option<PathBuf> },
+    Exec(ExecOptions),
+    Help,
+    Version,
+}
+
+impl Cli {
+    pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
+        let mut args: VecDeque<_> = args.into_iter().collect();
+        let Some(command) = args.pop_front() else {
+            return Ok(Self::Help);
+        };
+        let command = command.to_str().ok_or_else(|| {
+            ManagerError::new("invalid_cli", "command name must be valid Unicode")
+        })?;
+        match command {
+            "doctor" => parse_doctor(args),
+            "install" => parse_install(args),
+            "uninstall" => parse_root_only(args, |manager_root| Cli::Uninstall { manager_root }),
+            "prepare" => parse_prepare(args, "prepare", Cli::Prepare),
+            "plug" => parse_root_only(args, |manager_root| Cli::Plug { manager_root }),
+            "unplug" => parse_root_only(args, |manager_root| Cli::Unplug { manager_root }),
+            "status" => parse_root_only(args, |manager_root| Cli::Status { manager_root }),
+            "purge" => parse_root_only(args, |manager_root| Cli::Purge { manager_root }),
+            "exec" => parse_exec(args),
+            "help" | "--help" | "-h" => Ok(Self::Help),
+            "--version" | "-V" => Ok(Self::Version),
+            _ => Err(ManagerError::new(
+                "invalid_cli",
+                format!("unknown command: {command}"),
+            )),
+        }
+    }
+}
+
+fn parse_install(mut args: VecDeque<OsString>) -> Result<Cli> {
+    let mut manager_root = None;
+    let mut official = None;
+    let mut official_native = None;
+    let mut manifest = None;
+    let mut artifact = None;
+    let mut source = None;
+    while let Some(flag) = args.pop_front() {
+        match unicode_flag(&flag)? {
+            "--manager-root" => set_path(
+                &mut manager_root,
+                take_value(&mut args, "--manager-root")?,
+                "--manager-root",
+            )?,
+            "--official" => set_path(
+                &mut official,
+                take_value(&mut args, "--official")?,
+                "--official",
+            )?,
+            "--official-native" => set_path(
+                &mut official_native,
+                take_value(&mut args, "--official-native")?,
+                "--official-native",
+            )?,
+            "--manifest" => set_path(
+                &mut manifest,
+                take_value(&mut args, "--manifest")?,
+                "--manifest",
+            )?,
+            "--artifact" => set_path(
+                &mut artifact,
+                take_value(&mut args, "--artifact")?,
+                "--artifact",
+            )?,
+            "--source" => set_path(&mut source, take_value(&mut args, "--source")?, "--source")?,
+            "--help" | "-h" => return Ok(Cli::Help),
+            flag => return Err(unknown_flag(flag)),
+        }
+    }
+    let options = match (manifest, artifact, source) {
+        (None, None, None) => InstallOptions::Online(OnlineInstallOptions {
+            manager_root,
+            official,
+            official_native,
+        }),
+        (Some(manifest), Some(artifact), None) => InstallOptions::Local(PrepareOptions {
+            manager_root,
+            official,
+            official_native,
+            manifest,
+            artifact: Some(artifact),
+            source: None,
+        }),
+        (Some(manifest), None, Some(source)) => InstallOptions::Local(PrepareOptions {
+            manager_root,
+            official,
+            official_native,
+            manifest,
+            artifact: None,
+            source: Some(source),
+        }),
+        _ => {
+            return Err(ManagerError::new(
+                "invalid_cli",
+                "install accepts no release input for online mode, or --manifest with exactly one of --artifact/--source for local mode",
+            ));
+        }
+    };
+    Ok(Cli::Install(options))
+}
+
+fn parse_doctor(mut args: VecDeque<OsString>) -> Result<Cli> {
+    let mut manager_root = None;
+    let mut official = None;
+    let mut official_native = None;
+    let mut manifest = None;
+    while let Some(flag) = args.pop_front() {
+        match unicode_flag(&flag)? {
+            "--manager-root" => set_path(
+                &mut manager_root,
+                take_value(&mut args, "--manager-root")?,
+                "--manager-root",
+            )?,
+            "--official" => set_path(
+                &mut official,
+                take_value(&mut args, "--official")?,
+                "--official",
+            )?,
+            "--official-native" => set_path(
+                &mut official_native,
+                take_value(&mut args, "--official-native")?,
+                "--official-native",
+            )?,
+            "--manifest" => set_path(
+                &mut manifest,
+                take_value(&mut args, "--manifest")?,
+                "--manifest",
+            )?,
+            "--help" | "-h" => return Ok(Cli::Help),
+            flag => return Err(unknown_flag(flag)),
+        }
+    }
+    Ok(Cli::Doctor(DoctorOptions {
+        manager_root,
+        official,
+        official_native,
+        manifest,
+    }))
+}
+
+fn parse_prepare(
+    mut args: VecDeque<OsString>,
+    command: &str,
+    make: impl FnOnce(PrepareOptions) -> Cli,
+) -> Result<Cli> {
+    let mut manager_root = None;
+    let mut official = None;
+    let mut official_native = None;
+    let mut manifest = None;
+    let mut artifact = None;
+    let mut source = None;
+    while let Some(flag) = args.pop_front() {
+        match unicode_flag(&flag)? {
+            "--manager-root" => set_path(
+                &mut manager_root,
+                take_value(&mut args, "--manager-root")?,
+                "--manager-root",
+            )?,
+            "--official" => set_path(
+                &mut official,
+                take_value(&mut args, "--official")?,
+                "--official",
+            )?,
+            "--official-native" => set_path(
+                &mut official_native,
+                take_value(&mut args, "--official-native")?,
+                "--official-native",
+            )?,
+            "--manifest" => set_path(
+                &mut manifest,
+                take_value(&mut args, "--manifest")?,
+                "--manifest",
+            )?,
+            "--artifact" => set_path(
+                &mut artifact,
+                take_value(&mut args, "--artifact")?,
+                "--artifact",
+            )?,
+            "--source" => set_path(&mut source, take_value(&mut args, "--source")?, "--source")?,
+            "--help" | "-h" => return Ok(Cli::Help),
+            flag => return Err(unknown_flag(flag)),
+        }
+    }
+    let manifest = manifest.ok_or_else(|| {
+        ManagerError::new("invalid_cli", format!("{command} requires --manifest PATH"))
+    })?;
+    Ok(make(PrepareOptions {
+        manager_root,
+        official,
+        official_native,
+        manifest,
+        artifact,
+        source,
+    }))
+}
+
+fn parse_root_only(
+    mut args: VecDeque<OsString>,
+    make: impl FnOnce(Option<PathBuf>) -> Cli,
+) -> Result<Cli> {
+    let mut manager_root = None;
+    while let Some(flag) = args.pop_front() {
+        match unicode_flag(&flag)? {
+            "--manager-root" => set_path(
+                &mut manager_root,
+                take_value(&mut args, "--manager-root")?,
+                "--manager-root",
+            )?,
+            "--help" | "-h" => return Ok(Cli::Help),
+            flag => return Err(unknown_flag(flag)),
+        }
+    }
+    Ok(make(manager_root))
+}
+
+fn parse_exec(mut args: VecDeque<OsString>) -> Result<Cli> {
+    let mut isolated = false;
+    let mut manager_root = None;
+    let mut codex_home = None;
+    let mut cwd = None;
+    let mut logs_dir = None;
+    let mut state_dir = None;
+    let mut record_path = None;
+    let mut npm_prefix = None;
+    let mut child_args = Vec::new();
+    let mut separator = false;
+    while let Some(flag) = args.pop_front() {
+        if separator {
+            child_args.push(flag);
+            continue;
+        }
+        match unicode_flag(&flag)? {
+            "--" => separator = true,
+            "--isolated" if !isolated => isolated = true,
+            "--isolated" => return Err(duplicate_flag("--isolated")),
+            "--manager-root" => set_path(
+                &mut manager_root,
+                take_value(&mut args, "--manager-root")?,
+                "--manager-root",
+            )?,
+            "--codex-home" => set_path(
+                &mut codex_home,
+                take_value(&mut args, "--codex-home")?,
+                "--codex-home",
+            )?,
+            "--cwd" => set_path(&mut cwd, take_value(&mut args, "--cwd")?, "--cwd")?,
+            "--logs-dir" => set_path(
+                &mut logs_dir,
+                take_value(&mut args, "--logs-dir")?,
+                "--logs-dir",
+            )?,
+            "--state-dir" => set_path(
+                &mut state_dir,
+                take_value(&mut args, "--state-dir")?,
+                "--state-dir",
+            )?,
+            "--record" => set_path(
+                &mut record_path,
+                take_value(&mut args, "--record")?,
+                "--record",
+            )?,
+            "--npm-prefix" => set_path(
+                &mut npm_prefix,
+                take_value(&mut args, "--npm-prefix")?,
+                "--npm-prefix",
+            )?,
+            "--help" | "-h" => return Ok(Cli::Help),
+            flag => return Err(unknown_flag(flag)),
+        }
+    }
+    if !isolated {
+        return Err(ManagerError::new(
+            "invalid_cli",
+            "exec requires --isolated; non-isolated execution is not supported",
+        ));
+    }
+    if !separator {
+        return Err(ManagerError::new(
+            "invalid_cli",
+            "exec requires -- before Codex arguments",
+        ));
+    }
+    Ok(Cli::Exec(ExecOptions {
+        manager_root,
+        isolation: IsolationRequest {
+            codex_home: required_path(codex_home, "--codex-home")?,
+            cwd: required_path(cwd, "--cwd")?,
+            logs_dir: required_path(logs_dir, "--logs-dir")?,
+            state_dir: required_path(state_dir, "--state-dir")?,
+            npm_prefix,
+            record_path: required_path(record_path, "--record")?,
+        },
+        args: child_args,
+    }))
+}
+
+fn take_value(args: &mut VecDeque<OsString>, flag: &str) -> Result<OsString> {
+    args.pop_front()
+        .ok_or_else(|| ManagerError::new("invalid_cli", format!("{flag} requires a value")))
+}
+
+fn set_path(slot: &mut Option<PathBuf>, value: OsString, flag: &str) -> Result<()> {
+    if slot.replace(PathBuf::from(value)).is_some() {
+        return Err(duplicate_flag(flag));
+    }
+    Ok(())
+}
+
+fn required_path(value: Option<PathBuf>, flag: &str) -> Result<PathBuf> {
+    value.ok_or_else(|| ManagerError::new("invalid_cli", format!("exec requires {flag} PATH")))
+}
+
+fn unicode_flag(value: &OsString) -> Result<&str> {
+    value
+        .to_str()
+        .ok_or_else(|| ManagerError::new("invalid_cli", "option names must be valid Unicode"))
+}
+
+fn unknown_flag(flag: &str) -> ManagerError {
+    ManagerError::new("invalid_cli", format!("unknown option: {flag}"))
+}
+
+fn duplicate_flag(flag: &str) -> ManagerError {
+    ManagerError::new("invalid_cli", format!("duplicate option: {flag}"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{Cli, InstallOptions};
+    use std::ffi::OsString;
+
+    fn parse(args: &[&str]) -> crate::error::Result<Cli> {
+        Cli::parse(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn exec_requires_isolation_and_separator() {
+        assert!(parse(&["exec", "--"]).is_err());
+        assert!(parse(&["exec", "--isolated"]).is_err());
+    }
+
+    #[test]
+    fn duplicate_options_are_rejected() {
+        assert!(parse(&["status", "--manager-root", "a", "--manager-root", "b"]).is_err());
+    }
+
+    #[test]
+    fn install_supports_online_and_explicit_local_modes() {
+        let Cli::Install(InstallOptions::Online(options)) = parse(&["install"]).unwrap() else {
+            panic!("expected online install")
+        };
+        assert!(options.manager_root.is_none());
+        assert!(options.official.is_none());
+
+        let cli = parse(&[
+            "install",
+            "--manager-root",
+            "C:/tmp/csa",
+            "--official",
+            "C:/tmp/codex.exe",
+            "--official-native",
+            "C:/tmp/native.exe",
+            "--manifest",
+            "C:/tmp/manifest.toml",
+            "--artifact",
+            "C:/tmp/patched.exe",
+        ])
+        .unwrap();
+        let Cli::Install(InstallOptions::Local(options)) = cli else {
+            panic!("expected local install")
+        };
+        assert_eq!(
+            options.manager_root.unwrap(),
+            std::path::Path::new("C:/tmp/csa")
+        );
+        assert_eq!(
+            options.manifest,
+            std::path::Path::new("C:/tmp/manifest.toml")
+        );
+        assert_eq!(
+            options.artifact.unwrap(),
+            std::path::Path::new("C:/tmp/patched.exe")
+        );
+        assert!(options.source.is_none());
+        assert!(parse(&["install", "--manifest", "C:/tmp/manifest.toml"]).is_err());
+        assert!(parse(&["install", "--artifact", "C:/tmp/patched.exe"]).is_err());
+
+        let Cli::Uninstall { manager_root } =
+            parse(&["uninstall", "--manager-root", "C:/tmp/csa"]).unwrap()
+        else {
+            panic!("expected uninstall")
+        };
+        assert_eq!(manager_root.unwrap(), std::path::Path::new("C:/tmp/csa"));
+        assert!(parse(&["uninstall", "--manifest", "ignored"]).is_err());
+    }
+
+    #[test]
+    fn child_arguments_are_not_reparsed() {
+        let cli = parse(&[
+            "exec",
+            "--isolated",
+            "--codex-home",
+            "C:/tmp/home",
+            "--cwd",
+            "C:/tmp/cwd",
+            "--logs-dir",
+            "C:/tmp/logs",
+            "--state-dir",
+            "C:/tmp/state",
+            "--record",
+            "C:/tmp/record.json",
+            "--",
+            "--model",
+            "o3",
+        ])
+        .unwrap();
+        let Cli::Exec(options) = cli else {
+            panic!("expected exec")
+        };
+        assert_eq!(options.args, ["--model", "o3"].map(OsString::from));
+    }
+}

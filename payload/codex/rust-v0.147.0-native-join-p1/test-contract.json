@@ -1,0 +1,105 @@
+{
+  "schema": 1,
+  "compat_id": "rust-v0.147.0-native-join-p1",
+  "parameters": {
+    "source": "absolute clean checkout path",
+    "cargo_target": "absolute disposable Cargo target path"
+  },
+  "cwd": "{source}/codex-rs",
+  "common_env": {
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_TARGET_DIR": "{cargo_target}",
+    "RUST_MIN_STACK": "8388608"
+  },
+  "generation": [
+    {
+      "name": "stable schema and embedded exports",
+      "env": {
+        "CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL": "0",
+        "CODEX_APP_SERVER_SCHEMA_ROOT": "{source}/codex-rs/app-server-protocol/schema"
+      },
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-app-server-protocol",
+        "write_schema_fixtures_from_env",
+        "--",
+        "--ignored",
+        "--nocapture"
+      ]
+    },
+    {
+      "name": "experimental embedded exports",
+      "env": {
+        "CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL": "1",
+        "CODEX_APP_SERVER_SCHEMA_ROOT": "{source}/codex-rs/app-server-protocol/schema"
+      },
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-app-server-protocol",
+        "write_schema_fixtures_from_env",
+        "--",
+        "--ignored",
+        "--nocapture"
+      ]
+    }
+  ],
+  "tests": [
+    {
+      "name": "schema reverse-check",
+      "env": {
+        "CODEX_APP_SERVER_SCHEMA_ROOT": "{source}/codex-rs/app-server-protocol/schema"
+      },
+      "argv": ["cargo", "test", "-p", "codex-app-server-protocol", "schema_fixtures_tests", "--", "--nocapture"]
+    },
+    {
+      "name": "completion registry",
+      "argv": ["cargo", "test", "-p", "codex-core", "agent::completion::tests", "--", "--nocapture"]
+    },
+    {
+      "name": "terminal outcome mapping",
+      "argv": ["cargo", "test", "-p", "codex-core", "agent_run_terminal_mapper_preserves_exact_outcomes", "--", "--nocapture"]
+    },
+    {
+      "name": "replayable terminal publication",
+      "argv": ["cargo", "test", "-p", "codex-core", "spawned_v2_terminal_events_publish_replayable_exact_run_outcomes", "--", "--nocapture"]
+    },
+    {
+      "name": "Join tool schema",
+      "argv": ["cargo", "test", "-p", "codex-core", "join_agent_tool_requires_exact_run_without_timeout", "--", "--nocapture"]
+    },
+    {
+      "name": "invalid Join inputs",
+      "argv": ["cargo", "test", "-p", "codex-core", "multi_agent_v2_join_rejects_invalid_arguments_targets_and_runs", "--", "--nocapture"]
+    },
+    {
+      "name": "Native Join integration",
+      "argv": ["cargo", "test", "-p", "codex-core", "--test", "all", "multi_agent_join", "--", "--nocapture"]
+    }
+  ],
+  "build": {
+    "env": {
+      "CARGO_BUILD_JOBS": "1",
+      "CARGO_PROFILE_RELEASE_DEBUG": "0",
+      "SOURCE_DATE_EPOCH": "1786063808"
+    },
+    "argv": [
+      "cargo",
+      "build",
+      "-p",
+      "codex-cli",
+      "--bin",
+      "codex",
+      "--release",
+      "--target",
+      "x86_64-pc-windows-msvc"
+    ],
+    "artifact": "{cargo_target}/x86_64-pc-windows-msvc/release/codex.exe"
+  },
+  "known_upstream_errata": [
+    "The rust-v0.147.0 Cargo.lock records workspace packages as 0.0.0; Cargo 1.95.0 mechanically normalizes those entries to 0.147.0 before the build."
+  ]
+}

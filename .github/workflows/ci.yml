@@ -1,0 +1,229 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  workflow_dispatch:
+    inputs:
+      full_payload:
+        description: Run the disposable upstream Codex patch/test/build lane
+        required: false
+        default: false
+        type: boolean
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+
+jobs:
+  quality:
+    name: Quality
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "26"
+          package-manager-cache: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
+        with:
+          toolchain: "1.95.0"
+          components: clippy,rustfmt
+      - name: Rust quality
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --all-targets
+      - name: Launcher and package tools
+        run: |
+          node --check npm/meta/bin/csa.js
+          node --check scripts/stage_npm_packages.mjs
+          node scripts/test_npm_launcher.mjs
+          python scripts/test_verify_patch_payload.py
+          python scripts/test_release_tools.py
+      - name: Immutable compatibility entries
+        if: github.event_name == 'pull_request'
+        env:
+          BASE_SHA: ${{ github.event.pull_request.base.sha }}
+        run: |
+          mkdir -p "$RUNNER_TEMP/compat-base"
+          git archive "$BASE_SHA" payload/codex | tar -x -C "$RUNNER_TEMP/compat-base"
+          python scripts/compatibility_audit.py immutability \
+            --baseline "$RUNNER_TEMP/compat-base/payload/codex" \
+            --candidate "$GITHUB_WORKSPACE/payload/codex"
+
+  node-compat:
+    name: Node ${{ matrix.node }}
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        node: ["22", "24"]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: ${{ matrix.node }}
+          package-manager-cache: false
+      - run: |
+          node --check npm/meta/bin/csa.js
+          node --check scripts/stage_npm_packages.mjs
+          node scripts/test_npm_launcher.mjs
+
+  platform:
+    name: ${{ matrix.id }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: win32-x64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            binary: csa.exe
+          - id: linux-x64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            binary: csa
+          - id: linux-arm64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: csa
+          - id: darwin-x64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: csa
+          - id: darwin-arm64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            binary: csa
+    runs-on: ${{ matrix.runner }}
+    env:
+      CSA_ROOT: ${{ runner.temp }}/csa
+      CARGO_TARGET_DIR: ${{ runner.temp }}/csa/cargo-target
+      HOME: ${{ runner.temp }}/csa/home
+      CODEX_HOME: ${{ runner.temp }}/csa/codex-home
+      NPM_CONFIG_CACHE: ${{ runner.temp }}/csa/npm-cache
+      NPM_CONFIG_PREFIX: ${{ runner.temp }}/csa/npm-prefix
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "26"
+          package-manager-cache: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
+        with:
+          toolchain: "1.95.0"
+          components: clippy
+      - name: Allocate ephemeral roots
+        run: node -e "for (const p of ['artifact','activation','codex-home','home','npm-cache','npm-prefix','tarballs']) require('node:fs').mkdirSync(require('node:path').join(process.env.CSA_ROOT,p),{recursive:true})"
+      - name: Native Rust lane
+        run: |
+          cargo test --all-targets --target ${{ matrix.target }}
+          cargo clippy --workspace --all-targets --all-features --target ${{ matrix.target }} -- -D warnings
+          cargo build --release --target ${{ matrix.target }}
+      - name: Launcher contract
+        run: node scripts/test_npm_launcher.mjs
+      - name: Stage npm packages
+        run: node scripts/stage_npm_packages.mjs --out "${{ env.CSA_ROOT }}/stage" --binary "${{ matrix.id }}=${{ env.CARGO_TARGET_DIR }}/${{ matrix.target }}/release/${{ matrix.binary }}"
+      - name: Pack npm candidates
+        run: |
+          npm pack "${{ env.CSA_ROOT }}/stage/meta" --json --pack-destination "${{ env.CSA_ROOT }}/tarballs"
+          npm pack "${{ env.CSA_ROOT }}/stage/platforms/${{ matrix.id }}" --json --pack-destination "${{ env.CSA_ROOT }}/tarballs"
+      - name: Temporary-prefix install
+        run: |
+          npm install --prefix "${{ env.CSA_ROOT }}/npm-prefix" --offline --no-audit --no-fund "${{ env.CSA_ROOT }}/tarballs/dslzl-csa-${{ matrix.id }}-0.1.0.tgz" "${{ env.CSA_ROOT }}/tarballs/dslzl-csa-0.1.0.tgz"
+          node scripts/test_installed_launcher.mjs "${{ env.CSA_ROOT }}/npm-prefix"
+          npm uninstall --prefix "${{ env.CSA_ROOT }}/npm-prefix" --offline --no-audit --no-fund "@dslzl/csa" "@dslzl/csa-${{ matrix.id }}"
+      - name: Record platform artifact
+        run: python scripts/ci_release.py platform --repository "${{ github.workspace }}" --platform "${{ matrix.id }}" --manager "${{ env.CARGO_TARGET_DIR }}/${{ matrix.target }}/release/${{ matrix.binary }}" --meta-tarball "${{ env.CSA_ROOT }}/tarballs/dslzl-csa-0.1.0.tgz" --npm-tarball "${{ env.CSA_ROOT }}/tarballs/dslzl-csa-${{ matrix.id }}-0.1.0.tgz" --isolation-root "${{ env.CSA_ROOT }}" --output "${{ env.CSA_ROOT }}/artifact/${{ matrix.id }}"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: platform-${{ matrix.id }}
+          path: ${{ env.CSA_ROOT }}/artifact
+          if-no-files-found: error
+
+  payload:
+    name: Exact Codex payload
+    if: github.event_name == 'workflow_dispatch' && inputs.full_payload
+    runs-on: windows-2025
+    env:
+      PAYLOAD_ROOT: ${{ runner.temp }}/csa-payload
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
+        with:
+          toolchain: "1.95.0"
+      - name: Clone exact upstream tag
+        shell: pwsh
+        run: |
+          git clone --filter=blob:none --no-checkout https://github.com/openai/codex.git "$env:PAYLOAD_ROOT/source"
+          git -C "$env:PAYLOAD_ROOT/source" checkout --detach be6e8eac029b183056b7e4402879f15d2c85f61b
+      - name: Apply, test, and build disposable payload
+        shell: pwsh
+        run: |
+          python scripts/run_patch_contract.py `
+            --manifest "$env:GITHUB_WORKSPACE/payload/codex/rust-v0.147.0-native-join-p1/manifest.toml" `
+            --source "$env:PAYLOAD_ROOT/source" `
+            --cargo-target "$env:PAYLOAD_ROOT/cargo-target" `
+            --output "$env:PAYLOAD_ROOT/payload-result.json"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: payload-windows-x64
+          path: ${{ env.PAYLOAD_ROOT }}/payload-result.json
+          if-no-files-found: error
+
+  manager-release-candidate:
+    name: Assemble CSA manager release candidate
+    if: github.event_name == 'workflow_dispatch'
+    needs: [quality, node-compat, platform]
+    runs-on: ubuntu-24.04
+    env:
+      CSA_RELEASE_ROOT: ${{ runner.temp }}/csa-release
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: platform-*
+          path: ${{ env.CSA_RELEASE_ROOT }}/inputs
+          merge-multiple: true
+      - name: Build release input
+        run: |
+          mkdir -p "${{ env.CSA_RELEASE_ROOT }}/output"
+          python scripts/ci_release.py input \
+            --repository "${{ github.workspace }}" \
+            --artifacts "${{ env.CSA_RELEASE_ROOT }}/inputs" \
+            --output "${{ env.CSA_RELEASE_ROOT }}/release-input.json" \
+            --revision "${{ github.sha }}" \
+            --ref "${{ github.ref }}" \
+            --repository-url "${{ github.server_url }}/${{ github.repository }}"
+      - name: Assemble checksummed manager candidate
+        run: python scripts/assemble_release_candidate.py --repository "${{ github.workspace }}" --input "${{ env.CSA_RELEASE_ROOT }}/release-input.json" --output "${{ env.CSA_RELEASE_ROOT }}/output/csa-manager-0.1.0"
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: csa-manager-0.1.0-release-candidate
+          path: ${{ env.CSA_RELEASE_ROOT }}/output/csa-manager-0.1.0
+          if-no-files-found: error
