@@ -644,11 +644,7 @@ fn activation_lifecycle_is_reversible_and_drift_falls_back_without_recursion() {
         &OfflineArtifactProvider,
     )
     .unwrap();
-    let manager = temp.join(if cfg!(windows) {
-        "manager.exe"
-    } else {
-        "manager"
-    });
+    let manager = temp.join(if cfg!(windows) { "csa.exe" } else { "csa" });
     write_executable(&manager, b"manager-forwarder");
 
     let error = plug(Some(root.clone()), &runner, &FixedClock, &fixture.official).unwrap_err();
@@ -809,11 +805,7 @@ fn interrupted_activation_recovers_to_unplugged() {
         &OfflineArtifactProvider,
     )
     .unwrap();
-    let manager = temp.join(if cfg!(windows) {
-        "manager.exe"
-    } else {
-        "manager"
-    });
+    let manager = temp.join(if cfg!(windows) { "csa.exe" } else { "csa" });
     write_executable(&manager, b"manager-forwarder");
     let paths = ManagerPaths::resolve(Some(root.clone())).unwrap();
 
