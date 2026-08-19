@@ -283,6 +283,7 @@ jobs:
           path: ${{ runner.temp }}/csa-patched-codex/release-assets
           if-no-files-found: error
           compression-level: 0
+          retention-days: 1
 
   publish:
     name: Publish ${{ needs.build.outputs.release_tag }}

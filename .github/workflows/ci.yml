@@ -186,6 +186,7 @@ jobs:
           name: platform-${{ matrix.id }}
           path: ${{ runner.temp }}/csa/artifact
           if-no-files-found: error
+          retention-days: 1
 
   payload:
     name: Exact Codex payload
@@ -234,3 +235,4 @@ jobs:
             ${{ runner.temp }}/csa-payload/payload-result.json
             ${{ runner.temp }}/csa-payload/cargo-target/x86_64-pc-windows-msvc/release/codex.exe
           if-no-files-found: error
+          retention-days: 1
