@@ -308,6 +308,12 @@ def test_release_stream_contracts() -> None:
     assert "steps.cargo-home.outputs.day" not in cache_action
     assert "inputs.target" not in cache_action
     assert "inputs.profile" not in cache_action
+
+    ci_workflow = (REPOSITORY / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert 'branches: ["main"]' in ci_workflow
+    assert "cancel-in-progress: true" in ci_workflow
     schema = json.loads(
         (REPOSITORY / "release" / "release-inputs.schema.json").read_bytes()
     )

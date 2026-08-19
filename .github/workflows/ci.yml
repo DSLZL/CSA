@@ -2,6 +2,7 @@ name: CI
 
 on:
   push:
+    branches: ["main"]
   pull_request:
   workflow_dispatch:
     inputs:
@@ -12,9 +13,8 @@ on:
         type: boolean
 
 concurrency:
-  # New commits supersede older runs of the same pull request. Push/manual runs remain independent.
-  group: csa-ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: csa-ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 permissions:
   contents: read
