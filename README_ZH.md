@@ -2,13 +2,15 @@
 
 CSA 提供一个 fail-closed 的 Rust 管理器和一份绑定具体 Codex 版本的 Native Join 补丁。它与官方 Codex CLI 并排安装，不覆盖官方安装。
 
-当前状态：**尚未发布，也未达到可发布状态**。Windows x64 已对 Codex `0.147.0` 完成本地验证；另外四个非 Windows 包仅配置了 CI，尚未真实执行。详见 [release-readiness.md](release-readiness.md)。
+当前状态：**发布由托管 Release workflow 门禁决定**。Windows x64 已完成 Codex `0.148.0` candidate 的本地构建和 focused 验证；compatibility workflow 会在发布前重跑完整 contract，CSA workflow 会构建全部五个平台。详见 [release-readiness.md](release-readiness.md)。
 
 [English README](README.md)
 
 ## 解决的问题
 
 Patched Codex 允许 Parent 对精确 child run 提交一次原生 Join，并一直等待到该 run 进入 terminal 状态。这样无需客户端反复 wait/status，同时保留 approval、cancellation、replay 和 shutdown 语义。
+
+CSA 新增的 `join_agent` 以普通 function 暴露，因为 provider 会拒绝在保留的 `collaboration` namespace 中增加新工具名；上游 multi-agent 工具仍保留原 namespace。
 
 开发时必须区分两个角色：
 
@@ -25,17 +27,17 @@ GitHub Release 分成两条独立流：`vX.Y.Z` 只放 CSA manager/npm 产物，
 
 | 平台 | 管理器/npm | Patched Codex payload |
 | --- | --- | --- |
-| Windows x64 | 本地 PASS；`windows-2025` CI 已配置 | `rust-v0.147.0-native-join-p1` PASS |
+| Windows x64 | 本地 PASS；`windows-2025` CI 已配置 | `rust-v0.148.0-native-join-p1` focused PASS；Release 必须通过完整 contract |
 | Linux x64 | CI 已配置，未验证 | 无 |
 | Linux arm64 | CI 已配置，未验证 | 无 |
 | macOS x64 | CI 已配置，未验证 | 无 |
 | macOS arm64 | CI 已配置，未验证 | 无 |
 
-当前兼容记录固定到上游 tag `rust-v0.147.0`、commit `be6e8eac029b183056b7e4402879f15d2c85f61b`、Rust `1.95.0` 和 `x86_64-pc-windows-msvc`。上游、preimage 或 artifact 发生漂移时会 fail closed。
+当前兼容 candidate 固定到上游 tag `rust-v0.148.0`、commit `3ba0f711642a888aec92a611a3f3b2211157ff89`、Rust `1.95.0` 和 `x86_64-pc-windows-msvc`。上游、preimage 或 artifact 发生漂移时会 fail closed。
 
 ## 前置条件
 
-- 保留可用的官方 Codex CLI `0.147.0`。
+- 保留可用的官方 Codex CLI `0.148.0`。
 - Node.js `>=18`；CI 覆盖 Node 22、24、26。
 - 当前平台的管理器包，以及已发布且哈希匹配的 CSA compatibility Release。目前只有 Windows x64 的 patched target 得到验证。
 - 只有从源码构建管理器或 payload 时才需要 Rust `1.95.0`。
@@ -68,7 +70,7 @@ csa status
 
 ```powershell
 $ManagerRoot = Join-Path $env:LOCALAPPDATA 'csa\managed'
-$Manifest = (Resolve-Path '.\payload\codex\rust-v0.147.0-native-join-p1\manifest.toml').Path
+$Manifest = (Resolve-Path '.\payload\codex\rust-v0.148.0-native-join-p1\manifest.toml').Path
 $Artifact = 'C:\绝对路径\patched\codex.exe'
 $Official = (Get-Command codex -CommandType Application | Select-Object -First 1).Source
 $OfficialNative = 'C:\官方 native codex.exe 的绝对路径'

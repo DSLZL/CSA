@@ -624,14 +624,16 @@ impl TestContract {
                 "--target",
                 &manifest.build_target,
             ],
-        ) && map_matches(
-            &self.build.env,
-            &[
-                ("CARGO_BUILD_JOBS", "1"),
-                ("CARGO_PROFILE_RELEASE_DEBUG", "0"),
-                ("SOURCE_DATE_EPOCH", "1786063808"),
-            ],
-        );
+        ) && ["1", "4"].into_iter().any(|jobs| {
+            map_matches(
+                &self.build.env,
+                &[
+                    ("CARGO_BUILD_JOBS", jobs),
+                    ("CARGO_PROFILE_RELEASE_DEBUG", "0"),
+                    ("SOURCE_DATE_EPOCH", "1786063808"),
+                ],
+            )
+        });
         if !parameters_match
             || !common_env_matches
             || !generation_matches

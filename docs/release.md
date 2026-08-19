@@ -2,18 +2,20 @@
 
 ## Current compatibility
 
-The repository currently has one reviewed compatibility entry:
+The current local compatibility candidate is:
 
 | Field | Value |
 | --- | --- |
-| compatibility ID | `rust-v0.147.0-native-join-p1` |
-| Codex version/tag | `0.147.0` / `rust-v0.147.0` |
-| upstream commit | `be6e8eac029b183056b7e4402879f15d2c85f61b` |
+| compatibility ID | `rust-v0.148.0-native-join-p1` |
+| Codex version/tag | `0.148.0` / `rust-v0.148.0` |
+| upstream commit | `3ba0f711642a888aec92a611a3f3b2211157ff89` |
 | Rust toolchain | `1.95.0` |
 | target | `x86_64-pc-windows-msvc` |
-| patched artifact SHA-256 | `C2DD9740354DE90E18600D1EFC242DB19E1D9832D0DCA72906D8E6F5E44F4C0A` |
+| patched artifact SHA-256 | `795930548B858AAE020B26C7C90464C5DD27C9B83CA0315BC78A072897747D6F` |
 
 Do not retarget this payload in place. A new Codex tag or changed preimage requires a new compatibility ID, updated expected hashes, a new ordered patch set, and the full gate matrix.
+
+The added `join_agent` remains in the default function namespace. OpenAI-compatible providers reject unrecognized additions to the reserved `collaboration` namespace; the upstream tools remain there unchanged.
 
 ## Compatibility update
 
