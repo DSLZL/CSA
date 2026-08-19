@@ -314,6 +314,13 @@ def test_release_stream_contracts() -> None:
     )
     assert 'branches: ["main"]' in ci_workflow
     assert "cancel-in-progress: true" in ci_workflow
+    for workflow, expected in (
+        (ci_workflow, 2),
+        (manager_workflow, 1),
+        (patched_workflow, 1),
+        (watcher, 2),
+    ):
+        assert workflow.count("retention-days: 1") == expected
     schema = json.loads(
         (REPOSITORY / "release" / "release-inputs.schema.json").read_bytes()
     )

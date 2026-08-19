@@ -285,12 +285,14 @@ jobs:
           name: compatibility-candidate-${{ needs.detect.outputs.compat_id }}
           path: ${{ runner.temp }}/csa-watch/release-assets
           if-no-files-found: error
+          retention-days: 1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: steps.outcome.outputs.success == 'false'
         with:
           name: compatibility-failure-patch-${{ needs.detect.outputs.upstream_commit }}
           path: ${{ runner.temp }}/csa-watch/failure.log
           if-no-files-found: error
+          retention-days: 1
       - name: Fail after preserving blocker evidence
         if: steps.outcome.outputs.success == 'false'
         run: exit 1
