@@ -259,10 +259,11 @@ def test_immutability(root: Path) -> None:
 
 
 def test_contract_shape() -> None:
-    payload = REPOSITORY / "payload" / "codex" / "rust-v0.147.0-native-join-p1"
+    payload = REPOSITORY / "payload" / "codex" / "rust-v0.148.0-native-join-p1"
     contract = load_contract(payload / "test-contract.json", payload.name)
     assert len(contract["generation"]) == 2
     assert len(contract["tests"]) == 7
+    assert contract["build"]["env"]["CARGO_BUILD_JOBS"] == "4"
     expected = f"Python {sys_platform.python_version()}"
     execution = execute_version(Path(sys.executable).resolve(), expected)
     assert Path(execution["argv"][0]).is_absolute()
@@ -280,16 +281,39 @@ def test_release_stream_contracts() -> None:
     )
     assert "GIT_CONFIG_KEY_0: core.autocrlf" in watcher
     assert watcher.count('cron: "0 * * * *"') == 1
-    assert watcher.count("Codex source must not live inside the CSA repository") == 2
-    assert watcher.count('--branch "$env:UPSTREAM_TAG" --single-branch') == 2
+    assert watcher.count("Codex source must not live inside the CSA repository") == 1
+    assert watcher.count('--branch "$env:UPSTREAM_TAG" --single-branch') == 1
     assert 'git add -- "payload/codex/$env:COMPAT_ID"' in watcher
 
-    manager_workflow = (REPOSITORY / ".github" / "workflows" / "ci.yml").read_text(
+    patched_workflow = (
+        REPOSITORY / ".github" / "workflows" / "release-patched-codex.yml"
+    ).read_text(encoding="utf-8")
+    assert patched_workflow.count("Codex source must not live inside the CSA repository") == 1
+    assert 'default: "rust-v0.148.0-native-join-p1"' in patched_workflow
+
+    manager_workflow = (
+        REPOSITORY / ".github" / "workflows" / "release-csa.yml"
+    ).read_text(
         encoding="utf-8"
     )
     assert "GIT_CONFIG_KEY_0: core.autocrlf" in manager_workflow
-    assert "manager-release-candidate:" in manager_workflow
-    assert "csa-manager-0.1.0-release-candidate" in manager_workflow
+    assert manager_workflow.count("needs: validate") == 2
+    assert "needs: [validate, quality, build]" in manager_workflow
+    assert "csa-release-${{ matrix.id }}" in manager_workflow
+
+    cache_action = (
+        REPOSITORY / ".github" / "actions" / "setup-codex-rust-cache" / "action.yml"
+    ).read_text(encoding="utf-8")
+    assert "CARGO_BUILD_JOBS=$([Environment]::ProcessorCount)" in cache_action
+    assert "steps.cargo-home.outputs.day" not in cache_action
+    assert "inputs.target" not in cache_action
+    assert "inputs.profile" not in cache_action
+
+    ci_workflow = (REPOSITORY / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    assert 'branches: ["main"]' in ci_workflow
+    assert "cancel-in-progress: true" in ci_workflow
     schema = json.loads(
         (REPOSITORY / "release" / "release-inputs.schema.json").read_bytes()
     )

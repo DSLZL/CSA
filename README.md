@@ -2,13 +2,15 @@
 
 CSA packages a fail-closed manager and a version-pinned Codex patch that adds one native `join` operation for child runs. It installs beside the official Codex CLI and never replaces it.
 
-Current status: **not published and not release-ready**. Windows x64 is locally verified for Codex `0.147.0`; the four non-Windows package lanes are configured but have not run. See [release-readiness.md](release-readiness.md).
+Current status: **publication is gated by the hosted Release workflows**. Windows x64 has a locally built and focused-verified Codex `0.148.0` candidate; the compatibility workflow reruns the complete contract before publishing, and the CSA workflow builds all five manager platforms. See [release-readiness.md](release-readiness.md).
 
 [中文说明](README_ZH.md)
 
 ## Why it exists
 
 The patched runtime lets a parent submit one native Join and remain pending until the exact child run becomes terminal. It removes client-side wait/status polling while preserving approval, cancellation, replay, and shutdown behavior.
+
+CSA exposes the added `join_agent` as a normal function because providers reject new tool names in the reserved `collaboration` namespace. The upstream multi-agent tools keep their original namespace.
 
 The package keeps two roles separate:
 
@@ -25,17 +27,17 @@ GitHub Releases use two separate streams: `vX.Y.Z` contains CSA manager/npm arti
 
 | Platform | Manager/npm lane | Patched Codex payload |
 | --- | --- | --- |
-| Windows x64 | local PASS; CI configured on `windows-2025` | `rust-v0.147.0-native-join-p1` PASS |
+| Windows x64 | local PASS; CI configured on `windows-2025` | `rust-v0.148.0-native-join-p1` focused PASS; Release requires the full contract |
 | Linux x64 | CI configured, not verified | none |
 | Linux arm64 | CI configured, not verified | none |
 | macOS x64 | CI configured, not verified | none |
 | macOS arm64 | CI configured, not verified | none |
 
-The current compatibility record binds upstream tag `rust-v0.147.0`, commit `be6e8eac029b183056b7e4402879f15d2c85f61b`, Rust `1.95.0`, and target `x86_64-pc-windows-msvc`. Any upstream or artifact drift fails closed.
+The current compatibility candidate binds upstream tag `rust-v0.148.0`, commit `3ba0f711642a888aec92a611a3f3b2211157ff89`, Rust `1.95.0`, and target `x86_64-pc-windows-msvc`. Any upstream or artifact drift fails closed.
 
 ## Prerequisites
 
-- Official Codex CLI `0.147.0`, kept installed and discoverable.
+- Official Codex CLI `0.148.0`, kept installed and discoverable.
 - Node.js `>=18`; CI covers Node 22, 24, and 26.
 - A supported platform manager package and a published, checksum-matched CSA compatibility Release. Windows x64 is the only patched target currently verified.
 - Rust `1.95.0` only when building the manager or patched payload from source.
@@ -70,7 +72,7 @@ For offline diagnosis or local payload development, use absolute paths. Passing 
 
 ```powershell
 $ManagerRoot = Join-Path $env:LOCALAPPDATA 'csa\managed'
-$Manifest = (Resolve-Path '.\payload\codex\rust-v0.147.0-native-join-p1\manifest.toml').Path
+$Manifest = (Resolve-Path '.\payload\codex\rust-v0.148.0-native-join-p1\manifest.toml').Path
 $Artifact = 'C:\absolute\path\to\patched\codex.exe'
 $Official = (Get-Command codex -CommandType Application | Select-Object -First 1).Source
 $OfficialNative = 'C:\absolute\path\to\official\native\codex.exe'
@@ -143,3 +145,7 @@ If a persistent PATH entry was added manually, remove only the manager `bin` ent
 - This project does not hot-patch a running Codex process, silently modify profiles, download from arbitrary origins, or support arbitrary Codex versions. Compatibility publication is eligible only after a reviewed compatibility PR is merged to the default branch.
 
 Licensed under [MIT](LICENSE). Upstream and dependency notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Link
+
+- [LINUX DO](https://linux.do/)

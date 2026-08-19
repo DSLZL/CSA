@@ -845,6 +845,18 @@ fn manifest_types_are_strict() {
         .join("test-contract.json");
     let contract: Value = serde_json::from_slice(&fs::read(&contract_path).unwrap()).unwrap();
 
+    let mut parallel_env = contract.clone();
+    parallel_env["build"]["env"]["CARGO_BUILD_JOBS"] = Value::String("4".to_owned());
+    fs::write(
+        &contract_path,
+        serde_json::to_vec_pretty(&parallel_env).unwrap(),
+    )
+    .unwrap();
+    LoadedCompatibility::load(&fixture.manifest)
+        .unwrap()
+        .test_contract()
+        .unwrap();
+
     let mut changed_env = contract.clone();
     changed_env["build"]["env"]["CARGO_BUILD_JOBS"] = Value::String("2".to_owned());
     fs::write(

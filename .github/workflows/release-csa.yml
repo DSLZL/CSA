@@ -1,0 +1,326 @@
+name: Release CSA
+
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: CSA version to release (without the v prefix)
+        required: true
+        default: "0.1.0"
+        type: string
+
+concurrency:
+  group: csa-release-${{ inputs.version }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: core.autocrlf
+  GIT_CONFIG_VALUE_0: "false"
+
+jobs:
+  validate:
+    name: Validate release request
+    runs-on: ubuntu-24.04
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+      tag: ${{ steps.version.outputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - id: version
+        name: Validate version and source ref
+        env:
+          REQUESTED_VERSION: ${{ inputs.version }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          python - <<'PY'
+          import json
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          requested = os.environ["REQUESTED_VERSION"].strip()
+          if not re.fullmatch(r"\d+\.\d+\.\d+(?:[-+][0-9A-Za-z.-]+)?", requested):
+              raise SystemExit(f"invalid release version: {requested!r}")
+
+          cargo = tomllib.loads(Path("Cargo.toml").read_text(encoding="utf-8"))
+          cargo_version = cargo["package"]["version"]
+          matrix = json.loads(Path("release/support-matrix.json").read_text(encoding="utf-8"))
+          matrix_version = matrix["manager_version"]
+
+          if requested != cargo_version or requested != matrix_version:
+              raise SystemExit(
+                  "version mismatch: "
+                  f"requested={requested}, Cargo.toml={cargo_version}, "
+                  f"release/support-matrix.json={matrix_version}"
+              )
+
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as f:
+              f.write(f"version={requested}\n")
+              f.write(f"tag=v{requested}\n")
+          PY
+
+          if [ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]; then
+            echo "CSA releases must be dispatched from the default branch '$DEFAULT_BRANCH'; selected ref is '$GITHUB_REF_NAME'." >&2
+            exit 2
+          fi
+
+  quality:
+    name: Release quality gate
+    needs: validate
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
+        with:
+          components: clippy,rustfmt
+
+      - name: Set up Cargo downloads and sccache
+        uses: ./.github/actions/setup-codex-rust-cache
+        with:
+          cache-scope: csa-manager-${{ hashFiles('Cargo.lock') }}
+          toolchain: "1.95.0"
+
+      - name: Validate Rust source
+        run: |
+          cargo fmt --all -- --check
+          cargo clippy --workspace --all-targets --all-features -- -D warnings
+          cargo test --all-targets
+
+      - name: Rust cache statistics
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
+
+  build:
+    name: Build ${{ matrix.id }}
+    needs: validate
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - id: windows-x86_64
+            runner: windows-2025
+            target: x86_64-pc-windows-msvc
+            binary: csa.exe
+            archive: zip
+          - id: linux-x86_64
+            runner: ubuntu-24.04
+            target: x86_64-unknown-linux-gnu
+            binary: csa
+            archive: tar
+          - id: linux-aarch64
+            runner: ubuntu-24.04-arm
+            target: aarch64-unknown-linux-gnu
+            binary: csa
+            archive: tar
+          - id: macos-x86_64
+            runner: macos-15-intel
+            target: x86_64-apple-darwin
+            binary: csa
+            archive: tar
+          - id: macos-aarch64
+            runner: macos-15
+            target: aarch64-apple-darwin
+            binary: csa
+            archive: tar
+
+    runs-on: ${{ matrix.runner }}
+
+    steps:
+      - name: Configure isolated build root
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "csa-release"
+          @(
+            "CSA_RELEASE_ROOT=$root"
+            "CARGO_TARGET_DIR=$(Join-Path $root 'cargo-target')"
+          ) | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+          New-Item -ItemType Directory -Force $root | Out-Null
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
+
+      - name: Set up Cargo downloads and sccache
+        uses: ./.github/actions/setup-codex-rust-cache
+        with:
+          cache-scope: csa-manager-${{ hashFiles('Cargo.lock') }}
+          toolchain: "1.95.0"
+
+      - name: Build release binary
+        shell: pwsh
+        run: cargo build --locked --release --target "${{ matrix.target }}"
+
+      - name: Smoke test release binary
+        shell: pwsh
+        run: |
+          $binary = Join-Path $env:CARGO_TARGET_DIR "${{ matrix.target }}/release/${{ matrix.binary }}"
+          if (-not (Test-Path -LiteralPath $binary -PathType Leaf)) {
+            throw "release binary missing: $binary"
+          }
+          & $binary --version
+          if ($LASTEXITCODE -ne 0) {
+            throw "release binary smoke test failed with exit code $LASTEXITCODE"
+          }
+
+      - name: Package one platform asset
+        id: package
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          $stage = Join-Path $env:CSA_RELEASE_ROOT "stage"
+          $assets = Join-Path $env:CSA_RELEASE_ROOT "assets"
+          New-Item -ItemType Directory -Force $stage, $assets | Out-Null
+
+          $binary = Join-Path $env:CARGO_TARGET_DIR "${{ matrix.target }}/release/${{ matrix.binary }}"
+          Copy-Item -LiteralPath $binary -Destination (Join-Path $stage "${{ matrix.binary }}")
+
+          foreach ($file in @("LICENSE", "README.md", "README_ZH.md", "THIRD_PARTY_NOTICES.md")) {
+            if (Test-Path -LiteralPath $file -PathType Leaf) {
+              Copy-Item -LiteralPath $file -Destination (Join-Path $stage $file)
+            }
+          }
+
+          if ("${{ matrix.archive }}" -eq "zip") {
+            $name = "csa-v$env:VERSION-${{ matrix.id }}.zip"
+            $destination = Join-Path $assets $name
+            Compress-Archive -Path (Join-Path $stage "*") -DestinationPath $destination -CompressionLevel Optimal
+          } else {
+            $name = "csa-v$env:VERSION-${{ matrix.id }}.tar.gz"
+            $destination = Join-Path $assets $name
+            & tar -C $stage -czf $destination .
+            if ($LASTEXITCODE -ne 0) {
+              throw "tar failed with exit code $LASTEXITCODE"
+            }
+          }
+
+          "asset=$destination" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
+          "asset_name=$name" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
+
+      - name: Rust cache statistics
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: csa-release-${{ matrix.id }}
+          path: ${{ steps.package.outputs.asset }}
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    name: Publish CSA ${{ needs.validate.outputs.tag }}
+    needs: [validate, quality, build]
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          pattern: csa-release-*
+          path: ${{ runner.temp }}/csa-release-assets
+          merge-multiple: true
+
+      - name: Validate exactly five platform assets
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+          cd "$RUNNER_TEMP/csa-release-assets"
+
+          expected=(
+            "csa-v${VERSION}-windows-x86_64.zip"
+            "csa-v${VERSION}-linux-x86_64.tar.gz"
+            "csa-v${VERSION}-linux-aarch64.tar.gz"
+            "csa-v${VERSION}-macos-x86_64.tar.gz"
+            "csa-v${VERSION}-macos-aarch64.tar.gz"
+          )
+
+          mapfile -t actual < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
+          mapfile -t wanted < <(printf '%s\n' "${expected[@]}" | sort)
+
+          if [ "${actual[*]}" != "${wanted[*]}" ]; then
+            echo "Unexpected release asset set." >&2
+            printf 'Expected:\n%s\n' "${wanted[*]}" >&2
+            printf 'Actual:\n%s\n' "${actual[*]}" >&2
+            exit 2
+          fi
+
+          sha256sum "${expected[@]}" > SHA256SUMS
+
+      - name: Create or validate annotated release tag
+        env:
+          TAG: ${{ needs.validate.outputs.tag }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+
+          if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+            existing="$(git rev-parse "$TAG^{commit}")"
+            if [ "$existing" != "$RELEASE_SHA" ]; then
+              echo "Tag $TAG already points to $existing, not $RELEASE_SHA." >&2
+              exit 2
+            fi
+          else
+            git -c user.name="github-actions[bot]" \
+                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                tag -a "$TAG" "$RELEASE_SHA" -m "CSA $TAG"
+            git push origin "refs/tags/$TAG"
+          fi
+
+      - name: Publish GitHub Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to overwrite it." >&2
+            exit 2
+          fi
+
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          CSA v${VERSION}
+
+          This Release contains the CSA manager only.
+          Each supported platform is published as an independent downloadable asset.
+          Patched Codex CLI builds are published separately under compat-<compat_id> Releases.
+          EOF
+
+          mapfile -t assets < <(find "$RUNNER_TEMP/csa-release-assets" -maxdepth 1 -type f -print | sort)
+
+          gh release create "$TAG" "${assets[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "CSA v${VERSION}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"

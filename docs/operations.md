@@ -61,7 +61,7 @@ For a persistent user setup, use the operating system's user PATH editor or the 
 
 ## Health checks
 
-When unplugged, command resolution must reach the official launcher. When plugged, it must reach the manager shim. In both cases the supported binary reports `codex-cli 0.147.0`.
+When unplugged, command resolution must reach the official launcher. When plugged, it must reach the manager shim. In both cases the supported binary reports `codex-cli 0.148.0`.
 
 ```powershell
 Get-Command codex -All
@@ -104,8 +104,8 @@ Evidence may contain paths, versions, hashes, timestamps, and exit results. It m
 
 ## Known limitations
 
-- Only Codex `0.147.0` on Windows x64 has a verified patched payload.
+- Codex `0.148.0` on Windows x64 has a focused-verified current candidate; its Release workflow must pass the complete contract before publication.
 - Non-Windows manager/npm jobs exist but have not produced verified release artifacts.
 - POSIX process-group signal behavior is covered by the launcher test only when run on POSIX; it is not verified by the local Windows run.
-- Authenticated real-provider Native Join and production persistent activation are manual gates.
+- Extended authenticated real-provider lanes and production persistent activation remain manual gates; only the basic spawn/Join smoke has run.
 - `purge` removes only manager-owned data; it intentionally leaves external packages and official files alone.
