@@ -145,3 +145,7 @@ If a persistent PATH entry was added manually, remove only the manager `bin` ent
 - This project does not hot-patch a running Codex process, silently modify profiles, download from arbitrary origins, or support arbitrary Codex versions. Compatibility publication is eligible only after a reviewed compatibility PR is merged to the default branch.
 
 Licensed under [MIT](LICENSE). Upstream and dependency notices are in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+## Link
+
+- [LINUX DO](https://linux.do/)

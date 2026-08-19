@@ -143,3 +143,8 @@ npm uninstall --prefix $Prefix @dslzl/csa @dslzl/csa-win32-x64
 - 不热替换正在运行的 Codex，不静默修改 profile，不从任意来源下载，也不支持任意 Codex 版本。兼容 Release 只有在对应候选 PR 经评审并合并到默认分支后才允许发布。
 
 许可证为 [MIT](LICENSE)，上游和依赖声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
+
+
+## 友链
+
+- [LINUX DO](https://linux.do/)
