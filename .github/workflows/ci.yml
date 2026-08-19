@@ -11,6 +11,11 @@ on:
         default: false
         type: boolean
 
+concurrency:
+  # New commits supersede older runs of the same pull request. Push/manual runs remain independent.
+  group: csa-ci-${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 permissions:
   contents: read
 
@@ -39,11 +44,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
         with:
           components: clippy,rustfmt
+      - name: Set up Cargo downloads and sccache
+        uses: ./.github/actions/setup-codex-rust-cache
+        with:
+          cache-scope: csa-manager-${{ hashFiles('Cargo.lock') }}
+          target: host
+          profile: quality
+          toolchain: "1.95.0"
       - name: Rust quality
         run: |
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --all-features -- -D warnings
           cargo test --all-targets
+      - name: Rust cache statistics
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
       - name: Launcher and package tools
         run: |
           node --check npm/meta/bin/csa.js
@@ -82,6 +98,8 @@ jobs:
           node scripts/test_npm_launcher.mjs
 
   platform:
+    # EXPERIMENTAL: OpenAI-style fast PR path. Full platform verification runs on default-branch pushes or manual runs.
+    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch)
     name: ${{ matrix.id }}
     strategy:
       fail-fast: false
@@ -136,11 +154,22 @@ jobs:
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
         with:
           components: clippy
+      - name: Set up Cargo downloads and sccache
+        uses: ./.github/actions/setup-codex-rust-cache
+        with:
+          cache-scope: csa-manager-${{ hashFiles('Cargo.lock') }}
+          target: ${{ matrix.target }}
+          profile: test-clippy-release
+          toolchain: "1.95.0"
       - name: Native Rust lane
         run: |
           cargo test --all-targets --target ${{ matrix.target }}
           cargo clippy --workspace --all-targets --all-features --target ${{ matrix.target }} -- -D warnings
           cargo build --release --target ${{ matrix.target }}
+      - name: Rust cache statistics
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
       - name: Launcher contract
         run: node scripts/test_npm_launcher.mjs
       - name: Stage npm packages
@@ -180,6 +209,13 @@ jobs:
         with:
           python-version: "3.13"
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
+      - name: Set up Cargo downloads and sccache
+        uses: ./.github/actions/setup-codex-rust-cache
+        with:
+          cache-scope: codex-be6e8eac029b183056b7e4402879f15d2c85f61b
+          target: x86_64-pc-windows-msvc
+          profile: exact-release-contract
+          toolchain: "1.95.0"
       - name: Clone exact upstream tag
         shell: pwsh
         run: |
@@ -193,6 +229,10 @@ jobs:
             --source "$env:PAYLOAD_ROOT/source" `
             --cargo-target "$env:PAYLOAD_ROOT/cargo-target" `
             --output "$env:PAYLOAD_ROOT/payload-result.json"
+      - name: Rust cache statistics
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: payload-windows-x64

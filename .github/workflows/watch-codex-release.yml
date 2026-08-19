@@ -5,6 +5,11 @@ on:
     - cron: "0 * * * *"
   workflow_dispatch:
 
+concurrency:
+  # Match Codex scheduled-workflow behavior: never interrupt publication, keep at most one pending watcher.
+  group: csa-codex-payload-${{ github.repository }}
+  cancel-in-progress: false
+
 env:
   GIT_CONFIG_COUNT: 1
   GIT_CONFIG_KEY_0: core.autocrlf
@@ -135,6 +140,13 @@ jobs:
         with:
           python-version: "3.13"
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
+      - name: Set up Cargo downloads and sccache
+        uses: ./.github/actions/setup-codex-rust-cache
+        with:
+          cache-scope: codex-${{ needs.detect.outputs.upstream_commit }}
+          target: x86_64-pc-windows-msvc
+          profile: exact-release-contract
+          toolchain: "1.95.0"
       - id: clone
         name: Clone exact upstream tag
         continue-on-error: true
@@ -244,6 +256,10 @@ jobs:
           $code = $LASTEXITCODE
           Get-Content "$env:WATCH_ROOT/candidate.log"
           exit $code
+      - name: Rust cache statistics
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
       - id: outcome
         name: Record patch outcome
         if: always()
@@ -331,6 +347,13 @@ jobs:
         with:
           python-version: "3.13"
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
+      - name: Set up Cargo downloads and sccache
+        uses: ./.github/actions/setup-codex-rust-cache
+        with:
+          cache-scope: codex-${{ needs.detect.outputs.upstream_commit }}
+          target: x86_64-pc-windows-msvc
+          profile: exact-release-contract
+          toolchain: "1.95.0"
       - id: clone
         name: Clone exact reviewed upstream source
         continue-on-error: true
@@ -396,6 +419,10 @@ jobs:
           $code = $LASTEXITCODE
           Get-Content "$env:WATCH_ROOT/release.log"
           exit $code
+      - name: Rust cache statistics
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
       - id: outcome
         name: Record publication outcome
         if: always()
