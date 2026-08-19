@@ -301,6 +301,11 @@ def test_release_stream_contracts() -> None:
     assert "needs: [validate, quality, build]" in manager_workflow
     assert "csa-release-${{ matrix.id }}" in manager_workflow
 
+    for workflow in (manager_workflow, patched_workflow):
+        assert 'repos/$GITHUB_REPOSITORY/git/tags' in workflow
+        assert 'repos/$GITHUB_REPOSITORY/git/refs' in workflow
+        assert 'git push origin "refs/tags/$TAG"' not in workflow
+
     cache_action = (
         REPOSITORY / ".github" / "actions" / "setup-codex-rust-cache" / "action.yml"
     ).read_text(encoding="utf-8")

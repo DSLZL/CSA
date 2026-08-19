@@ -278,6 +278,7 @@ jobs:
 
       - name: Create or validate annotated release tag
         env:
+          GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.validate.outputs.tag }}
           RELEASE_SHA: ${{ github.sha }}
         run: |
@@ -291,10 +292,15 @@ jobs:
               exit 2
             fi
           else
-            git -c user.name="github-actions[bot]" \
-                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
-                tag -a "$TAG" "$RELEASE_SHA" -m "CSA $TAG"
-            git push origin "refs/tags/$TAG"
+            tag_sha="$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" \
+              -f tag="$TAG" \
+              -f message="CSA $TAG" \
+              -f object="$RELEASE_SHA" \
+              -f type=commit \
+              --jq .sha)"
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
+              -f ref="refs/tags/$TAG" \
+              -f sha="$tag_sha" >/dev/null
           fi
 
       - name: Publish GitHub Release
