@@ -1,0 +1,392 @@
+name: Release patched Codex CLI
+
+on:
+  workflow_dispatch:
+    inputs:
+      compat_id:
+        description: Reviewed compatibility ID under payload/codex/
+        required: true
+        default: "rust-v0.148.0-native-join-p1"
+        type: string
+
+concurrency:
+  group: csa-patched-codex-release-${{ inputs.compat_id }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+
+env:
+  CARGO_TERM_COLOR: always
+  GIT_CONFIG_COUNT: 1
+  GIT_CONFIG_KEY_0: core.autocrlf
+  GIT_CONFIG_VALUE_0: "false"
+
+jobs:
+  build:
+    name: Build exact patched Codex CLI
+    runs-on: windows-2025
+    outputs:
+      compat_id: ${{ steps.manifest.outputs.compat_id }}
+      release_tag: ${{ steps.manifest.outputs.release_tag }}
+      codex_version: ${{ steps.manifest.outputs.codex_version }}
+      upstream_tag: ${{ steps.manifest.outputs.upstream_tag }}
+      upstream_commit: ${{ steps.manifest.outputs.upstream_commit }}
+      artifact_asset: ${{ steps.guard.outputs.artifact_asset }}
+
+    steps:
+      - name: Configure isolated build roots
+        shell: pwsh
+        run: |
+          $root = Join-Path $env:RUNNER_TEMP "csa-patched-codex"
+          $source = Join-Path $root "source"
+          @(
+            "PATCHED_CODEX_ROOT=$root"
+            "SOURCE_ROOT=$source"
+            "CARGO_TARGET_DIR=$(Join-Path $root 'cargo-target')"
+          ) | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+
+          $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP)
+          $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)
+          $source = [IO.Path]::GetFullPath($source)
+          $separator = [IO.Path]::DirectorySeparatorChar
+
+          if (-not $source.StartsWith("$runnerTemp$separator", [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Codex source must live below RUNNER_TEMP: $source"
+          }
+          if ($source.Equals($workspace, [StringComparison]::OrdinalIgnoreCase) -or
+              $source.StartsWith("$workspace$separator", [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Codex source must not live inside the CSA repository: $source"
+          }
+
+          New-Item -ItemType Directory -Force `
+            $root, `
+            (Join-Path $root "home"), `
+            (Join-Path $root "codex-home") | Out-Null
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - id: manifest
+        name: Resolve reviewed compatibility manifest
+        shell: pwsh
+        env:
+          REQUESTED_COMPAT_ID: ${{ inputs.compat_id }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          if ($env:GITHUB_REF_NAME -ne $env:DEFAULT_BRANCH) {
+            throw "Patched Codex Releases must be dispatched from the default branch '$env:DEFAULT_BRANCH'; selected ref is '$env:GITHUB_REF_NAME'."
+          }
+
+          @'
+          import os
+          import re
+          import tomllib
+          from pathlib import Path
+
+          compat_id = os.environ["REQUESTED_COMPAT_ID"].strip()
+          if not re.fullmatch(r"[A-Za-z0-9._-]+", compat_id):
+              raise SystemExit(f"unsafe compatibility ID: {compat_id!r}")
+
+          manifest_path = Path("payload") / "codex" / compat_id / "manifest.toml"
+          if not manifest_path.is_file():
+              raise SystemExit(f"reviewed compatibility manifest does not exist: {manifest_path}")
+
+          manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+          if manifest.get("compat_id") != compat_id:
+              raise SystemExit(
+                  f"compatibility ID mismatch: requested={compat_id}, manifest={manifest.get('compat_id')}"
+              )
+
+          target = manifest["build_target"]
+          toolchain = manifest["rust_toolchain"]
+          artifact = manifest["artifacts"][target]
+
+          # The current reviewed CSA compatibility lane is intentionally CLI-only
+          # and Windows x64. Fail closed instead of silently building other Codex products.
+          if target != "x86_64-pc-windows-msvc":
+              raise SystemExit(
+                  f"release-patched-codex.yml currently permits only x86_64-pc-windows-msvc; manifest requested {target}"
+              )
+          if artifact["filename"] != "codex.exe":
+              raise SystemExit(
+                  f"CLI-only release requires artifact filename codex.exe; manifest requested {artifact['filename']}"
+              )
+          if toolchain != "1.95.0":
+              raise SystemExit(
+                  f"workflow is SHA-pinned to the Rust 1.95.0 toolchain action; manifest requested {toolchain}"
+              )
+
+          values = {
+              "compat_id": compat_id,
+              "release_tag": f"compat-{compat_id}",
+              "codex_version": manifest["codex_version"],
+              "upstream_tag": manifest["upstream_tag"],
+              "upstream_commit": manifest["upstream_commit"],
+              "rust_toolchain": toolchain,
+              "build_target": target,
+              "artifact_filename": artifact["filename"],
+              "manifest_path": manifest_path.as_posix(),
+          }
+
+          output = Path(os.environ["GITHUB_OUTPUT"])
+          with output.open("a", encoding="utf-8") as f:
+              for key, value in values.items():
+                  f.write(f"{key}={value}\n")
+          '@ | python -
+
+      - name: Configure exact CLI artifact path
+        shell: pwsh
+        run: |
+          $artifact = Join-Path $env:CARGO_TARGET_DIR "${{ steps.manifest.outputs.build_target }}/release/${{ steps.manifest.outputs.artifact_filename }}"
+          "ARTIFACT_PATH=$artifact" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+
+      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
+
+      - name: Set up Cargo downloads and sccache
+        uses: ./.github/actions/setup-codex-rust-cache
+        with:
+          cache-scope: codex-${{ steps.manifest.outputs.upstream_commit }}
+          toolchain: "1.95.0"
+
+      - name: Clone exact reviewed upstream source
+        shell: pwsh
+        run: |
+          & git clone `
+            --filter=blob:none `
+            --no-checkout `
+            --branch "${{ steps.manifest.outputs.upstream_tag }}" `
+            --single-branch `
+            https://github.com/openai/codex.git `
+            "$env:SOURCE_ROOT"
+
+          if ($LASTEXITCODE -ne 0) {
+            throw "git clone failed with exit code $LASTEXITCODE"
+          }
+
+          & git -C "$env:SOURCE_ROOT" checkout --detach "${{ steps.manifest.outputs.upstream_commit }}"
+          if ($LASTEXITCODE -ne 0) {
+            throw "git checkout failed with exit code $LASTEXITCODE"
+          }
+
+          $peeled = (& git -C "$env:SOURCE_ROOT" rev-parse "refs/tags/${{ steps.manifest.outputs.upstream_tag }}^{commit}").Trim()
+          if (-not $peeled.Equals("${{ steps.manifest.outputs.upstream_commit }}", [StringComparison]::OrdinalIgnoreCase)) {
+            throw "upstream tag peeled to $peeled, expected ${{ steps.manifest.outputs.upstream_commit }}"
+          }
+
+      - name: Apply patch, run contract tests, and build only Codex CLI
+        shell: pwsh
+        env:
+          HOME: ${{ runner.temp }}/csa-patched-codex/home
+          CODEX_HOME: ${{ runner.temp }}/csa-patched-codex/codex-home
+        run: |
+          python scripts/run_patch_contract.py `
+            --manifest "$env:GITHUB_WORKSPACE/${{ steps.manifest.outputs.manifest_path }}" `
+            --source "$env:SOURCE_ROOT" `
+            --cargo-target "$env:CARGO_TARGET_DIR" `
+            --output "$env:PATCHED_CODEX_ROOT/contract-result.json"
+
+          if (-not (Test-Path -LiteralPath $env:ARTIFACT_PATH -PathType Leaf)) {
+            throw "patched Codex CLI was not produced: $env:ARTIFACT_PATH"
+          }
+
+      - name: Verify exact patched CLI against reviewed manifest
+        shell: pwsh
+        run: |
+          & git -C "$env:SOURCE_ROOT" reset --hard "${{ steps.manifest.outputs.upstream_commit }}"
+          if ($LASTEXITCODE -ne 0) { throw "git reset failed" }
+
+          & git -C "$env:SOURCE_ROOT" clean -ffd
+          if ($LASTEXITCODE -ne 0) { throw "git clean failed" }
+
+          python scripts/verify_patch_payload.py `
+            --manifest "$env:GITHUB_WORKSPACE/${{ steps.manifest.outputs.manifest_path }}" `
+            --source "$env:SOURCE_ROOT" `
+
+      - name: Stage formal Release manifest without modifying the reviewed entry
+        shell: pwsh
+        run: |
+          $payloadParent = Join-Path $env:PATCHED_CODEX_ROOT "release-payload"
+          $stagedEntry = Join-Path $payloadParent "${{ steps.manifest.outputs.compat_id }}"
+          New-Item -ItemType Directory -Force $payloadParent | Out-Null
+          Copy-Item `
+            -LiteralPath "$env:GITHUB_WORKSPACE/payload/codex/${{ steps.manifest.outputs.compat_id }}" `
+            -Destination $stagedEntry `
+            -Recurse
+
+          $stagedManifest = Join-Path $stagedEntry "manifest.toml"
+
+          # finalize() binds the formal compat-* download URL plus the exact
+          # codex.exe size/hash in the disposable staged copy only.
+          python scripts/compat_release.py finalize `
+            --manifest "$stagedManifest" `
+            --artifact "$env:ARTIFACT_PATH"
+
+          python scripts/verify_patch_payload.py `
+            --manifest "$stagedManifest" `
+            --source "$env:SOURCE_ROOT" `
+            --artifact "$env:ARTIFACT_PATH"
+
+          "STAGED_MANIFEST=$stagedManifest" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+
+      - name: Pack formal compatibility assets
+        shell: pwsh
+        run: |
+          python scripts/compat_release.py pack `
+            --manifest "$env:STAGED_MANIFEST" `
+            --artifact "$env:ARTIFACT_PATH" `
+            --source-commit "$env:GITHUB_SHA" `
+            --output "$env:PATCHED_CODEX_ROOT/release-assets"
+
+      - id: guard
+        name: Enforce CLI-only executable asset set
+        shell: pwsh
+        run: |
+          $root = "$env:PATCHED_CODEX_ROOT/release-assets"
+          $descriptorPath = Join-Path $root "compatibility-release.json"
+          if (-not (Test-Path -LiteralPath $descriptorPath -PathType Leaf)) {
+            throw "compatibility-release.json is missing"
+          }
+
+          $descriptor = Get-Content -LiteralPath $descriptorPath -Raw | ConvertFrom-Json
+          $expected = [string]$descriptor.artifact.asset
+          $executables = @(Get-ChildItem -LiteralPath $root -File | Where-Object {
+            $_.Extension -in @(".exe", ".app", ".msi", ".dmg")
+          })
+
+          if ($executables.Count -ne 1) {
+            throw "CLI-only Release must contain exactly one executable artifact; found $($executables.Count)"
+          }
+          if ($executables[0].Name -ne $expected) {
+            throw "unexpected executable asset '$($executables[0].Name)'; expected '$expected'"
+          }
+          if ($executables[0].Name -match "app-server|desktop|codex-app|exec-server|mcp") {
+            throw "forbidden non-CLI Codex product in Release assets: $($executables[0].Name)"
+          }
+
+          "artifact_asset=$expected" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
+
+      - name: Rust cache statistics
+        if: always()
+        continue-on-error: true
+        run: sccache --show-stats
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: patched-codex-cli-release-${{ steps.manifest.outputs.compat_id }}
+          path: ${{ runner.temp }}/csa-patched-codex/release-assets
+          if-no-files-found: error
+          compression-level: 0
+
+  publish:
+    name: Publish ${{ needs.build.outputs.release_tag }}
+    needs: build
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+
+      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: patched-codex-cli-release-${{ needs.build.outputs.compat_id }}
+          path: ${{ runner.temp }}/patched-codex-release-assets
+
+      - name: Recheck CLI-only Release contents
+        env:
+          EXPECTED_EXECUTABLE: ${{ needs.build.outputs.artifact_asset }}
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/patched-codex-release-assets"
+
+          python - "$root" "$EXPECTED_EXECUTABLE" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+
+          root = Path(sys.argv[1])
+          expected = sys.argv[2]
+          descriptor = json.loads((root / "compatibility-release.json").read_text(encoding="utf-8"))
+
+          if descriptor["artifact"]["asset"] != expected:
+              raise SystemExit("descriptor artifact does not match build output")
+
+          forbidden = ("app-server", "desktop", "codex-app", "exec-server", "mcp")
+          executable_suffixes = {".exe", ".app", ".msi", ".dmg"}
+          executables = [
+              p.name for p in root.iterdir()
+              if p.is_file() and p.suffix.lower() in executable_suffixes
+          ]
+
+          if executables != [expected]:
+              raise SystemExit(
+                  f"CLI-only Release must contain exactly {expected!r} as its executable asset; got {executables!r}"
+              )
+          if any(token in expected.lower() for token in forbidden):
+              raise SystemExit(f"forbidden non-CLI Codex product: {expected}")
+          PY
+
+      - name: Create or validate annotated compatibility tag
+        env:
+          TAG: ${{ needs.build.outputs.release_tag }}
+          RELEASE_SHA: ${{ github.sha }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+
+          if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+            existing="$(git rev-parse "$TAG^{commit}")"
+            if [ "$existing" != "$RELEASE_SHA" ]; then
+              echo "Tag $TAG already points to $existing, not $RELEASE_SHA." >&2
+              exit 2
+            fi
+          else
+            git -c user.name="github-actions[bot]" \
+                -c user.email="41898282+github-actions[bot]@users.noreply.github.com" \
+                tag -a "$TAG" "$RELEASE_SHA" -m "$TAG"
+            git push origin "refs/tags/$TAG"
+          fi
+
+      - name: Publish patched Codex CLI Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.release_tag }}
+          CODEX_VERSION: ${{ needs.build.outputs.codex_version }}
+          UPSTREAM_TAG: ${{ needs.build.outputs.upstream_tag }}
+          UPSTREAM_COMMIT: ${{ needs.build.outputs.upstream_commit }}
+          COMPAT_ID: ${{ needs.build.outputs.compat_id }}
+        run: |
+          set -euo pipefail
+
+          if gh release view "$TAG" --repo "$GITHUB_REPOSITORY" >/dev/null 2>&1; then
+            echo "Release $TAG already exists; refusing to overwrite it." >&2
+            exit 2
+          fi
+
+          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
+          Patched Codex CLI ${CODEX_VERSION}
+
+          Compatibility ID: ${COMPAT_ID}
+          Upstream: ${UPSTREAM_TAG} (${UPSTREAM_COMMIT})
+
+          This compatibility Release contains exactly one Codex executable product: the patched Codex CLI.
+          It does not publish Codex App, Codex Desktop, app-server, exec-server, MCP server, or other Codex binaries.
+          The remaining flat assets are CSA compatibility metadata, the reviewed patch payload, provenance, and checksums required for fail-closed installation and verification.
+          EOF
+
+          mapfile -t assets < <(find "$RUNNER_TEMP/patched-codex-release-assets" -maxdepth 1 -type f -print | sort)
+
+          gh release create "$TAG" "${assets[@]}" \
+            --repo "$GITHUB_REPOSITORY" \
+            --verify-tag \
+            --title "CSA patched Codex CLI ${CODEX_VERSION}" \
+            --notes-file "$RUNNER_TEMP/release-notes.md"

@@ -5,6 +5,8 @@
 .dev/
 .spec-workflow/
 .trellis/
+.vscode/
+
 AGENTS.md
 
 CSA_DEVELOPMENT_ISOLATION.md

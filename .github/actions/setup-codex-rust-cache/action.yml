@@ -5,13 +5,6 @@ inputs:
   cache-scope:
     description: Stable scope such as the CSA Cargo.lock hash or an exact upstream Codex commit.
     required: true
-  target:
-    description: Rust compilation target or host.
-    required: true
-  profile:
-    description: Logical build profile used to separate Cargo download caches.
-    required: false
-    default: ci
   toolchain:
     description: Rust toolchain identifier used in the cache key.
     required: false
@@ -28,7 +21,6 @@ runs:
         New-Item -ItemType Directory -Force $cargoHome | Out-Null
         "CARGO_HOME=$cargoHome" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
         "path=$cargoHome" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
-        "day=$([DateTime]::UtcNow.ToString('yyyy-MM-dd'))" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
 
     - name: Restore Cargo registry and git downloads
       uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
@@ -37,12 +29,9 @@ runs:
           ${{ steps.cargo-home.outputs.path }}/registry/index
           ${{ steps.cargo-home.outputs.path }}/registry/cache
           ${{ steps.cargo-home.outputs.path }}/git/db
-        key: csa-cargo-home-v3-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.target }}-${{ inputs.profile }}-${{ inputs.cache-scope }}-${{ steps.cargo-home.outputs.day }}
+        key: csa-cargo-home-v4-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.cache-scope }}
         restore-keys: |
-          csa-cargo-home-v3-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.target }}-${{ inputs.profile }}-${{ inputs.cache-scope }}-
-          csa-cargo-home-v3-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.target }}-${{ inputs.profile }}-
-          csa-cargo-home-v3-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.target }}-
-          csa-cargo-home-v3-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-
+          csa-cargo-home-v4-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-
 
     - name: Install pinned sccache
       uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
@@ -52,6 +41,7 @@ runs:
     - name: Enable GitHub Actions compiler cache
       shell: pwsh
       run: |
+        "CARGO_BUILD_JOBS=$([Environment]::ProcessorCount)" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
         "RUSTC_WRAPPER=sccache" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
         "SCCACHE_GHA_ENABLED=true" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
         "CARGO_INCREMENTAL=0" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
