@@ -321,11 +321,14 @@ def test_release_stream_contracts() -> None:
     assert "csa-cargo-home-v5-linux-amd64-1.95.0-codex-" in circleci
     assert "csa-rustup-v1-linux-amd64-rustup-1.29.0-rust-1.95.0-windows-msvc" in circleci
     assert "csa-xwin-v1-linux-amd64-cargo-xwin-0.23.0-msvc17-x86_64" in circleci
-    assert "csa-sccache-v2-linux-amd64-1.95.0-xwin-0.23.0-codex-" in circleci
+    assert "csa-sccache-v3-linux-amd64-1.95.0-xwin-0.23.0-codex-" in circleci
+    assert "csa-sccache-v2-" not in circleci
     for cargo_download in ("registry/index", "registry/cache", "git/db"):
         assert f"/cargo-home/{cargo_download}" in circleci
     assert "RUSTC_WRAPPER: sccache" in circleci
-    assert "SCCACHE_CACHE_SIZE: 450M" in circleci
+    assert "SCCACHE_CACHE_SIZE: 4G" in circleci
+    assert "SCCACHE_CACHE_SIZE: 450M" not in circleci
+    assert "caches: 7d" in circleci
     assert "sccache --max-cache-size" not in circleci
     assert "rustup/archive/1.29.0/x86_64-unknown-linux-gnu/rustup-init" in circleci
     assert "--cross-windows-msvc" in circleci
@@ -335,7 +338,11 @@ def test_release_stream_contracts() -> None:
     assert circleci.index('mkdir -p "$TMPDIR"') < circleci.index('temp_root="$(mktemp -d)"')
     assert circleci.count("when: always") == 1
     assert circleci.count("rust-v0.147.0-native-join-p2") == 1
-    assert circleci.count("rust-v0.148.0-native-join-p2") == 1
+    assert circleci.count("rust-v0.148.0-native-join-p2") == 2
+    assert "build_latest_patched_codex:" in circleci
+    assert "store_latest_patched_artifact:" in circleci
+    assert "condition: << parameters.store_artifact >>" in circleci
+    assert "store_artifact: << pipeline.parameters.store_latest_patched_artifact >>" in circleci
     assert "-p codex-code-mode-host" not in circleci
     assert "codex-$codex_version-win32-x64.tgz" in circleci
     assert "official Windows npm integrity mismatch" in circleci

@@ -4,6 +4,12 @@ parameters:
   build_patched_codex:
     type: boolean
     default: false
+  build_latest_patched_codex:
+    type: boolean
+    default: false
+  store_latest_patched_artifact:
+    type: boolean
+    default: false
 
 jobs:
   build-patched-codex:
@@ -16,9 +22,14 @@ jobs:
         type: string
       official_windows_npm_integrity:
         type: string
+      store_artifact:
+        type: boolean
+        default: true
     machine:
       image: ubuntu-2604:current
     resource_class: large.gen3
+    retention:
+      caches: 7d
     environment:
       CARGO_BUILD_JOBS: "4"
       CARGO_HOME: /home/circleci/.cache/csa/cargo-home
@@ -29,7 +40,7 @@ jobs:
       GIT_CONFIG_VALUE_0: "false"
       RUSTC_WRAPPER: sccache
       RUSTUP_HOME: /home/circleci/.cache/csa/rustup
-      SCCACHE_CACHE_SIZE: 450M
+      SCCACHE_CACHE_SIZE: 4G
       SCCACHE_DIR: /home/circleci/.cache/csa/sccache
       TMPDIR: /home/circleci/csa-tmp
       XWIN_ACCEPT_LICENSE: "1"
@@ -55,8 +66,8 @@ jobs:
 
       - restore_cache:
           keys:
-            - csa-sccache-v2-linux-amd64-1.95.0-xwin-0.23.0-codex-<< parameters.upstream_commit >>
-            - csa-sccache-v2-linux-amd64-1.95.0-xwin-0.23.0-codex-
+            - csa-sccache-v3-linux-amd64-1.95.0-xwin-0.23.0-codex-<< parameters.upstream_commit >>
+            - csa-sccache-v3-linux-amd64-1.95.0-xwin-0.23.0-codex-
 
       - run:
           name: Install pinned cross-build tools
@@ -290,15 +301,31 @@ jobs:
             - /home/circleci/.cache/csa/cargo-home/git/db
 
       - save_cache:
-          key: csa-sccache-v2-linux-amd64-1.95.0-xwin-0.23.0-codex-<< parameters.upstream_commit >>
+          key: csa-sccache-v3-linux-amd64-1.95.0-xwin-0.23.0-codex-<< parameters.upstream_commit >>
           paths:
             - /home/circleci/.cache/csa/sccache
 
-      - store_artifacts:
-          path: .artifacts/<< parameters.compat_id >>
-          destination: << parameters.compat_id >>
+      - when:
+          condition: << parameters.store_artifact >>
+          steps:
+            - store_artifacts:
+                path: .artifacts/<< parameters.compat_id >>
+                destination: << parameters.compat_id >>
 
 workflows:
+  csa-patched-latest:
+    when:
+      and:
+        - << pipeline.parameters.build_latest_patched_codex >>
+        - not: << pipeline.parameters.build_patched_codex >>
+    jobs:
+      - build-patched-codex:
+          name: codex-0.148.0-cross-windows-msvc-latest
+          compat_id: rust-v0.148.0-native-join-p2
+          upstream_tag: rust-v0.148.0
+          upstream_commit: 3ba0f711642a888aec92a611a3f3b2211157ff89
+          official_windows_npm_integrity: "sha512-/Jg8eYw0BqTGNUpnrzzWlK2kbu29NWg7t6pnUDEfxqpTUf+mK8r3okXQn60Zjbk9InYZ4d8SwSjrtOa+i5hSPw=="
+          store_artifact: << pipeline.parameters.store_latest_patched_artifact >>
   csa-patched-build:
     when: << pipeline.parameters.build_patched_codex >>
     jobs:
