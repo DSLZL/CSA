@@ -137,7 +137,6 @@ jobs:
             rustc_identity="$(rustc -Vv)"
             printf '%s\n' "$rustc_identity" |
               grep -Fq 'commit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860'
-            sccache --max-cache-size "$SCCACHE_CACHE_SIZE"
             sccache --start-server
             sccache --zero-stats
             cargo xwin cache xwin

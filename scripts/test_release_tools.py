@@ -325,6 +325,8 @@ def test_release_stream_contracts() -> None:
     for cargo_download in ("registry/index", "registry/cache", "git/db"):
         assert f"/cargo-home/{cargo_download}" in circleci
     assert "RUSTC_WRAPPER: sccache" in circleci
+    assert "SCCACHE_CACHE_SIZE: 450M" in circleci
+    assert "sccache --max-cache-size" not in circleci
     assert "rustup/archive/1.29.0/x86_64-unknown-linux-gnu/rustup-init" in circleci
     assert "--cross-windows-msvc" in circleci
     assert "- /tmp/csa-patched-codex" not in circleci
