@@ -13,6 +13,7 @@ source_hashes_sha256 = "4bac38e86591872002e912a8fc5cac06f367d7b3ced5cc0aef9340b2
 preimage_absent = [
   "codex-rs/core/src/agent/completion.rs",
   "codex-rs/core/src/tools/handlers/multi_agents_v2/join.rs",
+  "codex-rs/core/src/tools/handlers/multi_agents_v2/join_many.rs",
   "codex-rs/core/tests/suite/multi_agent_join.rs",
 ]
 
@@ -33,8 +34,8 @@ path = "patches/0004-join-protocol-schema-handler.patch"
 sha256 = "d9c197ba2059233463db19b1fc16add7083d8ef95c5ef07ebb4124dbad926a60"
 
 [[patches]]
-path = "patches/0005-tests-telemetry.patch"
-sha256 = "ad0f96c482336076300b7f331fd3d05b79f613bb8008ddab716766791173a999"
+path = "patches/0005-tests-telemetry-batch-join.patch"
+sha256 = "84467142ee66b2a9598f55e7b245fc482e617425ff825b329b5161b7d370b5e1"
 
 [[patches]]
 path = "patches/0006-csa-version-display.patch"

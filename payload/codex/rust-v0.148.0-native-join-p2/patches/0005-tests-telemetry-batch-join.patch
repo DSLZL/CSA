@@ -1,5 +1,5 @@
 diff --git a/codex-rs/analytics/src/reducer.rs b/codex-rs/analytics/src/reducer.rs
-index c7be5aab8..608b37ef8 100644
+index c7be5aa..608b37e 100644
 --- a/codex-rs/analytics/src/reducer.rs
 +++ b/codex-rs/analytics/src/reducer.rs
 @@ -3087,6 +3087,7 @@ fn collab_agent_tool_name(tool: &CollabAgentTool) -> &'static str {
@@ -10,14 +10,89 @@ index c7be5aab8..608b37ef8 100644
          CollabAgentTool::CloseAgent => "close_agent",
      }
  }
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 34f8f43..136afdc 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -659,32 +659,53 @@ impl AgentControl {
+             (MultiAgentVersion::Disabled | MultiAgentVersion::V1, _)
+             | (MultiAgentVersion::V2, _) => (None, None),
+         };
+-        let parent_history_mode = parent_thread.config_snapshot().await.history_mode;
+-        // `record_conversation_items` only queues persistence writes asynchronously.
+-        // Flush before snapshotting store history for a fork.
+-        parent_thread.ensure_rollout_materialized().await;
+-        parent_thread.flush_rollout().await?;
+-
++        let parent_config_snapshot = parent_thread.config_snapshot().await;
++        let parent_history_mode = parent_config_snapshot.history_mode;
+         let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
+             .then_some(ThreadHistoryMode::Paginated);
+-        let mut forked_rollout_items =
++        let mut forked_rollout_items = if parent_config_snapshot.ephemeral {
++            let history = parent_thread.session.clone_history().await;
++            let reference_context_item = history.reference_context_item();
++            let mut rollout_items = history
++                .into_annotated_items()
++                .into_iter()
++                .map(RolloutItem::ResponseItem)
++                .collect::<Vec<_>>();
++            if let Some(reference_context_item) = reference_context_item {
++                rollout_items.push(RolloutItem::TurnContext(reference_context_item));
++            }
++            rollout_items
++        } else {
++            // `record_conversation_items` only queues persistence writes asynchronously.
++            // Flush before snapshotting store history for a fork.
++            parent_thread.ensure_rollout_materialized().await;
++            parent_thread.flush_rollout().await?;
+             load_agent_model_context(state, parent_thread_id, parent_history_mode)
+                 .await?
+                 .ok_or_else(|| {
+                     CodexErr::Fatal(format!(
+                         "parent thread history unavailable for fork: {parent_thread_id}"
+                     ))
+-                })?;
++                })?
++        };
+
+-        let selected_capability_roots = forked_rollout_items
+-            .iter()
+-            .find_map(|item| {
+-                let RolloutItem::SessionMeta(meta_line) = item else {
+-                    return None;
+-                };
+-                Some(meta_line.meta.selected_capability_roots.clone())
+-            })
+-            .unwrap_or_default();
++        let selected_capability_roots = if parent_config_snapshot.ephemeral {
++            parent_thread
++                .session
++                .services
++                .selected_capability_roots
++                .clone()
++        } else {
++            forked_rollout_items
++                .iter()
++                .find_map(|item| {
++                    let RolloutItem::SessionMeta(meta_line) = item else {
++                        return None;
++                    };
++                    Some(meta_line.meta.selected_capability_roots.clone())
++                })
++                .unwrap_or_default()
++        };
+         if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
+             forked_rollout_items =
+                 truncate_rollout_to_last_n_fork_turns(forked_rollout_items, *last_n_turns);
 diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/tests.rs
-index 9a9065906..c6bc85927 100644
+index 9a90659..c6bc859 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
 @@ -199,6 +199,186 @@ use std::sync::Arc;
  use std::sync::OnceLock;
  use std::time::Duration as StdDuration;
- 
+
 +#[test]
 +fn agent_run_terminal_mapper_preserves_exact_outcomes() {
 +    let completed = EventMsg::TurnComplete(TurnCompleteEvent {
@@ -202,13 +277,13 @@ index 9a9065906..c6bc85927 100644
      Arc::new(config.to_mcp_config_with_loaded_plugins(
          &codex_core_plugins::PluginLoadOutcome::default(),
 diff --git a/codex-rs/core/src/test_support.rs b/codex-rs/core/src/test_support.rs
-index 47427773e..8088738f9 100644
+index 4742777..8088738 100644
 --- a/codex-rs/core/src/test_support.rs
 +++ b/codex-rs/core/src/test_support.rs
 @@ -67,6 +67,18 @@ pub fn set_deterministic_process_ids(enabled: bool) {
      unified_exec::set_deterministic_process_ids_for_tests(enabled);
  }
- 
+
 +pub async fn wait_for_test_sync_barrier_arrivals(id: &str, arrivals: usize) {
 +    crate::tools::handlers::test_sync::wait_for_barrier_arrivals_for_tests(id, arrivals).await;
 +}
@@ -225,7 +300,7 @@ index 47427773e..8088738f9 100644
      AuthManager::from_auth_for_testing(auth)
  }
 diff --git a/codex-rs/core/src/tools/handlers/mod.rs b/codex-rs/core/src/tools/handlers/mod.rs
-index 69af0c815..5a2018bed 100644
+index 69af0c8..5a2018b 100644
 --- a/codex-rs/core/src/tools/handlers/mod.rs
 +++ b/codex-rs/core/src/tools/handlers/mod.rs
 @@ -26,7 +26,7 @@ pub(crate) mod request_user_input_spec;
@@ -238,7 +313,7 @@ index 69af0c815..5a2018bed 100644
  mod tool_search;
  pub(crate) mod tool_search_spec;
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
-index b8a6f31f6..6844741b4 100644
+index b8a6f31..701b696 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs
 @@ -127,7 +127,7 @@ fn spawn_agent_tool_v2_requires_task_name_and_lists_visible_models() {
@@ -249,7 +324,7 @@ index b8a6f31f6..6844741b4 100644
 +        json!(["task_name", "run_id", "nickname"])
      );
  }
- 
+
 @@ -257,6 +257,7 @@ fn spawn_agent_tool_keeps_model_controls_when_spawn_metadata_is_hidden() {
      let ToolSpec::Function(ResponsesApiTool {
          description,
@@ -267,12 +342,12 @@ index b8a6f31f6..6844741b4 100644
 +        json!(["task_name", "run_id"])
 +    );
  }
- 
+
  #[test]
-@@ -432,6 +437,35 @@ fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
+@@ -432,6 +437,63 @@ fn wait_agent_tool_v2_uses_timeout_only_summary_output() {
      );
  }
- 
+
 +#[test]
 +fn join_agent_tool_requires_exact_run_without_timeout() {
 +    let ToolSpec::Function(ResponsesApiTool {
@@ -302,25 +377,204 @@ index b8a6f31f6..6844741b4 100644
 +    );
 +}
 +
++#[test]
++fn join_agents_tool_requires_all_exact_runs_in_one_call() {
++    let ToolSpec::Function(ResponsesApiTool {
++        description,
++        parameters,
++        output_schema,
++        ..
++    }) = create_join_agents_tool_v2()
++    else {
++        panic!("join_agents should be a function tool");
++    };
++    let properties = parameters
++        .properties
++        .as_ref()
++        .expect("join_agents should use object params");
++    assert_eq!(
++        parameters.required.as_ref(),
++        Some(&vec!["runs".to_string()])
++    );
++    assert!(properties.contains_key("runs"));
++    assert!(!properties.contains_key("timeout_ms"));
++    assert!(description.contains("parent resumes only once"));
++    assert_eq!(
++        output_schema.expect("join_agents output schema")["required"],
++        json!(["results"])
++    );
++}
++
  #[test]
  fn list_agents_tool_includes_path_prefix_and_agent_fields() {
      let ToolSpec::Function(ResponsesApiTool {
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
+index 5918bc3..263a0a3 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
+@@ -325,6 +325,50 @@ pub fn create_join_agent_tool_v2() -> ToolSpec {
+     })
+ }
+
++pub fn create_join_agents_tool_v2() -> ToolSpec {
++    let run_properties = BTreeMap::from([
++        (
++            "target".to_string(),
++            JsonSchema::string(Some(
++                "Relative or canonical task name, or native child thread id.".to_string(),
++            )),
++        ),
++        (
++            "run_id".to_string(),
++            JsonSchema::string(Some(
++                "Opaque exact run id returned by spawn_agent. Pass it unchanged.".to_string(),
++            )),
++        ),
++    ]);
++    let properties = BTreeMap::from([(
++        "runs".to_string(),
++        JsonSchema::array(
++            JsonSchema::object(
++                run_properties,
++                Some(vec!["target".to_string(), "run_id".to_string()]),
++                Some(false.into()),
++            ),
++            Some(
++                "All exact child runs returned by spawn_agent. Include every run once.".to_string(),
++            ),
++        ),
++    )]);
++
++    ToolSpec::Function(ResponsesApiTool {
++        name: "join_agents".to_string(),
++        description: "Wait for all supplied native subagent runs in one call. Use this after spawning multiple agents so the parent resumes only once, after every exact target/run_id pair has completed, failed, or been cancelled. Do not call join_agent separately for each run, repeatedly call wait_agent, or query status while this call is pending."
++            .to_string(),
++        strict: false,
++        defer_loading: None,
++        parameters: JsonSchema::object(
++            properties,
++            Some(vec!["runs".to_string()]),
++            Some(false.into()),
++        ),
++        output_schema: Some(join_agents_output_schema()),
++    })
++}
++
+ pub fn create_list_agents_tool() -> ToolSpec {
+     let properties = BTreeMap::from([(
+         "path_prefix".to_string(),
+@@ -587,6 +631,20 @@ fn join_agent_output_schema() -> Value {
+     })
+ }
+
++fn join_agents_output_schema() -> Value {
++    json!({
++        "type": "object",
++        "properties": {
++            "results": {
++                "type": "array",
++                "items": join_agent_output_schema()
++            }
++        },
++        "required": ["results"],
++        "additionalProperties": false
++    })
++}
++
+ fn agent_previous_status_output_schema(previous_status_description: &str) -> Value {
+     json!({
+         "type": "object",
 diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index 93a6d92aa..71f7f6cbb 100644
+index 93a6d92..77b8efe 100644
 --- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-@@ -16,6 +16,7 @@ use crate::thread_manager::thread_store_from_config;
+@@ -1,6 +1,9 @@
+ use super::*;
+ use crate::StartThreadOptions;
+ use crate::ThreadManager;
++use crate::agent::completion::AgentRunOutcome;
++use crate::agent::completion::AgentRunRef;
++use crate::agent::completion::AgentRunTerminal;
+ use crate::config::AgentRoleConfig;
+ use crate::config::DEFAULT_AGENT_MAX_DEPTH;
+ use crate::config::PermissionProfileSnapshot;
+@@ -16,6 +19,8 @@ use crate::thread_manager::thread_store_from_config;
  use crate::tools::context::ToolOutput;
  use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
  use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
 +use crate::tools::handlers::multi_agents_v2::JoinAgentHandler;
++use crate::tools::handlers::multi_agents_v2::JoinAgentsHandler;
  use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
  use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
  use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
-@@ -2866,6 +2867,161 @@ async fn resume_agent_rejects_when_depth_limit_exceeded() {
+@@ -833,7 +838,7 @@ async fn spawn_agent_full_history_fork_accepts_explicit_service_tier() {
+ }
+
+ #[tokio::test]
+-async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
++async fn multi_agent_v2_ephemeral_full_history_fork_uses_live_context_and_accepts_service_tier() {
+     #[derive(Debug, Deserialize)]
+     struct SpawnAgentResult {
+         task_name: String,
+@@ -844,6 +849,7 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
+         .with_model("gpt-5.4".to_string(), &session.services.models_manager)
+         .await;
+     let mut config = (*turn.config).clone();
++    config.ephemeral = true;
+     config
+         .features
+         .enable(Feature::MultiAgentV2)
+@@ -854,6 +860,9 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
+         .start_thread(StartThreadOptions::new((*turn.config).clone()))
+         .await
+         .expect("root thread should start");
++    root.thread
++        .inject_user_message_without_turn("ephemeral parent context".to_string())
++        .await;
+     session.services.agent_control = manager.agent_control();
+     session.thread_id = root.thread_id;
+     let session = Arc::new(session);
+@@ -885,17 +894,32 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
+         )
+         .await
+         .expect("spawned task name should resolve");
+-    let snapshot = manager
++    let child_thread = manager
+         .get_thread(child_thread_id)
+         .await
+-        .expect("spawned agent thread should exist")
+-        .config_snapshot()
+-        .await;
++        .expect("spawned agent thread should exist");
++    let snapshot = child_thread.config_snapshot().await;
+
+     assert_eq!(
+         snapshot.service_tier,
+         Some(ServiceTier::Fast.request_value().to_string())
+     );
++    assert!(
++        child_thread
++            .session
++            .clone_history()
++            .await
++            .raw_items()
++            .any(|item| matches!(
++                item,
++                ResponseItem::Message { content, .. }
++                    if content.iter().any(|content| matches!(
++                        content,
++                        ContentItem::InputText { text } if text == "ephemeral parent context"
++                    ))
++            )),
++        "ephemeral full-history fork should inherit live parent context"
++    );
+ }
+
+ #[tokio::test]
+@@ -2866,6 +2890,289 @@ async fn resume_agent_rejects_when_depth_limit_exceeded() {
      );
  }
- 
+
 +#[tokio::test]
 +async fn multi_agent_v2_join_rejects_invalid_arguments_targets_and_runs() {
 +    let (mut session, mut turn) = make_session_and_context().await;
@@ -476,11 +730,645 @@ index 93a6d92aa..71f7f6cbb 100644
 +    );
 +}
 +
++#[tokio::test]
++async fn join_agents_waits_for_every_exact_run_and_preserves_order() {
++    let (mut session, mut turn) = make_session_and_context().await;
++    let manager = thread_manager();
++    let root = manager
++        .start_thread(StartThreadOptions::new((*turn.config).clone()))
++        .await
++        .expect("root thread should start");
++    session.services.agent_control = manager.agent_control();
++    session.thread_id = root.thread_id;
++    let mut config = (*turn.config).clone();
++    config
++        .features
++        .enable(Feature::MultiAgentV2)
++        .expect("test config should allow feature update");
++    set_turn_config(&mut turn, config);
++    let session = Arc::new(session);
++    let turn = Arc::new(turn);
++
++    let mut agents = Vec::new();
++    let mut targets = Vec::new();
++    let mut runs = Vec::new();
++    let mut arguments = Vec::new();
++    for name in ["a", "b", "c"] {
++        let output = SpawnAgentHandlerV2::default()
++            .handle(invocation(
++                session.clone(),
++                turn.clone(),
++                "spawn_agent",
++                function_payload(json!({
++                    "message": format!("read fixture {name}"),
++                    "task_name": format!("worker_{name}")
++                })),
++            ))
++            .await
++            .expect("spawn worker");
++        let (output, _) = expect_text_output(output);
++        let output: serde_json::Value =
++            serde_json::from_str(&output).expect("spawn result should be json");
++        let target = output["task_name"]
++            .as_str()
++            .expect("spawn result task name")
++            .to_string();
++        let agent_id = session
++            .services
++            .agent_control
++            .resolve_agent_reference(session.thread_id, &turn.session_source, &target)
++            .await
++            .expect("spawned worker should resolve");
++        let run_id = format!("batch-run-{name}");
++        let run_ref = AgentRunRef::new(agent_id, run_id.clone());
++        session
++            .services
++            .agent_control
++            .register_run_running(run_ref.clone());
++        agents.push(agent_id);
++        targets.push(target.clone());
++        runs.push(run_ref);
++        arguments.push(json!({"target": target, "run_id": run_id}));
++    }
++
++    let mut pending = JoinAgentsHandler.handle(invocation(
++        session.clone(),
++        turn.clone(),
++        "join_agents",
++        function_payload(json!({"runs": arguments})),
++    ));
++    assert!(
++        timeout(Duration::from_millis(50), pending.as_mut())
++            .await
++            .is_err(),
++        "join_agents should remain pending before any run is terminal"
++    );
++
++    for index in 0..2 {
++        session.services.agent_control.complete_run(
++            runs[index].clone(),
++            Arc::new(AgentRunTerminal {
++                outcome: AgentRunOutcome::Completed {
++                    output: Some(format!("child-{index}")),
++                },
++            }),
++        );
++        assert!(
++            timeout(Duration::from_millis(50), pending.as_mut())
++                .await
++                .is_err(),
++            "join_agents should remain pending after only {} terminal runs",
++            index + 1
++        );
++    }
++
++    session.services.agent_control.complete_run(
++        runs[2].clone(),
++        Arc::new(AgentRunTerminal {
++            outcome: AgentRunOutcome::Completed {
++                output: Some("child-2".to_string()),
++            },
++        }),
++    );
++    let output = timeout(Duration::from_secs(1), pending.as_mut())
++        .await
++        .expect("join_agents should finish after every run is terminal")
++        .expect("join_agents should succeed");
++    let (content, success) = expect_text_output(output);
++    let result: serde_json::Value =
++        serde_json::from_str(&content).expect("join_agents result should be json");
++    let results = result["results"]
++        .as_array()
++        .expect("join_agents results should be an array");
++    assert_eq!(results.len(), 3);
++    for index in 0..3 {
++        assert_eq!(results[index]["target"], json!(targets[index]));
++        assert_eq!(results[index]["run_id"], json!(runs[index].run_id));
++        assert_eq!(results[index]["status"], json!("completed"));
++        assert_eq!(results[index]["output"], json!(format!("child-{index}")));
++    }
++    assert_eq!(success, Some(true));
++
++    for agent_id in agents {
++        let _ = manager
++            .agent_control()
++            .shutdown_live_agent(agent_id)
++            .await
++            .expect("shutdown spawned agent");
++    }
++}
++
  #[tokio::test]
  async fn wait_agent_rejects_non_positive_timeout() {
      let (session, turn) = make_session_and_context().await;
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2.rs
+index a2ad918..5be2fba 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_v2.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2.rs
+@@ -32,6 +32,7 @@ use serde_json::Value as JsonValue;
+ pub(crate) use followup_task::Handler as FollowupTaskHandler;
+ pub(crate) use interrupt_agent::Handler as InterruptAgentHandler;
+ pub(crate) use join::Handler as JoinAgentHandler;
++pub(crate) use join_many::Handler as JoinAgentsHandler;
+ pub(crate) use list_agents::Handler as ListAgentsHandler;
+ pub(crate) use send_message::Handler as SendMessageHandler;
+ pub(crate) use spawn::Handler as SpawnAgentHandler;
+@@ -40,6 +41,7 @@ pub(crate) use wait::Handler as WaitAgentHandler;
+ mod followup_task;
+ mod interrupt_agent;
+ mod join;
++mod join_many;
+ mod list_agents;
+ mod message_tool;
+ mod send_message;
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/join_many.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/join_many.rs
+new file mode 100644
+index 0000000..88fe28b
+--- /dev/null
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/join_many.rs
+@@ -0,0 +1,130 @@
++use super::*;
++use crate::tools::handlers::multi_agents_spec::create_join_agents_tool_v2;
++use codex_tools::ToolSpec;
++use futures::future::join_all;
++use std::collections::HashSet;
++
++pub(crate) struct Handler;
++
++impl ToolExecutor<ToolInvocation> for Handler {
++    fn tool_name(&self) -> ToolName {
++        ToolName::plain("join_agents")
++    }
++
++    fn spec(&self) -> ToolSpec {
++        create_join_agents_tool_v2()
++    }
++
++    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
++        Box::pin(self.handle_call(invocation))
++    }
++}
++
++impl Handler {
++    async fn handle_call(
++        &self,
++        invocation: ToolInvocation,
++    ) -> Result<Box<dyn ToolOutput>, FunctionCallError> {
++        let ToolInvocation {
++            session,
++            turn,
++            payload,
++            call_id,
++            ..
++        } = invocation;
++        let arguments = function_arguments(payload)?;
++        let args: JoinAgentsArgs = parse_arguments(&arguments)?;
++        if args.runs.is_empty() {
++            return Err(FunctionCallError::RespondToModel(
++                "runs must contain at least one exact target/run_id pair".to_string(),
++            ));
++        }
++
++        let mut seen = HashSet::new();
++        let mut resolved = Vec::with_capacity(args.runs.len());
++        for run in args.runs {
++            let run = join::resolve_join_target(&session, &turn, run).await?;
++            let key = (run.agent_id, run.run_ref.run_id.clone());
++            if !seen.insert(key) {
++                return Err(FunctionCallError::RespondToModel(
++                    "runs must not contain duplicate target/run_id pairs".to_string(),
++                ));
++            }
++            resolved.push(run);
++        }
++
++        let receiver_thread_ids = resolved.iter().map(|run| run.agent_id).collect::<Vec<_>>();
++        session
++            .emit_turn_item_started(
++                &turn,
++                &TurnItem::CollabAgentToolCall(join::join_item(
++                    call_id.clone(),
++                    session.thread_id,
++                    receiver_thread_ids.clone(),
++                    CollabAgentToolCallStatus::InProgress,
++                )),
++            )
++            .await;
++
++        let joined = join_all(
++            resolved
++                .into_iter()
++                .map(|run| join::join_run(&session, &turn, run)),
++        )
++        .await;
++        let status = if joined.iter().all(Result::is_ok) {
++            CollabAgentToolCallStatus::Completed
++        } else {
++            CollabAgentToolCallStatus::Failed
++        };
++        session
++            .emit_turn_item_completed(
++                &turn,
++                TurnItem::CollabAgentToolCall(join::join_item(
++                    call_id,
++                    session.thread_id,
++                    receiver_thread_ids,
++                    status,
++                )),
++            )
++            .await;
++
++        let results = joined.into_iter().collect::<Result<Vec<_>, _>>()?;
++        Ok(boxed_tool_output(JoinAgentsResult { results }))
++    }
++}
++
++impl CoreToolRuntime for Handler {
++    fn matches_kind(&self, payload: &ToolPayload) -> bool {
++        matches!(payload, ToolPayload::Function { .. })
++    }
++}
++
++#[derive(Debug, Deserialize)]
++#[serde(deny_unknown_fields)]
++struct JoinAgentsArgs {
++    runs: Vec<join::JoinAgentArgs>,
++}
++
++#[derive(Debug, Serialize)]
++struct JoinAgentsResult {
++    results: Vec<join::JoinAgentResult>,
++}
++
++impl ToolOutput for JoinAgentsResult {
++    fn log_preview(&self) -> String {
++        tool_output_json_text(self, "join_agents")
++    }
++
++    fn success_for_logging(&self) -> bool {
++        true
++    }
++
++    fn to_response_item(&self, call_id: &str, payload: &ToolPayload) -> ResponseInputItem {
++        tool_output_response_item(call_id, payload, self, Some(true), "join_agents")
++    }
++
++    fn code_mode_result(&self, _payload: &ToolPayload) -> JsonValue {
++        tool_output_code_mode_result(self, "join_agents")
++    }
++}
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/join.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/join.rs
+index baef332..8ee1c0c 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_v2/join.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/join.rs
+@@ -4,9 +4,12 @@ use crate::agent::completion::AgentRunRef;
+ use crate::agent::completion::AgentRunTerminal;
+ use crate::agent::completion::JoinError;
+ use crate::agent::completion::join_one;
++use crate::session::session::Session;
++use crate::session::turn_context::TurnContext;
+ use crate::tools::handlers::multi_agents_spec::create_join_agent_tool_v2;
+ use codex_protocol::ThreadId;
+ use codex_tools::ToolSpec;
++use std::sync::Arc;
+ use std::time::Instant;
+
+ pub(crate) struct Handler;
+@@ -39,31 +42,8 @@ impl Handler {
+         } = invocation;
+         let arguments = function_arguments(payload)?;
+         let args: JoinAgentArgs = parse_arguments(&arguments)?;
+-        if args.run_id.trim().is_empty() {
+-            return Err(FunctionCallError::RespondToModel(
+-                "run_id must be the non-empty opaque value returned by spawn_agent".to_string(),
+-            ));
+-        }
+-
+-        let agent_id = resolve_agent_target(&session, &turn, &args.target).await?;
+-        let receiver_agent = session
+-            .services
+-            .agent_control
+-            .ensure_agent_known(agent_id)
+-            .map_err(|err| collab_agent_error(agent_id, err))?;
+-        let agent_path = receiver_agent.agent_path.ok_or_else(|| {
+-            FunctionCallError::RespondToModel("target agent is missing an agent_path".to_string())
+-        })?;
+-        if agent_path.is_root() {
+-            return Err(FunctionCallError::RespondToModel(
+-                "root is not a spawned agent".to_string(),
+-            ));
+-        }
+-        if agent_id == session.thread_id {
+-            return Err(FunctionCallError::RespondToModel(
+-                "an agent cannot join its own run".to_string(),
+-            ));
+-        }
++        let resolved = resolve_join_target(&session, &turn, args).await?;
++        let agent_id = resolved.agent_id;
+
+         session
+             .emit_turn_item_started(
+@@ -71,111 +51,163 @@ impl Handler {
+                 &TurnItem::CollabAgentToolCall(join_item(
+                     call_id.clone(),
+                     session.thread_id,
+-                    agent_id,
++                    vec![agent_id],
+                     CollabAgentToolCallStatus::InProgress,
+                 )),
+             )
+             .await;
+
+-        let run_ref = AgentRunRef::new(agent_id, args.run_id);
+-        let started_at = Instant::now();
+-        turn.session_telemetry
+-            .counter("codex.multi_agent.join.started", /*inc*/ 1, &[]);
+-        tracing::debug!(
+-            parent_thread_id = %session.thread_id,
+-            child_thread_id = %agent_id,
+-            target = %agent_path,
+-            run_id = %run_ref.run_id,
+-            "agent run join started"
+-        );
+-        let terminal = match join_one(&session.services.agent_control, &run_ref).await {
+-            Ok(terminal) => {
+-                let outcome = terminal_outcome_name(terminal.as_ref());
+-                turn.session_telemetry.counter(
+-                    "codex.multi_agent.join.completed",
+-                    /*inc*/ 1,
+-                    &[("outcome", outcome)],
+-                );
+-                turn.session_telemetry.record_duration(
+-                    "codex.multi_agent.join.duration_ms",
+-                    started_at.elapsed(),
+-                    &[("outcome", outcome)],
+-                );
+-                tracing::debug!(
+-                    parent_thread_id = %session.thread_id,
+-                    child_thread_id = %agent_id,
+-                    target = %agent_path,
+-                    run_id = %run_ref.run_id,
+-                    outcome,
+-                    duration_ms = started_at.elapsed().as_millis(),
+-                    "agent run join completed"
+-                );
+-                session
+-                    .emit_turn_item_completed(
+-                        &turn,
+-                        TurnItem::CollabAgentToolCall(join_item(
+-                            call_id,
+-                            session.thread_id,
+-                            agent_id,
+-                            CollabAgentToolCallStatus::Completed,
+-                        )),
+-                    )
+-                    .await;
+-                terminal
+-            }
+-            Err(error) => {
+-                let error_kind = match &error {
+-                    JoinError::UnknownRun => "unknown_run",
+-                    JoinError::SourceClosed => "source_closed",
+-                    JoinError::Internal(_) => "internal",
+-                };
++        let result = join_run(&session, &turn, resolved).await;
++        let status = if result.is_ok() {
++            CollabAgentToolCallStatus::Completed
++        } else {
++            CollabAgentToolCallStatus::Failed
++        };
++        session
++            .emit_turn_item_completed(
++                &turn,
++                TurnItem::CollabAgentToolCall(join_item(
++                    call_id,
++                    session.thread_id,
++                    vec![agent_id],
++                    status,
++                )),
++            )
++            .await;
++
++        result.map(boxed_tool_output)
++    }
++}
++
++pub(super) struct ResolvedJoin {
++    pub(super) agent_id: ThreadId,
++    target: String,
++    pub(super) run_ref: AgentRunRef,
++}
++
++pub(super) async fn resolve_join_target(
++    session: &Arc<Session>,
++    turn: &Arc<TurnContext>,
++    args: JoinAgentArgs,
++) -> Result<ResolvedJoin, FunctionCallError> {
++    if args.run_id.trim().is_empty() {
++        return Err(FunctionCallError::RespondToModel(
++            "run_id must be the non-empty opaque value returned by spawn_agent".to_string(),
++        ));
++    }
++
++    let agent_id = resolve_agent_target(session, turn, &args.target).await?;
++    let receiver_agent = session
++        .services
++        .agent_control
++        .ensure_agent_known(agent_id)
++        .map_err(|err| collab_agent_error(agent_id, err))?;
++    let agent_path = receiver_agent.agent_path.ok_or_else(|| {
++        FunctionCallError::RespondToModel("target agent is missing an agent_path".to_string())
++    })?;
++    if agent_path.is_root() {
++        return Err(FunctionCallError::RespondToModel(
++            "root is not a spawned agent".to_string(),
++        ));
++    }
++    if agent_id == session.thread_id {
++        return Err(FunctionCallError::RespondToModel(
++            "an agent cannot join its own run".to_string(),
++        ));
++    }
++
++    Ok(ResolvedJoin {
++        agent_id,
++        target: agent_path.to_string(),
++        run_ref: AgentRunRef::new(agent_id, args.run_id),
++    })
++}
++
++pub(super) async fn join_run(
++    session: &Arc<Session>,
++    turn: &Arc<TurnContext>,
++    resolved: ResolvedJoin,
++) -> Result<JoinAgentResult, FunctionCallError> {
++    let ResolvedJoin {
++        agent_id,
++        target,
++        run_ref,
++    } = resolved;
++    let started_at = Instant::now();
++    turn.session_telemetry
++        .counter("codex.multi_agent.join.started", /*inc*/ 1, &[]);
++    tracing::debug!(
++        parent_thread_id = %session.thread_id,
++        child_thread_id = %agent_id,
++        target = %target,
++        run_id = %run_ref.run_id,
++        "agent run join started"
++    );
++    let terminal = match join_one(&session.services.agent_control, &run_ref).await {
++        Ok(terminal) => {
++            let outcome = terminal_outcome_name(terminal.as_ref());
++            turn.session_telemetry.counter(
++                "codex.multi_agent.join.completed",
++                /*inc*/ 1,
++                &[("outcome", outcome)],
++            );
++            turn.session_telemetry.record_duration(
++                "codex.multi_agent.join.duration_ms",
++                started_at.elapsed(),
++                &[("outcome", outcome)],
++            );
++            tracing::debug!(
++                parent_thread_id = %session.thread_id,
++                child_thread_id = %agent_id,
++                target = %target,
++                run_id = %run_ref.run_id,
++                outcome,
++                duration_ms = started_at.elapsed().as_millis(),
++                "agent run join completed"
++            );
++            terminal
++        }
++        Err(error) => {
++            let error_kind = match &error {
++                JoinError::UnknownRun => "unknown_run",
++                JoinError::SourceClosed => "source_closed",
++                JoinError::Internal(_) => "internal",
++            };
++            turn.session_telemetry.counter(
++                "codex.multi_agent.join.failed",
++                /*inc*/ 1,
++                &[("reason", error_kind)],
++            );
++            if error_kind == "unknown_run" {
+                 turn.session_telemetry.counter(
+-                    "codex.multi_agent.join.failed",
++                    "codex.multi_agent.join.unknown_run",
+                     /*inc*/ 1,
+-                    &[("reason", error_kind)],
+-                );
+-                if error_kind == "unknown_run" {
+-                    turn.session_telemetry.counter(
+-                        "codex.multi_agent.join.unknown_run",
+-                        /*inc*/ 1,
+-                        &[],
+-                    );
+-                }
+-                turn.session_telemetry.record_duration(
+-                    "codex.multi_agent.join.duration_ms",
+-                    started_at.elapsed(),
+-                    &[("outcome", "failed")],
++                    &[],
+                 );
+-                tracing::warn!(
+-                    parent_thread_id = %session.thread_id,
+-                    child_thread_id = %agent_id,
+-                    target = %agent_path,
+-                    run_id = %run_ref.run_id,
+-                    error_kind,
+-                    duration_ms = started_at.elapsed().as_millis(),
+-                    "agent run join failed"
+-                );
+-                session
+-                    .emit_turn_item_completed(
+-                        &turn,
+-                        TurnItem::CollabAgentToolCall(join_item(
+-                            call_id,
+-                            session.thread_id,
+-                            agent_id,
+-                            CollabAgentToolCallStatus::Failed,
+-                        )),
+-                    )
+-                    .await;
+-                return Err(join_error(agent_path.as_ref(), error));
+             }
+-        };
++            turn.session_telemetry.record_duration(
++                "codex.multi_agent.join.duration_ms",
++                started_at.elapsed(),
++                &[("outcome", "failed")],
++            );
++            tracing::warn!(
++                parent_thread_id = %session.thread_id,
++                child_thread_id = %agent_id,
++                target = %target,
++                run_id = %run_ref.run_id,
++                error_kind,
++                duration_ms = started_at.elapsed().as_millis(),
++                "agent run join failed"
++            );
++            return Err(join_error(&target, error));
++        }
++    };
+
+-        Ok(boxed_tool_output(JoinAgentResult::from_terminal(
+-            agent_path.to_string(),
+-            run_ref.run_id,
+-            terminal.as_ref(),
+-        )))
+-    }
++    Ok(JoinAgentResult::from_terminal(
++        target,
++        run_ref.run_id,
++        terminal.as_ref(),
++    ))
+ }
+
+ fn terminal_outcome_name(terminal: &AgentRunTerminal) -> &'static str {
+@@ -192,10 +224,10 @@ impl CoreToolRuntime for Handler {
+     }
+ }
+
+-fn join_item(
++pub(super) fn join_item(
+     call_id: String,
+     sender_thread_id: ThreadId,
+-    receiver_thread_id: ThreadId,
++    receiver_thread_ids: Vec<ThreadId>,
+     status: CollabAgentToolCallStatus,
+ ) -> CollabAgentToolCallItem {
+     CollabAgentToolCallItem {
+@@ -203,7 +235,7 @@ fn join_item(
+         tool: CollabAgentTool::Join,
+         status,
+         sender_thread_id,
+-        receiver_thread_ids: vec![receiver_thread_id],
++        receiver_thread_ids,
+         receiver_agents: Vec::new(),
+         prompt: None,
+         model: None,
+@@ -227,13 +259,13 @@ fn join_error(target: &str, error: JoinError) -> FunctionCallError {
+
+ #[derive(Debug, Deserialize)]
+ #[serde(deny_unknown_fields)]
+-struct JoinAgentArgs {
+-    target: String,
+-    run_id: String,
++pub(super) struct JoinAgentArgs {
++    pub(super) target: String,
++    pub(super) run_id: String,
+ }
+
+ #[derive(Debug, Serialize)]
+-struct JoinAgentResult {
++pub(super) struct JoinAgentResult {
+     target: String,
+     run_id: String,
+     status: String,
 diff --git a/codex-rs/core/src/tools/handlers/test_sync.rs b/codex-rs/core/src/tools/handlers/test_sync.rs
-index 08d983b61..c9e5296e5 100644
+index 08d983b..c9e5296 100644
 --- a/codex-rs/core/src/tools/handlers/test_sync.rs
 +++ b/codex-rs/core/src/tools/handlers/test_sync.rs
 @@ -29,6 +29,7 @@ static BARRIERS: OnceLock<tokio::sync::Mutex<HashMap<String, BarrierState>>> = O
@@ -489,7 +1377,7 @@ index 08d983b61..c9e5296e5 100644
      participants: usize,
 +    arrivals: usize,
  }
- 
+
  #[derive(Debug, Deserialize)]
 @@ -134,7 +135,7 @@ async fn wait_on_barrier(args: BarrierArgs) -> Result<(), FunctionCallError> {
      let barrier_id = args.id.clone();
@@ -525,10 +1413,10 @@ index 08d983b61..c9e5296e5 100644
 +        state.arrivals += 1;
 +        state.barrier.clone()
      };
- 
+
      let timeout = Duration::from_millis(args.timeout_ms);
 @@ -174,3 +174,31 @@ async fn wait_on_barrier(args: BarrierArgs) -> Result<(), FunctionCallError> {
- 
+
      Ok(())
  }
 +
@@ -559,8 +1447,31 @@ index 08d983b61..c9e5296e5 100644
 +    .await
 +    .map_err(|err| format!("{err:?}"))
 +}
+diff --git a/codex-rs/core/src/tools/spec_plan.rs b/codex-rs/core/src/tools/spec_plan.rs
+index 3c3a2b7..cafe9ef 100644
+--- a/codex-rs/core/src/tools/spec_plan.rs
++++ b/codex-rs/core/src/tools/spec_plan.rs
+@@ -46,6 +46,7 @@ use crate::tools::handlers::multi_agents_spec::WaitAgentTimeoutOptions;
+ use crate::tools::handlers::multi_agents_v2::FollowupTaskHandler as FollowupTaskHandlerV2;
+ use crate::tools::handlers::multi_agents_v2::InterruptAgentHandler;
+ use crate::tools::handlers::multi_agents_v2::JoinAgentHandler;
++use crate::tools::handlers::multi_agents_v2::JoinAgentsHandler;
+ use crate::tools::handlers::multi_agents_v2::ListAgentsHandler as ListAgentsHandlerV2;
+ use crate::tools::handlers::multi_agents_v2::SendMessageHandler as SendMessageHandlerV2;
+ use crate::tools::handlers::multi_agents_v2::SpawnAgentHandler as SpawnAgentHandlerV2;
+@@ -1173,6 +1174,10 @@ fn add_collaboration_tools(context: &CoreToolPlanContext<'_>, registry: &mut Too
+                 exposure,
+             );
+             if turn_context.config.multi_agent_v2.wait_agent_enabled {
++                registry.register_trusted_with_exposure(
++                    multi_agent_v2_handler(JoinAgentsHandler, None),
++                    exposure,
++                );
+                 registry.register_trusted_with_exposure(
+                     multi_agent_v2_handler(JoinAgentHandler, None),
+                     exposure,
 diff --git a/codex-rs/core/tests/suite/mod.rs b/codex-rs/core/tests/suite/mod.rs
-index 4aa10fdc7..74dc03a20 100644
+index 4aa10fd..74dc03a 100644
 --- a/codex-rs/core/tests/suite/mod.rs
 +++ b/codex-rs/core/tests/suite/mod.rs
 @@ -92,6 +92,7 @@ mod model_switching;
@@ -573,7 +1484,7 @@ index 4aa10fdc7..74dc03a20 100644
  #[cfg(unix)]
 diff --git a/codex-rs/core/tests/suite/multi_agent_join.rs b/codex-rs/core/tests/suite/multi_agent_join.rs
 new file mode 100644
-index 000000000..1186dee85
+index 0000000..1186dee
 --- /dev/null
 +++ b/codex-rs/core/tests/suite/multi_agent_join.rs
 @@ -0,0 +1,1653 @@
@@ -2231,7 +3142,7 @@ index 000000000..1186dee85
 +    Ok(())
 +}
 diff --git a/codex-rs/exec/src/event_processor_with_jsonl_output.rs b/codex-rs/exec/src/event_processor_with_jsonl_output.rs
-index e8b137511..4a147b441 100644
+index e8b1375..4a147b4 100644
 --- a/codex-rs/exec/src/event_processor_with_jsonl_output.rs
 +++ b/codex-rs/exec/src/event_processor_with_jsonl_output.rs
 @@ -248,6 +248,7 @@ impl EventProcessorWithJsonOutput {
@@ -2243,7 +3154,7 @@ index e8b137511..4a147b441 100644
                      },
                      sender_thread_id,
 diff --git a/codex-rs/exec/src/exec_events.rs b/codex-rs/exec/src/exec_events.rs
-index 30df7f176..91a5c759c 100644
+index 30df7f1..91a5c75 100644
 --- a/codex-rs/exec/src/exec_events.rs
 +++ b/codex-rs/exec/src/exec_events.rs
 @@ -224,6 +224,7 @@ pub enum CollabTool {
@@ -2253,9 +3164,9 @@ index 30df7f176..91a5c759c 100644
 +    Join,
      CloseAgent,
  }
- 
+
 diff --git a/codex-rs/tui/src/app/agent_status_feed.rs b/codex-rs/tui/src/app/agent_status_feed.rs
-index 893fd740b..8712d8a43 100644
+index 893fd74..8712d8a 100644
 --- a/codex-rs/tui/src/app/agent_status_feed.rs
 +++ b/codex-rs/tui/src/app/agent_status_feed.rs
 @@ -162,6 +162,7 @@ fn activity_summary(item: &ThreadItem) -> Option<String> {
@@ -2267,7 +3178,7 @@ index 893fd740b..8712d8a43 100644
              };
              return Some(action.to_string());
 diff --git a/codex-rs/tui/src/multi_agents.rs b/codex-rs/tui/src/multi_agents.rs
-index da48573da..052284956 100644
+index da48573..0522849 100644
 --- a/codex-rs/tui/src/multi_agents.rs
 +++ b/codex-rs/tui/src/multi_agents.rs
 @@ -257,7 +257,7 @@ pub(crate) fn tool_call_history_cell(
@@ -2279,146 +3190,3 @@ index da48573da..052284956 100644
              if matches!(status, CollabAgentToolCallStatus::InProgress) {
                  Some(waiting_begin(receiver_thread_ids, &mut agent_metadata))
              } else {
-diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
-index 34f8f43..136afdc 100644
---- a/codex-rs/core/src/agent/control/spawn.rs
-+++ b/codex-rs/core/src/agent/control/spawn.rs
-@@ -659,32 +659,53 @@ impl AgentControl {
-             (MultiAgentVersion::Disabled | MultiAgentVersion::V1, _)
-             | (MultiAgentVersion::V2, _) => (None, None),
-         };
--        let parent_history_mode = parent_thread.config_snapshot().await.history_mode;
--        // `record_conversation_items` only queues persistence writes asynchronously.
--        // Flush before snapshotting store history for a fork.
--        parent_thread.ensure_rollout_materialized().await;
--        parent_thread.flush_rollout().await?;
--
-+        let parent_config_snapshot = parent_thread.config_snapshot().await;
-+        let parent_history_mode = parent_config_snapshot.history_mode;
-         let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
-             .then_some(ThreadHistoryMode::Paginated);
--        let mut forked_rollout_items =
-+        let mut forked_rollout_items = if parent_config_snapshot.ephemeral {
-+            let history = parent_thread.session.clone_history().await;
-+            let reference_context_item = history.reference_context_item();
-+            let mut rollout_items = history
-+                .into_annotated_items()
-+                .into_iter()
-+                .map(RolloutItem::ResponseItem)
-+                .collect::<Vec<_>>();
-+            if let Some(reference_context_item) = reference_context_item {
-+                rollout_items.push(RolloutItem::TurnContext(reference_context_item));
-+            }
-+            rollout_items
-+        } else {
-+            // `record_conversation_items` only queues persistence writes asynchronously.
-+            // Flush before snapshotting store history for a fork.
-+            parent_thread.ensure_rollout_materialized().await;
-+            parent_thread.flush_rollout().await?;
-             load_agent_model_context(state, parent_thread_id, parent_history_mode)
-                 .await?
-                 .ok_or_else(|| {
-                     CodexErr::Fatal(format!(
-                         "parent thread history unavailable for fork: {parent_thread_id}"
-                     ))
--                })?;
-+                })?
-+        };
-
--        let selected_capability_roots = forked_rollout_items
--            .iter()
--            .find_map(|item| {
--                let RolloutItem::SessionMeta(meta_line) = item else {
--                    return None;
--                };
--                Some(meta_line.meta.selected_capability_roots.clone())
--            })
--            .unwrap_or_default();
-+        let selected_capability_roots = if parent_config_snapshot.ephemeral {
-+            parent_thread
-+                .session
-+                .services
-+                .selected_capability_roots
-+                .clone()
-+        } else {
-+            forked_rollout_items
-+                .iter()
-+                .find_map(|item| {
-+                    let RolloutItem::SessionMeta(meta_line) = item else {
-+                        return None;
-+                    };
-+                    Some(meta_line.meta.selected_capability_roots.clone())
-+                })
-+                .unwrap_or_default()
-+        };
-         if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
-             forked_rollout_items =
-                 truncate_rollout_to_last_n_fork_turns(forked_rollout_items, *last_n_turns);
-diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-index 71f7f6c..0b1c96e 100644
---- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-+++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
-@@ -834,7 +834,7 @@ async fn spawn_agent_full_history_fork_accepts_explicit_service_tier() {
- }
-
- #[tokio::test]
--async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
-+async fn multi_agent_v2_ephemeral_full_history_fork_uses_live_context_and_accepts_service_tier() {
-     #[derive(Debug, Deserialize)]
-     struct SpawnAgentResult {
-         task_name: String,
-@@ -845,6 +845,7 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
-         .with_model("gpt-5.4".to_string(), &session.services.models_manager)
-         .await;
-     let mut config = (*turn.config).clone();
-+    config.ephemeral = true;
-     config
-         .features
-         .enable(Feature::MultiAgentV2)
-@@ -855,6 +856,9 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
-         .start_thread(StartThreadOptions::new((*turn.config).clone()))
-         .await
-         .expect("root thread should start");
-+    root.thread
-+        .inject_user_message_without_turn("ephemeral parent context".to_string())
-+        .await;
-     session.services.agent_control = manager.agent_control();
-     session.thread_id = root.thread_id;
-     let session = Arc::new(session);
-@@ -886,17 +890,32 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
-         )
-         .await
-         .expect("spawned task name should resolve");
--    let snapshot = manager
-+    let child_thread = manager
-         .get_thread(child_thread_id)
-         .await
--        .expect("spawned agent thread should exist")
--        .config_snapshot()
--        .await;
-+        .expect("spawned agent thread should exist");
-+    let snapshot = child_thread.config_snapshot().await;
-
-     assert_eq!(
-         snapshot.service_tier,
-         Some(ServiceTier::Fast.request_value().to_string())
-     );
-+    assert!(
-+        child_thread
-+            .session
-+            .clone_history()
-+            .await
-+            .raw_items()
-+            .any(|item| matches!(
-+                item,
-+                ResponseItem::Message { content, .. }
-+                    if content.iter().any(|content| matches!(
-+                        content,
-+                        ContentItem::InputText { text } if text == "ephemeral parent context"
-+                    ))
-+            )),
-+        "ephemeral full-history fork should inherit live parent context"
-+    );
- }
-
- #[tokio::test]

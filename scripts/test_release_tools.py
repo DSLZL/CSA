@@ -273,11 +273,15 @@ def test_contract_shape() -> None:
     p2 = REPOSITORY / "payload" / "codex" / "rust-v0.148.0-native-join-p2"
     p2_contract = load_contract(p2 / "test-contract.json", p2.name)
     assert len(p2_contract["generation"]) == 2
-    assert len(p2_contract["tests"]) == 9
+    assert len(p2_contract["tests"]) == 11
     assert p2_contract["tests"][0]["name"] == "CSA startup version display"
     assert p2_contract["tests"][1]["argv"][4].startswith(
         "multi_agent_v2_ephemeral_full_history_fork_"
     )
+    assert {test["name"] for test in p2_contract["tests"]} >= {
+        "batch Join tool schema",
+        "batch Join waits for every exact run",
+    }
     assert "CARGO_BUILD_JOBS" not in p2_contract["build"]["env"]
     assert cross_windows_build_argv(p2_contract["build"]["argv"])[0:3] == [
         "cargo",

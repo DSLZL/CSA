@@ -162,6 +162,30 @@
         "test",
         "-p",
         "codex-core",
+        "join_agents_tool_requires_all_exact_runs_in_one_call",
+        "--",
+        "--nocapture"
+      ],
+      "name": "batch Join tool schema"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-core",
+        "join_agents_waits_for_every_exact_run_and_preserves_order",
+        "--",
+        "--nocapture"
+      ],
+      "name": "batch Join waits for every exact run"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-core",
         "multi_agent_v2_join_rejects_invalid_arguments_targets_and_runs",
         "--",
         "--nocapture"
