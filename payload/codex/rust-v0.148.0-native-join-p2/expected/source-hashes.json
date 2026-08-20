@@ -2,6 +2,7 @@
   "absent": [
     "codex-rs/core/src/agent/completion.rs",
     "codex-rs/core/src/tools/handlers/multi_agents_v2/join.rs",
+    "codex-rs/core/src/tools/handlers/multi_agents_v2/join_many.rs",
     "codex-rs/core/tests/suite/multi_agent_join.rs"
   ],
   "algorithm": "sha256",

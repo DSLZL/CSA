@@ -9,7 +9,7 @@ rust_toolchain = "1.95.0"
 rustc_commit = "59807616e1fa2540724bfbac14d7976d7e4a3860"
 build_target = "x86_64-pc-windows-msvc"
 source_hashes = "expected/source-hashes.json"
-source_hashes_sha256 = "4bac38e86591872002e912a8fc5cac06f367d7b3ced5cc0aef9340b27ffb4ff9"
+source_hashes_sha256 = "6644cbfbfe9389cf88b90b131cfe44f8fefd78b0fc084c3ec325281a5216048a"
 preimage_absent = [
   "codex-rs/core/src/agent/completion.rs",
   "codex-rs/core/src/tools/handlers/multi_agents_v2/join.rs",
