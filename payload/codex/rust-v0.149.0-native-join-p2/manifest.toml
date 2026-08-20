@@ -1,0 +1,75 @@
+schema = 1
+compat_id = "rust-v0.149.0-native-join-p2"
+codex_version = "0.149.0"
+upstream_tag = "rust-v0.149.0"
+upstream_commit = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0"
+patch_api = 1
+patch_set_version = 2
+rust_toolchain = "1.95.0"
+rustc_commit = "59807616e1fa2540724bfbac14d7976d7e4a3860"
+build_target = "x86_64-pc-windows-msvc"
+source_hashes = "expected/source-hashes.json"
+source_hashes_sha256 = "a2da4511b0ffe6b91c9a1b52a6f8db9d06b7d1b88e5bd0bc1526d024135c649d"
+preimage_absent = [
+  "codex-rs/core/src/agent/completion.rs",
+  "codex-rs/core/src/tools/handlers/multi_agents_v2/join.rs",
+  "codex-rs/core/src/tools/handlers/multi_agents_v2/join_many.rs",
+  "codex-rs/core/tests/suite/multi_agent_join.rs",
+]
+
+[[patches]]
+path = "patches/0001-exact-run-identity.patch"
+sha256 = "0f693b821a3ad1f65a405d0d1a379c5610428ff140fea63aef4fca11ff7bdfdf"
+
+[[patches]]
+path = "patches/0002-completion-registry.patch"
+sha256 = "26bfb2e9b9b3a47864440e980652ceb947d5807b4713fc910fefa09e64da0250"
+
+[[patches]]
+path = "patches/0003-terminal-publication.patch"
+sha256 = "f86992cf09026cb179ab13d7cd35de7c111261f7bfcb6efdffd48346b245de14"
+
+[[patches]]
+path = "patches/0004-join-protocol-schema-handler.patch"
+sha256 = "d9c197ba2059233463db19b1fc16add7083d8ef95c5ef07ebb4124dbad926a60"
+
+[[patches]]
+path = "patches/0005-tests-telemetry-batch-join.patch"
+sha256 = "84467142ee66b2a9598f55e7b245fc482e617425ff825b329b5161b7d370b5e1"
+
+[[patches]]
+path = "patches/0006-csa-version-display.patch"
+sha256 = "e710a0791cc28b79c90e922d6704b90d87013c529ff5ded75d3751c985a5a584"
+
+[preimage]
+"codex-rs/analytics/src/reducer.rs" = "9939a76b5c196a70c95a6036b3c97b1ee4764e2f348e410d8c7799c7dfa45202"
+"codex-rs/app-server-protocol/src/protocol/v2/item.rs" = "95dd99bac8a2abdcc4ff9b7f92ea798e937bb3494c9764656f31513ff60488bb"
+"codex-rs/core/src/agent/control.rs" = "6969e371eba2d3076374a4a270475ecf7cd3239cad0bf0fec648d49c7013c1e9"
+"codex-rs/core/src/agent/control/spawn.rs" = "8dc7b9472e2c9c279db957948519edbab96072af53c835a79eaa3ddbe1e926df"
+"codex-rs/core/src/agent/mod.rs" = "fb73c931b6a364a0f970e304eb45776de81c55eff616d2c7faf221b706eddfed"
+"codex-rs/core/src/session/mod.rs" = "e6218071821f7e1b3858d31c2a0aef5fa5b63dea0ab16dfbced716d825ddbcc9"
+"codex-rs/core/src/session/tests.rs" = "196f526be3d08eccb551de353e1c2d596ea70912b1e0683a844a415d78d56e31"
+"codex-rs/core/src/test_support.rs" = "f0128850968b5b55b11e5477e4cd19fd0ae14864e45fb3727a3b307af8a51b14"
+"codex-rs/core/src/tools/handlers/mod.rs" = "243d09312a8e60fc076de7f40110b833f6c0043cf715502b8f40013ed8211d56"
+"codex-rs/core/src/tools/handlers/multi_agents_spec.rs" = "3ccedea36cc1c40e846a5c363edf614aba2b923055a86aff36a2473890de1be5"
+"codex-rs/core/src/tools/handlers/multi_agents_spec_tests.rs" = "58906dd2abb1f218827e6571e178c9d1d921596ac6967d4cc5cff6a9023ebc9d"
+"codex-rs/core/src/tools/handlers/multi_agents_tests.rs" = "59ab6baec4ddd5788cf7e29b542fe836298eec90255b193016aa96a97534a3ae"
+"codex-rs/core/src/tools/handlers/multi_agents_v2.rs" = "0aefd72f54be7d0e27fe45fa2fce42bd96ad079dc58455fb9a93ec41b950d445"
+"codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs" = "1b6d8eb041c5d26152bf76f7ce01b98ccbf6d9e6dd67262ed63b487bb4aebac4"
+"codex-rs/core/src/tools/handlers/test_sync.rs" = "3f86fe6e992efa142d85ed7dc2f2c15c971a88e8b6b4fa513249ee3c4ba2efdc"
+"codex-rs/core/src/tools/spec_plan.rs" = "02fd1cfd12a76946c9d0fec10f6b990f0932cf8a6e693ea586a0fb11e06b7ce6"
+"codex-rs/core/tests/suite/mod.rs" = "b01bb12564960bb1794afc816c98000cbabfbbd17351e149dadf7e0adf4dbd1c"
+"codex-rs/exec/src/event_processor_with_jsonl_output.rs" = "d43476319a61c53369055fdbbd7c093100b23bc93f9b01365db0af4c96df3e2c"
+"codex-rs/exec/src/exec_events.rs" = "c404928e0f2a463e19d1b263081c9d5e0380aec9f651a05ee0766f7bb7527f32"
+"codex-rs/protocol/src/items.rs" = "8ccab0dcfc6cab58daab7c078c463aab3aa4579ff04b0a4b7c58e7822f13ce9b"
+"codex-rs/protocol/src/legacy_events.rs" = "79aa9fc6b237920bd9588326e4ec9e92de8427e08d16817b64b3276abf179a76"
+"codex-rs/tui/src/app/agent_status_feed.rs" = "7f126fa315505ec8fef3670e3f91805a31ecfc3e2789d09815242ce6d07917fe"
+"codex-rs/tui/src/history_cell/session.rs" = "5e4f8f1b80d496681007c31c6b253dd42dadfda5c64f029249d03eb327ec8238"
+"codex-rs/tui/src/history_cell/tests.rs" = "3a430b96a08e68d8bfb9647392de6af954ea17468d96becd4c69a5154a13dfa7"
+"codex-rs/tui/src/multi_agents.rs" = "7361fff227d61d77eea9692e9fc5da2ff8803a9fb5f7e5978107f8c7173670b4"
+
+[artifacts."x86_64-pc-windows-msvc"]
+url = "https://github.com/dslzl/CSA/releases/download/compat-rust-v0.149.0-native-join-p2/rust-v0.149.0-native-join-p2--codex.exe"
+filename = "codex.exe"
+sha256 = "2c2b7089103c53d8af2427ba643fb651168d13ab5d23688c74b40e973d7c850d"
+size = 299484160
