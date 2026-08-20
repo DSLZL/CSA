@@ -63,23 +63,26 @@ jobs:
               name="$1"
               url="$2"
               expected_sha256="$3"
+              member="$4"
               archive="$temp_root/$name.tar.gz"
               unpacked="$temp_root/$name"
               curl --fail --location --retry 3 --output "$archive" "$url"
               printf '%s  %s\n' "$expected_sha256" "$archive" | sha256sum --check --strict
               mkdir -p "$unpacked"
-              tar -xzf "$archive" --directory "$unpacked" --strip-components=1
-              install -m 0755 "$unpacked/$name" "$tool_bin/$name"
+              tar -xzf "$archive" --directory "$unpacked" "$member"
+              install -m 0755 "$unpacked/$member" "$tool_bin/$name"
             }
 
             install_release_tool \
               cargo-xwin \
               https://github.com/rust-cross/cargo-xwin/releases/download/v0.23.0/cargo-xwin-v0.23.0.x86_64-unknown-linux-musl.tar.gz \
-              74a216f64f10ea81c909f02d6b1a84cd0fda8de4c87ee52fe63ba76ab2392b75
+              74a216f64f10ea81c909f02d6b1a84cd0fda8de4c87ee52fe63ba76ab2392b75 \
+              cargo-xwin
             install_release_tool \
               sccache \
               https://github.com/mozilla/sccache/releases/download/v0.16.0/sccache-v0.16.0-x86_64-unknown-linux-musl.tar.gz \
-              aec995a83ad3dff3d14b6314e08858b7b73d35ca85a5bcf3d3a9ec07dee35588
+              aec995a83ad3dff3d14b6314e08858b7b73d35ca85a5bcf3d3a9ec07dee35588 \
+              sccache-v0.16.0-x86_64-unknown-linux-musl/sccache
 
             printf 'export PATH="$HOME/.local/bin:$PATH"\n' >> "$BASH_ENV"
             source "$BASH_ENV"
@@ -191,7 +194,9 @@ jobs:
           name: Rust cache statistics
           when: always
           command: |
-            source "$BASH_ENV"
+            if [[ -f "$BASH_ENV" ]]; then
+              source "$BASH_ENV"
+            fi
             if command -v sccache >/dev/null; then
               sccache --show-stats
               sccache --stop-server
