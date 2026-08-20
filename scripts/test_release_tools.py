@@ -319,7 +319,13 @@ def test_release_stream_contracts() -> None:
     assert "resource_class: large.gen3" in circleci
     assert 'CARGO_BUILD_JOBS: "4"' in circleci
     assert "csa-cargo-home-v4-linux-amd64-1.95.0-codex-" in circleci
+    assert "csa-rustup-v1-linux-amd64-rustup-1.29.0-rust-1.95.0-windows-msvc" in circleci
+    assert "csa-xwin-v1-linux-amd64-cargo-xwin-0.23.0-msvc17-x86_64" in circleci
+    assert "csa-sccache-v1-linux-amd64-1.95.0-xwin-0.23.0-codex-" in circleci
+    for cargo_download in ("registry/index", "registry/cache", "git/db"):
+        assert f"/cargo-home/{cargo_download}" in circleci
     assert "RUSTC_WRAPPER: sccache" in circleci
+    assert "rustup/archive/1.29.0/x86_64-unknown-linux-gnu/rustup-init" in circleci
     assert "--cross-windows-msvc" in circleci
     assert "- /tmp/csa-patched-codex" not in circleci
     assert circleci.count("rust-v0.147.0-native-join-p2") == 1

@@ -26,6 +26,7 @@ jobs:
       GIT_CONFIG_KEY_0: core.autocrlf
       GIT_CONFIG_VALUE_0: "false"
       RUSTC_WRAPPER: sccache
+      RUSTUP_HOME: /home/circleci/.cache/csa/rustup
       SCCACHE_CACHE_SIZE: 450M
       SCCACHE_DIR: /home/circleci/.cache/csa/sccache
       XWIN_ACCEPT_LICENSE: "1"
@@ -43,6 +44,10 @@ jobs:
 
       - restore_cache:
           keys:
+            - csa-rustup-v1-linux-amd64-rustup-1.29.0-rust-1.95.0-windows-msvc
+
+      - restore_cache:
+          keys:
             - csa-xwin-v1-linux-amd64-cargo-xwin-0.23.0-msvc17-x86_64
 
       - restore_cache:
@@ -57,7 +62,22 @@ jobs:
             tool_bin="$HOME/.local/bin"
             temp_root="$(mktemp -d)"
             trap 'rm -rf "$temp_root"' EXIT
-            mkdir -p "$tool_bin" "$CARGO_HOME" "$SCCACHE_DIR" "$XWIN_CACHE_DIR"
+            mkdir -p \
+              "$tool_bin" \
+              "$CARGO_HOME" \
+              "$RUSTUP_HOME" \
+              "$SCCACHE_DIR" \
+              "$XWIN_CACHE_DIR"
+
+            install_release_binary() {
+              name="$1"
+              url="$2"
+              expected_sha256="$3"
+              download="$temp_root/$name"
+              curl --fail --location --retry 3 --output "$download" "$url"
+              printf '%s  %s\n' "$expected_sha256" "$download" | sha256sum --check --strict
+              install -m 0755 "$download" "$tool_bin/$name"
+            }
 
             install_release_tool() {
               name="$1"
@@ -83,9 +103,15 @@ jobs:
               https://github.com/mozilla/sccache/releases/download/v0.16.0/sccache-v0.16.0-x86_64-unknown-linux-musl.tar.gz \
               aec995a83ad3dff3d14b6314e08858b7b73d35ca85a5bcf3d3a9ec07dee35588 \
               sccache-v0.16.0-x86_64-unknown-linux-musl/sccache
+            install_release_binary \
+              rustup-init \
+              https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-unknown-linux-gnu/rustup-init \
+              4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
 
-            printf 'export PATH="$HOME/.local/bin:$PATH"\n' >> "$BASH_ENV"
+            printf 'export PATH="$CARGO_HOME/bin:$HOME/.local/bin:$PATH"\n' >> "$BASH_ENV"
             source "$BASH_ENV"
+            rustup-init --no-modify-path --profile minimal --default-toolchain none -y
+            rustup --version
             cargo-xwin --version
             sccache --version
 
@@ -104,7 +130,7 @@ jobs:
               sudo apt-get install --yes clang lld llvm ninja-build
             fi
 
-            rustup toolchain install 1.95.0 --profile minimal --component llvm-tools
+            rustup toolchain install 1.95.0 --profile minimal
             rustup default 1.95.0
             rustup target add --toolchain 1.95.0 x86_64-pc-windows-msvc
 
@@ -115,6 +141,16 @@ jobs:
             sccache --start-server
             sccache --zero-stats
             cargo xwin cache xwin
+
+      - save_cache:
+          key: csa-rustup-v1-linux-amd64-rustup-1.29.0-rust-1.95.0-windows-msvc
+          paths:
+            - /home/circleci/.cache/csa/rustup
+
+      - save_cache:
+          key: csa-xwin-v1-linux-amd64-cargo-xwin-0.23.0-msvc17-x86_64
+          paths:
+            - /home/circleci/.cache/csa/xwin
 
       - run:
           name: Apply, test, and cross-compile exact patched Codex CLI
@@ -198,8 +234,8 @@ jobs:
               source "$BASH_ENV"
             fi
             if command -v sccache >/dev/null; then
-              sccache --show-stats
-              sccache --stop-server
+              sccache --show-stats || true
+              sccache --stop-server || true
             fi
 
       - save_cache:
@@ -208,11 +244,6 @@ jobs:
             - /home/circleci/.cache/csa/cargo-home/registry/index
             - /home/circleci/.cache/csa/cargo-home/registry/cache
             - /home/circleci/.cache/csa/cargo-home/git/db
-
-      - save_cache:
-          key: csa-xwin-v1-linux-amd64-cargo-xwin-0.23.0-msvc17-x86_64
-          paths:
-            - /home/circleci/.cache/csa/xwin
 
       - save_cache:
           key: csa-sccache-v1-linux-amd64-1.95.0-xwin-0.23.0-codex-<< parameters.upstream_commit >>
