@@ -329,7 +329,10 @@ def test_release_stream_contracts() -> None:
     assert "sccache --max-cache-size" not in circleci
     assert "rustup/archive/1.29.0/x86_64-unknown-linux-gnu/rustup-init" in circleci
     assert "--cross-windows-msvc" in circleci
-    assert "- /tmp/csa-patched-codex" not in circleci
+    assert 'root="$HOME/csa-patched-codex/$compat_id"' in circleci
+    assert 'root="/tmp/csa-patched-codex/$compat_id"' not in circleci
+    assert "TMPDIR: /home/circleci/csa-tmp" in circleci
+    assert circleci.count("when: always") == 3
     assert circleci.count("rust-v0.147.0-native-join-p2") == 1
     assert circleci.count("rust-v0.148.0-native-join-p2") == 1
     assert "OPENAI_API_KEY" not in circleci

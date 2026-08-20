@@ -29,6 +29,7 @@ jobs:
       RUSTUP_HOME: /home/circleci/.cache/csa/rustup
       SCCACHE_CACHE_SIZE: 450M
       SCCACHE_DIR: /home/circleci/.cache/csa/sccache
+      TMPDIR: /home/circleci/csa-tmp
       XWIN_ACCEPT_LICENSE: "1"
       XWIN_ARCH: x86_64
       XWIN_CACHE_DIR: /home/circleci/.cache/csa/xwin
@@ -67,6 +68,7 @@ jobs:
               "$CARGO_HOME" \
               "$RUSTUP_HOME" \
               "$SCCACHE_DIR" \
+              "$TMPDIR" \
               "$XWIN_CACHE_DIR"
 
             install_release_binary() {
@@ -185,7 +187,7 @@ jobs:
                 raise SystemExit("manifest must describe exactly codex.exe")
             PY
 
-            root="/tmp/csa-patched-codex/$compat_id"
+            root="$HOME/csa-patched-codex/$compat_id"
             source="$root/source"
             cargo_target="$root/cargo-target"
             result="$root/contract-result.json"
@@ -239,6 +241,7 @@ jobs:
 
       - save_cache:
           key: csa-cargo-home-v4-linux-amd64-1.95.0-codex-<< parameters.upstream_commit >>
+          when: always
           paths:
             - /home/circleci/.cache/csa/cargo-home/registry/index
             - /home/circleci/.cache/csa/cargo-home/registry/cache
@@ -246,6 +249,7 @@ jobs:
 
       - save_cache:
           key: csa-sccache-v1-linux-amd64-1.95.0-xwin-0.23.0-codex-<< parameters.upstream_commit >>
+          when: always
           paths:
             - /home/circleci/.cache/csa/sccache
 
