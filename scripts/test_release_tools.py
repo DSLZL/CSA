@@ -33,7 +33,12 @@ from compat_release import (  # noqa: E402
     render_manifest,
     stable_version,
 )
-from run_patch_contract import ContractError, execute_version, load_contract  # noqa: E402
+from run_patch_contract import (  # noqa: E402
+    ContractError,
+    cross_windows_build_argv,
+    execute_version,
+    load_contract,
+)
 
 
 def write_tar(path: Path, members: dict[str, bytes]) -> None:
@@ -259,11 +264,29 @@ def test_immutability(root: Path) -> None:
 
 
 def test_contract_shape() -> None:
-    payload = REPOSITORY / "payload" / "codex" / "rust-v0.148.0-native-join-p1"
-    contract = load_contract(payload / "test-contract.json", payload.name)
-    assert len(contract["generation"]) == 2
-    assert len(contract["tests"]) == 7
-    assert contract["build"]["env"]["CARGO_BUILD_JOBS"] == "4"
+    p1 = REPOSITORY / "payload" / "codex" / "rust-v0.148.0-native-join-p1"
+    p1_contract = load_contract(p1 / "test-contract.json", p1.name)
+    assert len(p1_contract["generation"]) == 2
+    assert len(p1_contract["tests"]) == 7
+    assert p1_contract["build"]["env"]["CARGO_BUILD_JOBS"] == "4"
+
+    p2 = REPOSITORY / "payload" / "codex" / "rust-v0.148.0-native-join-p2"
+    p2_contract = load_contract(p2 / "test-contract.json", p2.name)
+    assert len(p2_contract["generation"]) == 2
+    assert len(p2_contract["tests"]) == 8
+    assert p2_contract["tests"][0]["name"] == "CSA startup version display"
+    assert "CARGO_BUILD_JOBS" not in p2_contract["build"]["env"]
+    assert cross_windows_build_argv(p2_contract["build"]["argv"])[0:3] == [
+        "cargo",
+        "xwin",
+        "build",
+    ]
+    try:
+        cross_windows_build_argv(["cargo", "test"])
+    except ContractError:
+        pass
+    else:
+        raise AssertionError("non-build command was accepted for Windows cross-compilation")
     expected = f"Python {sys_platform.python_version()}"
     execution = execute_version(Path(sys.executable).resolve(), expected)
     assert Path(execution["argv"][0]).is_absolute()
@@ -289,7 +312,19 @@ def test_release_stream_contracts() -> None:
         REPOSITORY / ".github" / "workflows" / "release-patched-codex.yml"
     ).read_text(encoding="utf-8")
     assert patched_workflow.count("Codex source must not live inside the CSA repository") == 1
-    assert 'default: "rust-v0.148.0-native-join-p1"' in patched_workflow
+    assert 'default: "rust-v0.148.0-native-join-p2"' in patched_workflow
+
+    circleci = (REPOSITORY / ".circleci" / "config.yml").read_text(encoding="utf-8")
+    assert "default: false" in circleci
+    assert "resource_class: large.gen3" in circleci
+    assert 'CARGO_BUILD_JOBS: "4"' in circleci
+    assert "csa-cargo-home-v4-linux-amd64-1.95.0-codex-" in circleci
+    assert "RUSTC_WRAPPER: sccache" in circleci
+    assert "--cross-windows-msvc" in circleci
+    assert "- /tmp/csa-patched-codex" not in circleci
+    assert circleci.count("rust-v0.147.0-native-join-p2") == 1
+    assert circleci.count("rust-v0.148.0-native-join-p2") == 1
+    assert "OPENAI_API_KEY" not in circleci
 
     manager_workflow = (
         REPOSITORY / ".github" / "workflows" / "release-csa.yml"
@@ -352,9 +387,9 @@ def port_fixture(root: Path) -> tuple[Path, Path, str]:
     )
     patches = []
     present = {}
-    payload = root / "base" / "rust-v1.0.0-native-join-p1"
+    payload = root / "base" / "rust-v1.0.0-native-join-p2"
     (payload / "patches").mkdir(parents=True)
-    for index in range(1, 6):
+    for index in range(1, 7):
         relative = f"codex-rs/core/src/layer_{index}.rs"
         original = f"old_{index}\n"
         (source / relative).write_text(original, encoding="utf-8")
@@ -393,7 +428,7 @@ def port_fixture(root: Path) -> tuple[Path, Path, str]:
         "upstream_tag": "rust-v1.0.0",
         "upstream_commit": "a" * 40,
         "patch_api": 1,
-        "patch_set_version": 1,
+        "patch_set_version": 2,
         "rust_toolchain": "1.95.0",
         "rustc_commit": "b" * 40,
         "build_target": "x86_64-pc-windows-msvc",
@@ -427,7 +462,7 @@ def test_compatibility_release_tools(root: Path) -> None:
         raise AssertionError("prerelease tag was accepted as stable")
 
     manifest, source, commit = port_fixture(root)
-    candidate = root / "rust-v2.0.0-native-join-p1"
+    candidate = root / "rust-v2.0.0-native-join-p2"
     result = port(manifest.resolve(), source.resolve(), "rust-v2.0.0", commit, candidate.resolve())
     assert result["compat_id"] == candidate.name
     artifact = root / "codex.exe"
@@ -492,7 +527,7 @@ def test_compatibility_release_tools(root: Path) -> None:
             if repository == "openai/codex":
                 assert tag == "rust-v9.8.7"
                 return "f" * 40
-            assert repository == "dslzl/CSA" and tag == "compat-rust-v9.8.7-native-join-p1"
+            assert repository == "dslzl/CSA" and tag == "compat-rust-v9.8.7-native-join-p2"
             return "d" * 40
 
     fake = FakeApi()
@@ -505,13 +540,13 @@ def test_compatibility_release_tools(root: Path) -> None:
     detection = detect(REPOSITORY.resolve(), fake)
     assert detection["action"] == "blocked" and detection["issue_needs_update"] is False
     fake.issue_body = ""
-    fake.pulls = [{"head": {"ref": "automation/compat-rust-v9.8.7-native-join-p1"}}]
+    fake.pulls = [{"head": {"ref": "automation/compat-rust-v9.8.7-native-join-p2"}}]
     assert detect(REPOSITORY.resolve(), fake)["action"] == "candidate_open"
     fake.pulls = []
     with patch("compat_release.exact_local_entry", return_value=True):
         assert detect(REPOSITORY.resolve(), fake)["action"] == "publish"
     fake.release = {
-        "tag_name": "compat-rust-v9.8.7-native-join-p1",
+        "tag_name": "compat-rust-v9.8.7-native-join-p2",
         "draft": False,
         "prerelease": False,
     }

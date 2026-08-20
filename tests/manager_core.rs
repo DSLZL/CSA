@@ -890,6 +890,21 @@ fn manifest_types_are_strict() {
     );
 }
 
+#[test]
+fn bundled_p2_contract_requires_branding_and_runner_build_jobs() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("payload/codex/rust-v0.148.0-native-join-p2/manifest.toml")
+        .canonicalize()
+        .unwrap();
+    let loaded = LoadedCompatibility::load(&manifest).unwrap();
+    let contract = loaded.test_contract().unwrap();
+
+    assert_eq!(loaded.manifest.patch_set_version, 2);
+    assert_eq!(loaded.patch_paths.len(), 6);
+    assert_eq!(contract.tests.len(), 8);
+    assert!(!contract.build.env.contains_key("CARGO_BUILD_JOBS"));
+}
+
 fn write_executable(path: &Path, bytes: &[u8]) {
     fs::write(path, bytes).unwrap();
     #[cfg(unix)]

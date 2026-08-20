@@ -192,7 +192,9 @@ def detect(repository: Path, api: GitHubApi) -> dict[str, Any]:
     tag = latest.get("tag_name")
     version = stable_version(tag)
     commit = api.peel_tag(OPENAI_REPOSITORY, tag)
-    compat_id = compatibility_id(version)
+    base_manifest = latest_payload_manifest(repository)
+    base = _load_manifest(base_manifest)
+    compat_id = compatibility_id(version, base["patch_set_version"])
     release_tag = f"compat-{compat_id}"
     release = api.get(f"/repos/{CSA_REPOSITORY}/releases/tags/{release_tag}", optional=True)
     if release is not None:
@@ -269,7 +271,7 @@ def detect(repository: Path, api: GitHubApi) -> dict[str, Any]:
         "upstream_commit": commit,
         "compat_id": compat_id,
         "compat_release_tag": release_tag,
-        "base_manifest": latest_payload_manifest(repository).relative_to(repository).as_posix(),
+        "base_manifest": base_manifest.relative_to(repository).as_posix(),
         "issue_number": issue_number,
         "issue_needs_update": issue_needs_update,
     }

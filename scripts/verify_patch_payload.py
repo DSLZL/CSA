@@ -106,8 +106,8 @@ def _validate_manifest(manifest: dict[str, object]) -> None:
         or manifest["patch_api"] != 1
     ):
         raise VerificationError("unsupported manifest schema or patch_api")
-    if type(manifest["patch_set_version"]) is not int or manifest["patch_set_version"] < 1:
-        raise VerificationError("patch_set_version must be a positive integer")
+    if type(manifest["patch_set_version"]) is not int or manifest["patch_set_version"] not in {1, 2}:
+        raise VerificationError("patch_set_version must be 1 or 2")
     for key, pattern in (
         ("compat_id", COMPAT_ID),
         ("codex_version", VERSION),
@@ -126,8 +126,11 @@ def _validate_manifest(manifest: dict[str, object]) -> None:
     _relative(manifest["source_hashes"], "source_hashes")
 
     patches = manifest["patches"]
-    if not isinstance(patches, list) or len(patches) != 5:
-        raise VerificationError("exactly five ordered patches are required")
+    expected_patch_count = {1: 5, 2: 6}[manifest["patch_set_version"]]
+    if not isinstance(patches, list) or len(patches) != expected_patch_count:
+        raise VerificationError(
+            f"patch set {manifest['patch_set_version']} requires exactly {expected_patch_count} ordered patches"
+        )
     patch_paths: list[str] = []
     for index, patch in enumerate(patches):
         if not isinstance(patch, dict) or set(patch) != {"path", "sha256"}:
@@ -135,7 +138,7 @@ def _validate_manifest(manifest: dict[str, object]) -> None:
         patch_paths.append(_relative(patch["path"], f"patches[{index}].path"))
         if not isinstance(patch["sha256"], str) or not SHA256.fullmatch(patch["sha256"]):
             raise VerificationError(f"invalid patches[{index}].sha256")
-    if patch_paths != sorted(patch_paths) or len(set(patch_paths)) != 5:
+    if patch_paths != sorted(patch_paths) or len(set(patch_paths)) != len(patch_paths):
         raise VerificationError("patch paths must be unique and lexically ordered")
 
     preimage = manifest["preimage"]

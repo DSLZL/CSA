@@ -220,7 +220,7 @@ jobs:
         shell: pwsh
         run: |
           python scripts/run_patch_contract.py `
-            --manifest "$env:GITHUB_WORKSPACE/payload/codex/rust-v0.148.0-native-join-p1/manifest.toml" `
+            --manifest "$env:GITHUB_WORKSPACE/payload/codex/rust-v0.148.0-native-join-p2/manifest.toml" `
             --source "$env:PAYLOAD_ROOT/source" `
             --cargo-target "$env:PAYLOAD_ROOT/cargo-target" `
             --output "$env:PAYLOAD_ROOT/payload-result.json"

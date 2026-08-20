@@ -216,10 +216,23 @@ fn validate_manifest(manifest: &CompatibilityManifest, payload_root: &Path) -> R
     }
     validate_relative(&manifest.source_hashes, false)?;
 
-    if manifest.patches.len() != 5 {
+    let expected_patch_count = match manifest.patch_set_version {
+        1 => 5,
+        2 => 6,
+        _ => {
+            return Err(ManagerError::new(
+                "unsupported_manifest",
+                "only patch sets 1 and 2 are supported",
+            ));
+        }
+    };
+    if manifest.patches.len() != expected_patch_count {
         return Err(ManagerError::new(
             "invalid_patch_set",
-            "exactly five ordered patches are required",
+            format!(
+                "patch set {} requires exactly {expected_patch_count} ordered patches",
+                manifest.patch_set_version
+            ),
         ));
     }
     let patch_names: Vec<_> = manifest.patches.iter().map(|patch| &patch.path).collect();
@@ -441,11 +454,21 @@ pub struct BuildContract {
 
 impl TestContract {
     fn validate(&self, manifest: &CompatibilityManifest) -> Result<()> {
+        let (expected_test_count, native_test_offset) = match manifest.patch_set_version {
+            1 => (7, 0),
+            2 => (8, 1),
+            _ => {
+                return Err(ManagerError::new(
+                    "invalid_test_contract",
+                    "test contract uses an unsupported patch set",
+                ));
+            }
+        };
         let shape_matches = self.schema == 1
             && self.compat_id == manifest.compat_id
             && self.cwd == "{source}/codex-rs"
             && self.generation.len() == 2
-            && self.tests.len() == 7
+            && self.tests.len() == expected_test_count
             && self.build.artifact
                 == format!(
                     "{{cargo_target}}/{}/release/{}",
@@ -457,6 +480,23 @@ impl TestContract {
                 "test contract shape does not match patch API 1",
             ));
         }
+
+        let branding_matches = native_test_offset == 0
+            || step_matches(
+                &self.tests[0],
+                "CSA startup version display",
+                &[
+                    "cargo",
+                    "test",
+                    "-p",
+                    "codex-tui",
+                    "session_header_appends_csa_to_display_and_raw_versions",
+                    "--",
+                    "--nocapture",
+                ],
+                &[],
+            );
+        let native_tests = &self.tests[native_test_offset..];
 
         let parameters_match = map_matches(
             &self.parameters,
@@ -515,7 +555,7 @@ impl TestContract {
             ],
         );
         let tests_match = step_matches(
-            &self.tests[0],
+            &native_tests[0],
             "schema reverse-check",
             &[
                 "cargo",
@@ -531,7 +571,7 @@ impl TestContract {
                 "{source}/codex-rs/app-server-protocol/schema",
             )],
         ) && step_matches(
-            &self.tests[1],
+            &native_tests[1],
             "completion registry",
             &[
                 "cargo",
@@ -544,7 +584,7 @@ impl TestContract {
             ],
             &[],
         ) && step_matches(
-            &self.tests[2],
+            &native_tests[2],
             "terminal outcome mapping",
             &[
                 "cargo",
@@ -557,7 +597,7 @@ impl TestContract {
             ],
             &[],
         ) && step_matches(
-            &self.tests[3],
+            &native_tests[3],
             "replayable terminal publication",
             &[
                 "cargo",
@@ -570,7 +610,7 @@ impl TestContract {
             ],
             &[],
         ) && step_matches(
-            &self.tests[4],
+            &native_tests[4],
             "Join tool schema",
             &[
                 "cargo",
@@ -583,7 +623,7 @@ impl TestContract {
             ],
             &[],
         ) && step_matches(
-            &self.tests[5],
+            &native_tests[5],
             "invalid Join inputs",
             &[
                 "cargo",
@@ -596,7 +636,7 @@ impl TestContract {
             ],
             &[],
         ) && step_matches(
-            &self.tests[6],
+            &native_tests[6],
             "Native Join integration",
             &[
                 "cargo",
@@ -611,6 +651,26 @@ impl TestContract {
             ],
             &[],
         );
+        let build_env_matches = match manifest.patch_set_version {
+            1 => ["1", "4"].into_iter().any(|jobs| {
+                map_matches(
+                    &self.build.env,
+                    &[
+                        ("CARGO_BUILD_JOBS", jobs),
+                        ("CARGO_PROFILE_RELEASE_DEBUG", "0"),
+                        ("SOURCE_DATE_EPOCH", "1786063808"),
+                    ],
+                )
+            }),
+            2 => map_matches(
+                &self.build.env,
+                &[
+                    ("CARGO_PROFILE_RELEASE_DEBUG", "0"),
+                    ("SOURCE_DATE_EPOCH", "1786063808"),
+                ],
+            ),
+            _ => false,
+        };
         let build_matches = argv_matches(
             &self.build.argv,
             &[
@@ -624,19 +684,11 @@ impl TestContract {
                 "--target",
                 &manifest.build_target,
             ],
-        ) && ["1", "4"].into_iter().any(|jobs| {
-            map_matches(
-                &self.build.env,
-                &[
-                    ("CARGO_BUILD_JOBS", jobs),
-                    ("CARGO_PROFILE_RELEASE_DEBUG", "0"),
-                    ("SOURCE_DATE_EPOCH", "1786063808"),
-                ],
-            )
-        });
+        ) && build_env_matches;
         if !parameters_match
             || !common_env_matches
             || !generation_matches
+            || !branding_matches
             || !tests_match
             || !build_matches
         {

@@ -6,7 +6,7 @@ on:
       compat_id:
         description: Reviewed compatibility ID under payload/codex/
         required: true
-        default: "rust-v0.148.0-native-join-p1"
+        default: "rust-v0.148.0-native-join-p2"
         type: string
 
 concurrency:

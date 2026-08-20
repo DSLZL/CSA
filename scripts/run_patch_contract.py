@@ -23,6 +23,12 @@ class ContractError(RuntimeError):
     pass
 
 
+def cross_windows_build_argv(argv: list[str]) -> list[str]:
+    if len(argv) < 2 or argv[:2] != ["cargo", "build"]:
+        raise ContractError("cross-Windows build step must start with cargo build")
+    return ["cargo", "xwin", *argv[1:]]
+
+
 def load_contract(path: Path, compat_id: str) -> dict[str, Any]:
     try:
         contract = json.loads(path.read_bytes())
@@ -131,7 +137,11 @@ def execute_version(executable: Path, expected: str) -> dict[str, Any]:
 
 
 def run_contract(
-    manifest_path: Path, source: Path, cargo_target: Path, output: Path
+    manifest_path: Path,
+    source: Path,
+    cargo_target: Path,
+    output: Path,
+    cross_windows_msvc: bool = False,
 ) -> dict[str, Any]:
     for path, label in (
         (manifest_path, "manifest"),
@@ -149,6 +159,11 @@ def run_contract(
         raise ContractError("cargo target must not already exist")
     cargo_target.parent.mkdir(parents=True, exist_ok=True)
     manifest = _load_manifest(manifest_path)
+    if cross_windows_msvc:
+        if os.name == "nt":
+            raise ContractError("cross-Windows mode requires a non-Windows host")
+        if manifest["build_target"] != "x86_64-pc-windows-msvc":
+            raise ContractError("cross-Windows mode requires x86_64-pc-windows-msvc")
     contract = load_contract(manifest_path.parent / "test-contract.json", manifest["compat_id"])
     expected_cwd = expand(contract["cwd"], source, cargo_target)
     cwd = (source / "codex-rs").resolve(strict=True)
@@ -164,12 +179,22 @@ def run_contract(
     build = contract["build"]
     if not isinstance(build, dict) or set(build) != {"env", "argv", "artifact"}:
         raise ContractError("invalid build contract")
-    build_step = {"name": "release build", "argv": build["argv"], "env": build["env"]}
+    build_argv = (
+        cross_windows_build_argv(build["argv"]) if cross_windows_msvc else build["argv"]
+    )
+    build_step = {"name": "release build", "argv": build_argv, "env": build["env"]}
     steps.append(run_step(build_step, "build", cwd, contract["common_env"], source, cargo_target))
     artifact_path = Path(expand(build["artifact"], source, cargo_target)).resolve(strict=True)
     artifact = manifest["artifacts"][manifest["build_target"]]
     expected_version = f"codex-cli {manifest['codex_version']}"
-    execution = execute_version(artifact_path, expected_version)
+    execution = (
+        {
+            "deferred": True,
+            "reason": "cross-compiled Windows artifact requires local Windows acceptance",
+        }
+        if cross_windows_msvc
+        else execute_version(artifact_path, expected_version)
+    )
     actual_hash = digest(artifact_path)
     actual_size = artifact_path.stat().st_size
     canonical = actual_hash == artifact["sha256"] and actual_size == artifact["size"]
@@ -186,7 +211,7 @@ def run_contract(
             "manifest_size": artifact["size"],
             "manifest_sha256": artifact["sha256"],
             "canonical_manifest_match": canonical,
-            "release_eligible": canonical,
+            "release_eligible": canonical and not cross_windows_msvc,
             "absolute_path_execution": execution,
         },
         "known_upstream_errata": contract["known_upstream_errata"],
@@ -202,13 +227,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--source", type=Path, required=True)
     parser.add_argument("--cargo-target", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--cross-windows-msvc", action="store_true")
     return parser.parse_args()
 
 
 def main() -> int:
     args = parse_args()
     try:
-        report = run_contract(args.manifest, args.source, args.cargo_target, args.output)
+        report = run_contract(
+            args.manifest,
+            args.source,
+            args.cargo_target,
+            args.output,
+            args.cross_windows_msvc,
+        )
     except (ContractError, OSError, VerificationError) as error:
         print(json.dumps({"schema": 1, "error": str(error)}, indent=2), file=sys.stderr)
         return 2

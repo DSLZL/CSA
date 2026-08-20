@@ -1,0 +1,234 @@
+version: 2.1
+
+parameters:
+  build_patched_codex:
+    type: boolean
+    default: false
+
+jobs:
+  build-patched-codex:
+    parameters:
+      compat_id:
+        type: string
+      upstream_tag:
+        type: string
+      upstream_commit:
+        type: string
+    machine:
+      image: ubuntu-2604:current
+    resource_class: large.gen3
+    environment:
+      CARGO_BUILD_JOBS: "4"
+      CARGO_HOME: /home/circleci/.cache/csa/cargo-home
+      CARGO_INCREMENTAL: "0"
+      CARGO_TERM_COLOR: always
+      GIT_CONFIG_COUNT: "1"
+      GIT_CONFIG_KEY_0: core.autocrlf
+      GIT_CONFIG_VALUE_0: "false"
+      RUSTC_WRAPPER: sccache
+      SCCACHE_CACHE_SIZE: 450M
+      SCCACHE_DIR: /home/circleci/.cache/csa/sccache
+      XWIN_ACCEPT_LICENSE: "1"
+      XWIN_ARCH: x86_64
+      XWIN_CACHE_DIR: /home/circleci/.cache/csa/xwin
+      XWIN_VARIANT: desktop
+      XWIN_VERSION: "17"
+    steps:
+      - checkout
+
+      - restore_cache:
+          keys:
+            - csa-cargo-home-v4-linux-amd64-1.95.0-codex-<< parameters.upstream_commit >>
+            - csa-cargo-home-v4-linux-amd64-1.95.0-codex-
+
+      - restore_cache:
+          keys:
+            - csa-xwin-v1-linux-amd64-cargo-xwin-0.23.0-msvc17-x86_64
+
+      - restore_cache:
+          keys:
+            - csa-sccache-v1-linux-amd64-1.95.0-xwin-0.23.0-codex-<< parameters.upstream_commit >>
+            - csa-sccache-v1-linux-amd64-1.95.0-xwin-0.23.0-codex-
+
+      - run:
+          name: Install pinned cross-build tools
+          command: |
+            set -euo pipefail
+            tool_bin="$HOME/.local/bin"
+            temp_root="$(mktemp -d)"
+            trap 'rm -rf "$temp_root"' EXIT
+            mkdir -p "$tool_bin" "$CARGO_HOME" "$SCCACHE_DIR" "$XWIN_CACHE_DIR"
+
+            install_release_tool() {
+              name="$1"
+              url="$2"
+              expected_sha256="$3"
+              archive="$temp_root/$name.tar.gz"
+              unpacked="$temp_root/$name"
+              curl --fail --location --retry 3 --output "$archive" "$url"
+              printf '%s  %s\n' "$expected_sha256" "$archive" | sha256sum --check --strict
+              mkdir -p "$unpacked"
+              tar -xzf "$archive" --directory "$unpacked" --strip-components=1
+              install -m 0755 "$unpacked/$name" "$tool_bin/$name"
+            }
+
+            install_release_tool \
+              cargo-xwin \
+              https://github.com/rust-cross/cargo-xwin/releases/download/v0.23.0/cargo-xwin-v0.23.0.x86_64-unknown-linux-musl.tar.gz \
+              74a216f64f10ea81c909f02d6b1a84cd0fda8de4c87ee52fe63ba76ab2392b75
+            install_release_tool \
+              sccache \
+              https://github.com/mozilla/sccache/releases/download/v0.16.0/sccache-v0.16.0-x86_64-unknown-linux-musl.tar.gz \
+              aec995a83ad3dff3d14b6314e08858b7b73d35ca85a5bcf3d3a9ec07dee35588
+
+            printf 'export PATH="$HOME/.local/bin:$PATH"\n' >> "$BASH_ENV"
+            source "$BASH_ENV"
+            cargo-xwin --version
+            sccache --version
+
+      - run:
+          name: Configure exact Rust and LLVM toolchains
+          command: |
+            set -euo pipefail
+            source "$BASH_ENV"
+
+            missing=()
+            for executable in clang-cl lld-link llvm-lib ninja; do
+              command -v "$executable" >/dev/null || missing+=("$executable")
+            done
+            if (( ${#missing[@]} )); then
+              sudo apt-get update
+              sudo apt-get install --yes clang lld llvm ninja-build
+            fi
+
+            rustup toolchain install 1.95.0 --profile minimal --component llvm-tools
+            rustup default 1.95.0
+            rustup target add --toolchain 1.95.0 x86_64-pc-windows-msvc
+
+            rustc_identity="$(rustc -Vv)"
+            printf '%s\n' "$rustc_identity" |
+              grep -Fq 'commit-hash: 59807616e1fa2540724bfbac14d7976d7e4a3860'
+            sccache --max-cache-size "$SCCACHE_CACHE_SIZE"
+            sccache --start-server
+            sccache --zero-stats
+            cargo xwin cache xwin
+
+      - run:
+          name: Apply, test, and cross-compile exact patched Codex CLI
+          no_output_timeout: 30m
+          command: |
+            set -euo pipefail
+            source "$BASH_ENV"
+            compat_id="<< parameters.compat_id >>"
+            upstream_tag="<< parameters.upstream_tag >>"
+            upstream_commit="<< parameters.upstream_commit >>"
+            manifest="$PWD/payload/codex/$compat_id/manifest.toml"
+
+            python3 - "$manifest" "$compat_id" "$upstream_tag" "$upstream_commit" \<<'PY'
+            import sys
+            import tomllib
+
+            manifest_path, compat_id, upstream_tag, upstream_commit = sys.argv[1:]
+            with open(manifest_path, "rb") as source:
+                manifest = tomllib.load(source)
+            expected = {
+                "compat_id": compat_id,
+                "upstream_tag": upstream_tag,
+                "upstream_commit": upstream_commit,
+                "rust_toolchain": "1.95.0",
+                "build_target": "x86_64-pc-windows-msvc",
+            }
+            for key, value in expected.items():
+                if manifest.get(key) != value:
+                    raise SystemExit(
+                        f"manifest {key} mismatch: expected {value!r}, got {manifest.get(key)!r}"
+                    )
+            if manifest["artifacts"][manifest["build_target"]]["filename"] != "codex.exe":
+                raise SystemExit("manifest must describe exactly codex.exe")
+            PY
+
+            root="/tmp/csa-patched-codex/$compat_id"
+            source="$root/source"
+            cargo_target="$root/cargo-target"
+            result="$root/contract-result.json"
+            mkdir -p "$root"
+
+            git clone \
+              --filter=blob:none \
+              --no-checkout \
+              --branch "$upstream_tag" \
+              --single-branch \
+              https://github.com/openai/codex.git \
+              "$source"
+            git -C "$source" checkout --detach "$upstream_commit"
+            test "$(git -C "$source" rev-parse "refs/tags/$upstream_tag^{commit}")" = "$upstream_commit"
+
+            python3 scripts/run_patch_contract.py \
+              --manifest "$manifest" \
+              --source "$source" \
+              --cargo-target "$cargo_target" \
+              --output "$result" \
+              --cross-windows-msvc
+
+            artifact="$cargo_target/x86_64-pc-windows-msvc/release/codex.exe"
+            test -f "$artifact"
+            output="$PWD/.artifacts/$compat_id"
+            mkdir -p "$output"
+            cp "$artifact" "$output/codex.exe"
+            cp "$result" "$output/contract-result.json"
+            sha256sum "$artifact" | sed 's#  .*#  codex.exe#' > "$output/SHA256SUMS"
+            {
+              rustc -Vv
+              cargo xwin --version
+              sccache --version
+              clang-cl --version
+              lld-link --version
+              printf 'logical_cpus: %s\n' "$(nproc)"
+              printf 'resource_class: large.gen3\n'
+            } > "$output/build-environment.txt"
+
+      - run:
+          name: Rust cache statistics
+          when: always
+          command: |
+            source "$BASH_ENV"
+            if command -v sccache >/dev/null; then
+              sccache --show-stats
+              sccache --stop-server
+            fi
+
+      - save_cache:
+          key: csa-cargo-home-v4-linux-amd64-1.95.0-codex-<< parameters.upstream_commit >>
+          paths:
+            - /home/circleci/.cache/csa/cargo-home/registry/index
+            - /home/circleci/.cache/csa/cargo-home/registry/cache
+            - /home/circleci/.cache/csa/cargo-home/git/db
+
+      - save_cache:
+          key: csa-xwin-v1-linux-amd64-cargo-xwin-0.23.0-msvc17-x86_64
+          paths:
+            - /home/circleci/.cache/csa/xwin
+
+      - save_cache:
+          key: csa-sccache-v1-linux-amd64-1.95.0-xwin-0.23.0-codex-<< parameters.upstream_commit >>
+          paths:
+            - /home/circleci/.cache/csa/sccache
+
+      - store_artifacts:
+          path: .artifacts/<< parameters.compat_id >>
+          destination: << parameters.compat_id >>
+
+workflows:
+  csa-patched-build:
+    when: << pipeline.parameters.build_patched_codex >>
+    jobs:
+      - build-patched-codex:
+          name: codex-0.147.0-cross-windows-msvc
+          compat_id: rust-v0.147.0-native-join-p2
+          upstream_tag: rust-v0.147.0
+          upstream_commit: be6e8eac029b183056b7e4402879f15d2c85f61b
+      - build-patched-codex:
+          name: codex-0.148.0-cross-windows-msvc
+          compat_id: rust-v0.148.0-native-join-p2
+          upstream_tag: rust-v0.148.0
+          upstream_commit: 3ba0f711642a888aec92a611a3f3b2211157ff89
