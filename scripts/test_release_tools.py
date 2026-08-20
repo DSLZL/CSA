@@ -336,8 +336,11 @@ def test_release_stream_contracts() -> None:
     assert circleci.count("when: always") == 1
     assert circleci.count("rust-v0.147.0-native-join-p2") == 1
     assert circleci.count("rust-v0.148.0-native-join-p2") == 1
-    assert "-p codex-code-mode-host" in circleci
-    assert '--target-dir "$cargo_target"' in circleci
+    assert "-p codex-code-mode-host" not in circleci
+    assert "codex-$codex_version-win32-x64.tgz" in circleci
+    assert "official Windows npm integrity mismatch" in circleci
+    assert "sha512-oT7Ss5fAPf2fiWE9QNURqZcQGAAawSVxmIUdgPzckq4K" in circleci
+    assert "sha512-/Jg8eYw0BqTGNUpnrzzWlK2kbu29NWg7t6pnUDEfxqp" in circleci
     assert 'cp "$code_mode_host" "$output/codex-code-mode-host.exe"' in circleci
     assert "sha256sum codex.exe codex-code-mode-host.exe > SHA256SUMS" in circleci
     assert "OPENAI_API_KEY" not in circleci
