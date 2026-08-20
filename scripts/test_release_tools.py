@@ -273,8 +273,11 @@ def test_contract_shape() -> None:
     p2 = REPOSITORY / "payload" / "codex" / "rust-v0.148.0-native-join-p2"
     p2_contract = load_contract(p2 / "test-contract.json", p2.name)
     assert len(p2_contract["generation"]) == 2
-    assert len(p2_contract["tests"]) == 8
+    assert len(p2_contract["tests"]) == 9
     assert p2_contract["tests"][0]["name"] == "CSA startup version display"
+    assert p2_contract["tests"][1]["argv"][4].startswith(
+        "multi_agent_v2_ephemeral_full_history_fork_"
+    )
     assert "CARGO_BUILD_JOBS" not in p2_contract["build"]["env"]
     assert cross_windows_build_argv(p2_contract["build"]["argv"])[0:3] == [
         "cargo",
@@ -348,8 +351,12 @@ def test_release_stream_contracts() -> None:
     assert "official Windows npm integrity mismatch" in circleci
     assert "sha512-oT7Ss5fAPf2fiWE9QNURqZcQGAAawSVxmIUdgPzckq4K" in circleci
     assert "sha512-/Jg8eYw0BqTGNUpnrzzWlK2kbu29NWg7t6pnUDEfxqp" in circleci
-    assert 'cp "$code_mode_host" "$output/codex-code-mode-host.exe"' in circleci
-    assert "sha256sum codex.exe codex-code-mode-host.exe > SHA256SUMS" in circleci
+    assert 'cp "$artifact" "$output/bin/codex.exe"' in circleci
+    assert '"$output/bin/codex-code-mode-host.exe"' in circleci
+    assert '"$output/codex-resources/codex-command-runner.exe"' in circleci
+    assert '"$output/codex-resources/codex-windows-sandbox-setup.exe"' in circleci
+    assert '"$output/codex-path/rg.exe"' in circleci
+    assert "codex-path/rg.exe > SHA256SUMS" in circleci
     assert "OPENAI_API_KEY" not in circleci
 
     manager_workflow = (

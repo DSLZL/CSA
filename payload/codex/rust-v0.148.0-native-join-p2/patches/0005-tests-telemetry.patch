@@ -2279,3 +2279,146 @@ index da48573da..052284956 100644
              if matches!(status, CollabAgentToolCallStatus::InProgress) {
                  Some(waiting_begin(receiver_thread_ids, &mut agent_metadata))
              } else {
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 34f8f43..136afdc 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -659,32 +659,53 @@ impl AgentControl {
+             (MultiAgentVersion::Disabled | MultiAgentVersion::V1, _)
+             | (MultiAgentVersion::V2, _) => (None, None),
+         };
+-        let parent_history_mode = parent_thread.config_snapshot().await.history_mode;
+-        // `record_conversation_items` only queues persistence writes asynchronously.
+-        // Flush before snapshotting store history for a fork.
+-        parent_thread.ensure_rollout_materialized().await;
+-        parent_thread.flush_rollout().await?;
+-
++        let parent_config_snapshot = parent_thread.config_snapshot().await;
++        let parent_history_mode = parent_config_snapshot.history_mode;
+         let destination_history_mode = matches!(parent_history_mode, ThreadHistoryMode::Paginated)
+             .then_some(ThreadHistoryMode::Paginated);
+-        let mut forked_rollout_items =
++        let mut forked_rollout_items = if parent_config_snapshot.ephemeral {
++            let history = parent_thread.session.clone_history().await;
++            let reference_context_item = history.reference_context_item();
++            let mut rollout_items = history
++                .into_annotated_items()
++                .into_iter()
++                .map(RolloutItem::ResponseItem)
++                .collect::<Vec<_>>();
++            if let Some(reference_context_item) = reference_context_item {
++                rollout_items.push(RolloutItem::TurnContext(reference_context_item));
++            }
++            rollout_items
++        } else {
++            // `record_conversation_items` only queues persistence writes asynchronously.
++            // Flush before snapshotting store history for a fork.
++            parent_thread.ensure_rollout_materialized().await;
++            parent_thread.flush_rollout().await?;
+             load_agent_model_context(state, parent_thread_id, parent_history_mode)
+                 .await?
+                 .ok_or_else(|| {
+                     CodexErr::Fatal(format!(
+                         "parent thread history unavailable for fork: {parent_thread_id}"
+                     ))
+-                })?;
++                })?
++        };
+
+-        let selected_capability_roots = forked_rollout_items
+-            .iter()
+-            .find_map(|item| {
+-                let RolloutItem::SessionMeta(meta_line) = item else {
+-                    return None;
+-                };
+-                Some(meta_line.meta.selected_capability_roots.clone())
+-            })
+-            .unwrap_or_default();
++        let selected_capability_roots = if parent_config_snapshot.ephemeral {
++            parent_thread
++                .session
++                .services
++                .selected_capability_roots
++                .clone()
++        } else {
++            forked_rollout_items
++                .iter()
++                .find_map(|item| {
++                    let RolloutItem::SessionMeta(meta_line) = item else {
++                        return None;
++                    };
++                    Some(meta_line.meta.selected_capability_roots.clone())
++                })
++                .unwrap_or_default()
++        };
+         if let SpawnAgentForkMode::LastNTurns(last_n_turns) = fork_mode {
+             forked_rollout_items =
+                 truncate_rollout_to_last_n_fork_turns(forked_rollout_items, *last_n_turns);
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+index 71f7f6c..0b1c96e 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_tests.rs
+@@ -834,7 +834,7 @@ async fn spawn_agent_full_history_fork_accepts_explicit_service_tier() {
+ }
+
+ #[tokio::test]
+-async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
++async fn multi_agent_v2_ephemeral_full_history_fork_uses_live_context_and_accepts_service_tier() {
+     #[derive(Debug, Deserialize)]
+     struct SpawnAgentResult {
+         task_name: String,
+@@ -845,6 +845,7 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
+         .with_model("gpt-5.4".to_string(), &session.services.models_manager)
+         .await;
+     let mut config = (*turn.config).clone();
++    config.ephemeral = true;
+     config
+         .features
+         .enable(Feature::MultiAgentV2)
+@@ -855,6 +856,9 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
+         .start_thread(StartThreadOptions::new((*turn.config).clone()))
+         .await
+         .expect("root thread should start");
++    root.thread
++        .inject_user_message_without_turn("ephemeral parent context".to_string())
++        .await;
+     session.services.agent_control = manager.agent_control();
+     session.thread_id = root.thread_id;
+     let session = Arc::new(session);
+@@ -886,17 +890,32 @@ async fn multi_agent_v2_full_history_fork_accepts_explicit_service_tier() {
+         )
+         .await
+         .expect("spawned task name should resolve");
+-    let snapshot = manager
++    let child_thread = manager
+         .get_thread(child_thread_id)
+         .await
+-        .expect("spawned agent thread should exist")
+-        .config_snapshot()
+-        .await;
++        .expect("spawned agent thread should exist");
++    let snapshot = child_thread.config_snapshot().await;
+
+     assert_eq!(
+         snapshot.service_tier,
+         Some(ServiceTier::Fast.request_value().to_string())
+     );
++    assert!(
++        child_thread
++            .session
++            .clone_history()
++            .await
++            .raw_items()
++            .any(|item| matches!(
++                item,
++                ResponseItem::Message { content, .. }
++                    if content.iter().any(|content| matches!(
++                        content,
++                        ContentItem::InputText { text } if text == "ephemeral parent context"
++                    ))
++            )),
++        "ephemeral full-history fork should inherit live parent context"
++    );
+ }
+
+ #[tokio::test]

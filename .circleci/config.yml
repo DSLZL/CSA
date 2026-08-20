@@ -236,10 +236,15 @@ jobs:
             tar \
               -xzf "$official_archive" \
               --directory "$official_root" \
-              --strip-components=4 \
-              package/vendor/x86_64-pc-windows-msvc/bin/codex-code-mode-host.exe
-            code_mode_host="$official_root/codex-code-mode-host.exe"
-            test -f "$code_mode_host"
+              --strip-components=3 \
+              package/vendor/x86_64-pc-windows-msvc/bin/codex-code-mode-host.exe \
+              package/vendor/x86_64-pc-windows-msvc/codex-resources/codex-command-runner.exe \
+              package/vendor/x86_64-pc-windows-msvc/codex-resources/codex-windows-sandbox-setup.exe \
+              package/vendor/x86_64-pc-windows-msvc/codex-path/rg.exe
+            test -f "$official_root/bin/codex-code-mode-host.exe"
+            test -f "$official_root/codex-resources/codex-command-runner.exe"
+            test -f "$official_root/codex-resources/codex-windows-sandbox-setup.exe"
+            test -f "$official_root/codex-path/rg.exe"
 
             git clone \
               --filter=blob:none \
@@ -261,13 +266,21 @@ jobs:
             artifact="$cargo_target/x86_64-pc-windows-msvc/release/codex.exe"
             test -f "$artifact"
             output="$PWD/.artifacts/$compat_id"
-            mkdir -p "$output"
-            cp "$artifact" "$output/codex.exe"
-            cp "$code_mode_host" "$output/codex-code-mode-host.exe"
+            mkdir -p "$output/bin" "$output/codex-resources" "$output/codex-path"
+            cp "$artifact" "$output/bin/codex.exe"
+            cp "$official_root/bin/codex-code-mode-host.exe" "$output/bin/codex-code-mode-host.exe"
+            cp "$official_root/codex-resources/codex-command-runner.exe" "$output/codex-resources/codex-command-runner.exe"
+            cp "$official_root/codex-resources/codex-windows-sandbox-setup.exe" "$output/codex-resources/codex-windows-sandbox-setup.exe"
+            cp "$official_root/codex-path/rg.exe" "$output/codex-path/rg.exe"
             cp "$result" "$output/contract-result.json"
             (
               cd "$output"
-              sha256sum codex.exe codex-code-mode-host.exe > SHA256SUMS
+              sha256sum \
+                bin/codex.exe \
+                bin/codex-code-mode-host.exe \
+                codex-resources/codex-command-runner.exe \
+                codex-resources/codex-windows-sandbox-setup.exe \
+                codex-path/rg.exe > SHA256SUMS
             )
             {
               rustc -Vv
@@ -277,8 +290,8 @@ jobs:
               lld-link --version
               printf 'logical_cpus: %s\n' "$(nproc)"
               printf 'resource_class: large.gen3\n'
-              printf 'code_mode_host_source: @openai/codex@%s-win32-x64\n' "$codex_version"
-              printf 'code_mode_host_integrity: %s\n' "$official_windows_npm_integrity"
+              printf 'windows_runtime_source: @openai/codex@%s-win32-x64\n' "$codex_version"
+              printf 'windows_runtime_integrity: %s\n' "$official_windows_npm_integrity"
             } > "$output/build-environment.txt"
 
       - run:

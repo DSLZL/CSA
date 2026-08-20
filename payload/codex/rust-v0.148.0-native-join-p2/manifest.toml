@@ -34,7 +34,7 @@ sha256 = "d9c197ba2059233463db19b1fc16add7083d8ef95c5ef07ebb4124dbad926a60"
 
 [[patches]]
 path = "patches/0005-tests-telemetry.patch"
-sha256 = "4a712423a9ca63e802b6958c8710d7d33c537f0ef0f4759e548a434c327f702e"
+sha256 = "ad0f96c482336076300b7f331fd3d05b79f613bb8008ddab716766791173a999"
 
 [[patches]]
 path = "patches/0006-csa-version-display.patch"
