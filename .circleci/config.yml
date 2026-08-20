@@ -40,8 +40,8 @@ jobs:
 
       - restore_cache:
           keys:
-            - csa-cargo-home-v4-linux-amd64-1.95.0-codex-<< parameters.upstream_commit >>
-            - csa-cargo-home-v4-linux-amd64-1.95.0-codex-
+            - csa-cargo-home-v5-linux-amd64-1.95.0-codex-<< parameters.upstream_commit >>
+            - csa-cargo-home-v5-linux-amd64-1.95.0-codex-
 
       - restore_cache:
           keys:
@@ -53,14 +53,15 @@ jobs:
 
       - restore_cache:
           keys:
-            - csa-sccache-v1-linux-amd64-1.95.0-xwin-0.23.0-codex-<< parameters.upstream_commit >>
-            - csa-sccache-v1-linux-amd64-1.95.0-xwin-0.23.0-codex-
+            - csa-sccache-v2-linux-amd64-1.95.0-xwin-0.23.0-codex-<< parameters.upstream_commit >>
+            - csa-sccache-v2-linux-amd64-1.95.0-xwin-0.23.0-codex-
 
       - run:
           name: Install pinned cross-build tools
           command: |
             set -euo pipefail
             tool_bin="$HOME/.local/bin"
+            mkdir -p "$TMPDIR"
             temp_root="$(mktemp -d)"
             trap 'rm -rf "$temp_root"' EXIT
             mkdir -p \
@@ -68,7 +69,6 @@ jobs:
               "$CARGO_HOME" \
               "$RUSTUP_HOME" \
               "$SCCACHE_DIR" \
-              "$TMPDIR" \
               "$XWIN_CACHE_DIR"
 
             install_release_binary() {
@@ -240,16 +240,14 @@ jobs:
             fi
 
       - save_cache:
-          key: csa-cargo-home-v4-linux-amd64-1.95.0-codex-<< parameters.upstream_commit >>
-          when: always
+          key: csa-cargo-home-v5-linux-amd64-1.95.0-codex-<< parameters.upstream_commit >>
           paths:
             - /home/circleci/.cache/csa/cargo-home/registry/index
             - /home/circleci/.cache/csa/cargo-home/registry/cache
             - /home/circleci/.cache/csa/cargo-home/git/db
 
       - save_cache:
-          key: csa-sccache-v1-linux-amd64-1.95.0-xwin-0.23.0-codex-<< parameters.upstream_commit >>
-          when: always
+          key: csa-sccache-v2-linux-amd64-1.95.0-xwin-0.23.0-codex-<< parameters.upstream_commit >>
           paths:
             - /home/circleci/.cache/csa/sccache
 

@@ -318,10 +318,10 @@ def test_release_stream_contracts() -> None:
     assert "default: false" in circleci
     assert "resource_class: large.gen3" in circleci
     assert 'CARGO_BUILD_JOBS: "4"' in circleci
-    assert "csa-cargo-home-v4-linux-amd64-1.95.0-codex-" in circleci
+    assert "csa-cargo-home-v5-linux-amd64-1.95.0-codex-" in circleci
     assert "csa-rustup-v1-linux-amd64-rustup-1.29.0-rust-1.95.0-windows-msvc" in circleci
     assert "csa-xwin-v1-linux-amd64-cargo-xwin-0.23.0-msvc17-x86_64" in circleci
-    assert "csa-sccache-v1-linux-amd64-1.95.0-xwin-0.23.0-codex-" in circleci
+    assert "csa-sccache-v2-linux-amd64-1.95.0-xwin-0.23.0-codex-" in circleci
     for cargo_download in ("registry/index", "registry/cache", "git/db"):
         assert f"/cargo-home/{cargo_download}" in circleci
     assert "RUSTC_WRAPPER: sccache" in circleci
@@ -332,7 +332,8 @@ def test_release_stream_contracts() -> None:
     assert 'root="$HOME/csa-patched-codex/$compat_id"' in circleci
     assert 'root="/tmp/csa-patched-codex/$compat_id"' not in circleci
     assert "TMPDIR: /home/circleci/csa-tmp" in circleci
-    assert circleci.count("when: always") == 3
+    assert circleci.index('mkdir -p "$TMPDIR"') < circleci.index('temp_root="$(mktemp -d)"')
+    assert circleci.count("when: always") == 1
     assert circleci.count("rust-v0.147.0-native-join-p2") == 1
     assert circleci.count("rust-v0.148.0-native-join-p2") == 1
     assert "OPENAI_API_KEY" not in circleci
