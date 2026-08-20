@@ -154,7 +154,7 @@ jobs:
             - /home/circleci/.cache/csa/xwin
 
       - run:
-          name: Apply, test, and cross-compile exact patched Codex CLI
+          name: Apply, test, and cross-compile exact patched Codex runtime
           no_output_timeout: 30m
           command: |
             set -euo pipefail
@@ -210,13 +210,27 @@ jobs:
               --output "$result" \
               --cross-windows-msvc
 
+            cargo xwin build \
+              --manifest-path "$source/codex-rs/Cargo.toml" \
+              -p codex-code-mode-host \
+              --bin codex-code-mode-host \
+              --release \
+              --target x86_64-pc-windows-msvc \
+              --target-dir "$cargo_target"
+
             artifact="$cargo_target/x86_64-pc-windows-msvc/release/codex.exe"
+            code_mode_host="$cargo_target/x86_64-pc-windows-msvc/release/codex-code-mode-host.exe"
             test -f "$artifact"
+            test -f "$code_mode_host"
             output="$PWD/.artifacts/$compat_id"
             mkdir -p "$output"
             cp "$artifact" "$output/codex.exe"
+            cp "$code_mode_host" "$output/codex-code-mode-host.exe"
             cp "$result" "$output/contract-result.json"
-            sha256sum "$artifact" | sed 's#  .*#  codex.exe#' > "$output/SHA256SUMS"
+            (
+              cd "$output"
+              sha256sum codex.exe codex-code-mode-host.exe > SHA256SUMS
+            )
             {
               rustc -Vv
               cargo xwin --version
