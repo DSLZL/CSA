@@ -8,10 +8,12 @@ import hashlib
 import json
 import os
 import re
+import stat
 import subprocess
 import sys
 import tempfile
 import tomllib
+from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
 
 
@@ -38,10 +40,23 @@ ROOT_KEYS = {
     "preimage",
     "artifacts",
 }
+FAMILY_BINDING_KEYS = ROOT_KEYS | {"family_id", "files"}
+FAMILY_KEYS = {"schema", "family_id", "patch_api", "patch_set_version", "bindings"}
+FAMILY_ENTRY_KEYS = {"compat_id", "manifest", "sha256"}
 
 
 class VerificationError(RuntimeError):
     pass
+
+
+@dataclass(frozen=True)
+class LoadedPayload:
+    manifest: dict[str, object]
+    manifest_path: Path
+    payload_root: Path
+    files: dict[str, Path]
+    source_schema: int
+    family_id: str | None = None
 
 
 def _relative(value: object, label: str) -> str:
@@ -85,13 +100,201 @@ def _run(
     return result
 
 
-def _load_manifest(path: Path) -> dict[str, object]:
+def _read_toml(path: Path, label: str) -> tuple[dict[str, object], bytes]:
     try:
-        manifest = tomllib.loads(path.read_text(encoding="utf-8"))
+        data = path.read_bytes()
+        value = tomllib.loads(data.decode("utf-8"))
     except (OSError, tomllib.TOMLDecodeError) as error:
-        raise VerificationError(f"cannot read manifest: {error}") from error
+        raise VerificationError(f"cannot read {label}: {error}") from error
+    except UnicodeDecodeError as error:
+        raise VerificationError(f"cannot decode {label} as UTF-8: {error}") from error
+    if not isinstance(value, dict):
+        raise VerificationError(f"{label} must be a TOML table")
+    return value, data
+
+
+def _regular_relative(root: Path, relative: str, label: str) -> Path:
+    current = root
+    for part in PurePosixPath(relative).parts:
+        current /= part
+        try:
+            metadata = current.lstat()
+        except OSError as error:
+            raise VerificationError(f"cannot inspect {label}: {error}") from error
+        if stat.S_ISLNK(metadata.st_mode):
+            raise VerificationError(f"{label} may not use symlinks")
+    if not stat.S_ISREG(metadata.st_mode):
+        raise VerificationError(f"{label} is not a regular file")
+    resolved = current.resolve(strict=True)
+    try:
+        resolved.relative_to(root)
+    except ValueError as error:
+        raise VerificationError(f"{label} escapes its root") from error
+    return resolved
+
+
+def _payload_paths(manifest: dict[str, object]) -> set[str]:
+    return {
+        str(manifest["source_hashes"]),
+        "test-contract.json",
+        *(str(patch["path"]) for patch in manifest["patches"]),
+    }
+
+
+def _family_root(manifest_path: Path, compat_id: str, family_id: str) -> Path:
+    compat_root = manifest_path.parent
+    bindings_root = compat_root.parent
+    family_root = bindings_root.parent
+    if (
+        manifest_path.name != "manifest.toml"
+        or compat_root.name != compat_id
+        or bindings_root.name != "bindings"
+        or family_root.name != family_id
+    ):
+        raise VerificationError(
+            "schema-2 manifest must be payload/codex/<family>/bindings/<compat_id>/manifest.toml"
+        )
+    return family_root
+
+
+def _load_family(
+    family_root: Path,
+    family_id: str,
+    manifest: dict[str, object],
+    manifest_path: Path,
+    manifest_bytes: bytes,
+) -> None:
+    family_path = _regular_relative(family_root, "family.toml", "patch family")
+    family, _ = _read_toml(family_path, "patch family")
+    unknown = set(family) - FAMILY_KEYS
+    missing = FAMILY_KEYS - set(family)
+    if unknown or missing:
+        raise VerificationError(
+            f"family keys mismatch; missing={sorted(missing)}, unknown={sorted(unknown)}"
+        )
+    if (
+        type(family["schema"]) is not int
+        or family["schema"] != 2
+        or family["family_id"] != family_id
+        or type(family["patch_api"]) is not int
+        or family["patch_api"] != manifest["patch_api"]
+        or type(family["patch_set_version"]) is not int
+        or family["patch_set_version"] != manifest["patch_set_version"]
+    ):
+        raise VerificationError("patch family identity or API differs from its binding")
+    bindings = family["bindings"]
+    if not isinstance(bindings, list) or not bindings:
+        raise VerificationError("patch family must contain at least one exact binding")
+    seen_ids: set[str] = set()
+    seen_paths: set[str] = set()
+    selected = 0
+    for index, binding in enumerate(bindings):
+        if not isinstance(binding, dict) or set(binding) != FAMILY_ENTRY_KEYS:
+            raise VerificationError(f"invalid bindings[{index}]")
+        compat_id = binding["compat_id"]
+        relative = _relative(binding["manifest"], f"bindings[{index}].manifest")
+        digest = binding["sha256"]
+        if (
+            not isinstance(compat_id, str)
+            or not COMPAT_ID.fullmatch(compat_id)
+            or not isinstance(digest, str)
+            or not SHA256.fullmatch(digest)
+            or compat_id in seen_ids
+            or relative in seen_paths
+            or relative != f"bindings/{compat_id}/manifest.toml"
+        ):
+            raise VerificationError(f"invalid or duplicate bindings[{index}]")
+        seen_ids.add(compat_id)
+        seen_paths.add(relative)
+        binding_path = _regular_relative(family_root, relative, f"family binding {relative}")
+        try:
+            binding_data = binding_path.read_bytes()
+        except OSError as error:
+            raise VerificationError(f"cannot read family binding {relative}: {error}") from error
+        if _digest(binding_data) != digest:
+            raise VerificationError(f"family binding digest mismatch: {relative}")
+        if binding_path == manifest_path:
+            selected += 1
+            if compat_id != manifest["compat_id"] or binding_data != manifest_bytes:
+                raise VerificationError("family index selects a different exact binding")
+    if selected != 1:
+        raise VerificationError("family index must select the exact binding once")
+
+
+def _load_payload(path: Path) -> LoadedPayload:
+    try:
+        metadata = path.lstat()
+    except OSError as error:
+        raise VerificationError(f"cannot inspect manifest: {error}") from error
+    if stat.S_ISLNK(metadata.st_mode) or not stat.S_ISREG(metadata.st_mode):
+        raise VerificationError("manifest must be a regular file, not a symlink")
+    manifest_path = path.resolve(strict=True)
+    raw, manifest_bytes = _read_toml(manifest_path, "manifest")
+    schema = raw.get("schema")
+    if type(schema) is not int:
+        raise VerificationError("unsupported manifest schema or patch_api")
+    if schema == 1:
+        _validate_manifest(raw)
+        if manifest_path.parent.name != raw["compat_id"]:
+            raise VerificationError("compat_id must equal the payload directory name")
+        files = {
+            relative: manifest_path.parent / PurePosixPath(relative)
+            for relative in _payload_paths(raw)
+        }
+        return LoadedPayload(raw, manifest_path, manifest_path.parent, files, 1)
+    if schema != 2:
+        raise VerificationError("unsupported manifest schema or patch_api")
+
+    unknown = set(raw) - FAMILY_BINDING_KEYS
+    missing = FAMILY_BINDING_KEYS - set(raw)
+    if unknown or missing:
+        raise VerificationError(
+            f"manifest keys mismatch; missing={sorted(missing)}, unknown={sorted(unknown)}"
+        )
+    family_id = raw["family_id"]
+    file_map = raw["files"]
+    if not isinstance(family_id, str) or not COMPAT_ID.fullmatch(family_id):
+        raise VerificationError("invalid family_id")
+    if not isinstance(file_map, dict):
+        raise VerificationError("files must be a logical-to-physical path table")
+
+    manifest = {key: value for key, value in raw.items() if key in ROOT_KEYS}
+    manifest["schema"] = 1
     _validate_manifest(manifest)
-    return manifest
+    family_root = _family_root(manifest_path, str(manifest["compat_id"]), family_id)
+    _load_family(family_root, family_id, manifest, manifest_path, manifest_bytes)
+
+    expected = _payload_paths(manifest)
+    if set(file_map) != expected:
+        raise VerificationError(
+            f"binding files mismatch; missing={sorted(expected - set(file_map))}, "
+            f"unknown={sorted(set(file_map) - expected)}"
+        )
+    files: dict[str, Path] = {}
+    physical: set[str] = set()
+    for logical, source in file_map.items():
+        if not isinstance(logical, str):
+            raise VerificationError("binding logical paths must be strings")
+        logical = _relative(logical, "files key")
+        relative = _relative(source, f"files[{logical!r}]")
+        if relative in physical:
+            raise VerificationError("one binding file may not serve multiple logical paths")
+        physical.add(relative)
+        files[logical] = family_root / PurePosixPath(relative)
+    return LoadedPayload(manifest, manifest_path, family_root, files, 2, family_id)
+
+
+def _load_manifest(path: Path) -> dict[str, object]:
+    return _load_payload(path).manifest
+
+
+def _payload_file(payload: LoadedPayload, logical: str) -> Path:
+    try:
+        path = payload.files[logical]
+    except KeyError as error:
+        raise VerificationError(f"payload does not declare file: {logical}") from error
+    relative = path.relative_to(payload.payload_root).as_posix()
+    return _regular_relative(payload.payload_root, relative, f"payload file {logical}")
 
 
 def _validate_manifest(manifest: dict[str, object]) -> None:
@@ -196,7 +399,8 @@ def _touched_paths(patches: list[Path]) -> set[str]:
 def verify(manifest_path: Path, source: Path, apply: bool, artifact_path: Path | None) -> dict[str, object]:
     if not manifest_path.is_absolute() or not source.is_absolute():
         raise VerificationError("manifest and source paths must be absolute")
-    manifest = _load_manifest(manifest_path)
+    payload = _load_payload(manifest_path)
+    manifest = payload.manifest
     if not source.is_dir():
         raise VerificationError(f"source is not a directory: {source}")
     if _run(["git", "status", "--porcelain=v1", "--untracked-files=all"], source).stdout:
@@ -212,8 +416,7 @@ def verify(manifest_path: Path, source: Path, apply: bool, artifact_path: Path |
     if cargo.get("workspace", {}).get("package", {}).get("version") != manifest["codex_version"]:
         raise VerificationError("Codex workspace version mismatch")
 
-    payload_root = manifest_path.parent
-    hash_path = payload_root / _relative(manifest["source_hashes"], "source_hashes")
+    hash_path = _payload_file(payload, _relative(manifest["source_hashes"], "source_hashes"))
     hash_bytes = hash_path.read_bytes()
     if _digest(hash_bytes) != manifest["source_hashes_sha256"]:
         raise VerificationError("source-hashes file digest mismatch")
@@ -245,7 +448,7 @@ def verify(manifest_path: Path, source: Path, apply: bool, artifact_path: Path |
 
     patch_paths: list[Path] = []
     for patch in manifest["patches"]:
-        path = payload_root / _relative(patch["path"], "patch path")
+        path = _payload_file(payload, _relative(patch["path"], "patch path"))
         data = path.read_bytes()
         if _digest(data) != patch["sha256"]:
             raise VerificationError(f"patch hash mismatch: {patch['path']}")

@@ -25,7 +25,7 @@ class PatchPayloadVerifierTests(unittest.TestCase):
         self.assertFalse(result["applied"])
 
     def test_unknown_schema_and_key_fail_without_artifact(self) -> None:
-        self._assert_rejected("schema = 1", "schema = 2", "unsupported manifest")
+        self._assert_rejected("schema = 1", "schema = 2", "manifest keys mismatch")
         self._assert_rejected(
             "\n[[patches]]",
             "\nunknown_field = true\n\n[[patches]]",
@@ -71,7 +71,8 @@ class PatchPayloadVerifierTests(unittest.TestCase):
         self.assertIn(old, text)
         with tempfile.TemporaryDirectory(prefix="codex-patch-negative-") as temp_dir:
             temp = Path(temp_dir)
-            manifest = temp / "manifest.toml"
+            manifest = temp / MANIFEST.parent.name / "manifest.toml"
+            manifest.parent.mkdir()
             manifest.write_text(text.replace(old, new, 1), encoding="utf-8")
             artifact = temp / "codex.exe"
             with self.assertRaisesRegex(VerificationError, message):

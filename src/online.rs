@@ -72,7 +72,7 @@ pub fn resolve_online_install(
         ));
     }
 
-    let compat_id = format!("rust-v{upstream_version}-native-join-p1");
+    let compat_id = format!("rust-v{upstream_version}-native-join-p2");
     let release_tag = format!("compat-{compat_id}");
     let release_url = format!("{API_ROOT}/{CSA_REPOSITORY}/releases/tags/{release_tag}");
     let compatibility_release: GitHubRelease =

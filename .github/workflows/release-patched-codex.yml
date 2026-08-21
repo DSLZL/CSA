@@ -4,9 +4,19 @@ on:
   workflow_dispatch:
     inputs:
       compat_id:
-        description: Reviewed compatibility ID under payload/codex/
+        description: Reviewed compatibility ID under the Native Join P2 family
         required: true
         default: "rust-v0.148.0-native-join-p2"
+        type: string
+      official_windows_npm_integrity:
+        description: Exact @openai/codex Windows x64 npm integrity
+        required: true
+        default: "sha512-/Jg8eYw0BqTGNUpnrzzWlK2kbu29NWg7t6pnUDEfxqpTUf+mK8r3okXQn60Zjbk9InYZ4d8SwSjrtOa+i5hSPw=="
+        type: string
+      accepted_codex_sha256:
+        description: SHA-256 of codex.exe accepted from the CircleCI bundle on local Windows
+        required: true
+        default: "d1368d4a94c7ac4bf09296f68516343a76ce11aa375363d4fcddc7fe8ef09730"
         type: string
 
 concurrency:
@@ -25,7 +35,15 @@ env:
 jobs:
   build:
     name: Build exact patched Codex CLI
-    runs-on: windows-2025
+    runs-on: ubuntu-26.04
+    timeout-minutes: 30
+    env:
+      CARGO_HOME: ${{ runner.temp }}/csa-patched-codex/cache/cargo-home
+      CSA_TOOL_BIN: ${{ runner.temp }}/csa-patched-codex/tools
+      RUSTUP_HOME: ${{ runner.temp }}/csa-patched-codex/cache/rustup
+      SCCACHE_DIR: ${{ runner.temp }}/csa-patched-codex/cache/sccache
+      TMPDIR: ${{ runner.temp }}/csa-patched-codex/tmp
+      XWIN_CACHE_DIR: ${{ runner.temp }}/csa-patched-codex/cache/xwin
     outputs:
       compat_id: ${{ steps.manifest.outputs.compat_id }}
       release_tag: ${{ steps.manifest.outputs.release_tag }}
@@ -62,7 +80,8 @@ jobs:
           New-Item -ItemType Directory -Force `
             $root, `
             (Join-Path $root "home"), `
-            (Join-Path $root "codex-home") | Out-Null
+            (Join-Path $root "codex-home"), `
+            $env:TMPDIR | Out-Null
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -87,18 +106,26 @@ jobs:
           @'
           import os
           import re
-          import tomllib
+          import hashlib
+          import sys
           from pathlib import Path
+
+          sys.path.insert(0, str(Path("scripts").resolve()))
+          from verify_patch_payload import _load_payload
 
           compat_id = os.environ["REQUESTED_COMPAT_ID"].strip()
           if not re.fullmatch(r"[A-Za-z0-9._-]+", compat_id):
               raise SystemExit(f"unsafe compatibility ID: {compat_id!r}")
 
-          manifest_path = Path("payload") / "codex" / compat_id / "manifest.toml"
+          manifest_path = (
+              Path("payload") / "codex" / "native-join-p2" / "bindings" /
+              compat_id / "manifest.toml"
+          )
           if not manifest_path.is_file():
               raise SystemExit(f"reviewed compatibility manifest does not exist: {manifest_path}")
 
-          manifest = tomllib.loads(manifest_path.read_text(encoding="utf-8"))
+          payload = _load_payload(manifest_path)
+          manifest = payload.manifest
           if manifest.get("compat_id") != compat_id:
               raise SystemExit(
                   f"compatibility ID mismatch: requested={compat_id}, manifest={manifest.get('compat_id')}"
@@ -133,6 +160,8 @@ jobs:
               "build_target": target,
               "artifact_filename": artifact["filename"],
               "manifest_path": manifest_path.as_posix(),
+              "family_id": payload.family_id,
+              "binding_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
           }
 
           output = Path(os.environ["GITHUB_OUTPUT"])
@@ -144,16 +173,33 @@ jobs:
       - name: Configure exact CLI artifact path
         shell: pwsh
         run: |
-          $artifact = Join-Path $env:CARGO_TARGET_DIR "${{ steps.manifest.outputs.build_target }}/release/${{ steps.manifest.outputs.artifact_filename }}"
+          $artifact = Join-Path $env:PATCHED_CODEX_ROOT "bundle/bin/${{ steps.manifest.outputs.artifact_filename }}"
           "ARTIFACT_PATH=$artifact" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
 
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
-
-      - name: Set up Cargo downloads and sccache
-        uses: ./.github/actions/setup-codex-rust-cache
+      - name: Restore Cargo downloads
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
-          cache-scope: codex-${{ steps.manifest.outputs.upstream_commit }}
-          toolchain: "1.95.0"
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+          key: csa-cargo-home-v5-linux-X64-1.95.0-codex-${{ steps.manifest.outputs.upstream_commit }}
+          restore-keys: csa-cargo-home-v5-linux-X64-1.95.0-codex-
+      - name: Restore exact Rust toolchain
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.RUSTUP_HOME }}
+          key: csa-rustup-v2-linux-X64-rustup-1.29.0-rustc-59807616e1fa2540724bfbac14d7976d7e4a3860-host-x86_64-unknown-linux-gnu-target-x86_64-pc-windows-msvc
+      - name: Restore exact xwin SDK
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.XWIN_CACHE_DIR }}
+          key: csa-xwin-v2-linux-X64-cargo-xwin-0.23.0-msvc17-x86_64-pc-windows-msvc
+      - name: Restore exact compiler cache
+        uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: csa-sccache-v4-linux-X64-rustc-59807616e1fa2540724bfbac14d7976d7e4a3860-xwin-0.23.0-msvc17-llvm21.1.8-x86_64-pc-windows-msvc-${{ steps.manifest.outputs.binding_sha256 }}-${{ steps.manifest.outputs.upstream_commit }}
 
       - name: Clone exact reviewed upstream source
         shell: pwsh
@@ -180,47 +226,50 @@ jobs:
             throw "upstream tag peeled to $peeled, expected ${{ steps.manifest.outputs.upstream_commit }}"
           }
 
-      - name: Apply patch, run contract tests, and build only Codex CLI
-        shell: pwsh
+      - name: Build canonical patched Codex bundle
         env:
           HOME: ${{ runner.temp }}/csa-patched-codex/home
           CODEX_HOME: ${{ runner.temp }}/csa-patched-codex/codex-home
         run: |
-          python scripts/run_patch_contract.py `
-            --manifest "$env:GITHUB_WORKSPACE/${{ steps.manifest.outputs.manifest_path }}" `
-            --source "$env:SOURCE_ROOT" `
-            --cargo-target "$env:CARGO_TARGET_DIR" `
-            --output "$env:PATCHED_CODEX_ROOT/contract-result.json"
+          bash scripts/build_patched_codex_bundle.sh \
+            "$GITHUB_WORKSPACE/${{ steps.manifest.outputs.manifest_path }}" \
+            "$SOURCE_ROOT" \
+            "$CARGO_TARGET_DIR" \
+            "$PATCHED_CODEX_ROOT/bundle" \
+            "${{ inputs.official_windows_npm_integrity }}" \
+            "$PATCHED_CODEX_ROOT/sccache-stats.json"
 
-          if (-not (Test-Path -LiteralPath $env:ARTIFACT_PATH -PathType Leaf)) {
-            throw "patched Codex CLI was not produced: $env:ARTIFACT_PATH"
-          }
-
-      - name: Verify exact patched CLI against reviewed manifest
+      - name: Match locally accepted CircleCI executable
         shell: pwsh
+        env:
+          ACCEPTED_CODEX_SHA256: ${{ inputs.accepted_codex_sha256 }}
         run: |
-          & git -C "$env:SOURCE_ROOT" reset --hard "${{ steps.manifest.outputs.upstream_commit }}"
-          if ($LASTEXITCODE -ne 0) { throw "git reset failed" }
-
-          & git -C "$env:SOURCE_ROOT" clean -ffd
-          if ($LASTEXITCODE -ne 0) { throw "git clean failed" }
-
-          python scripts/verify_patch_payload.py `
-            --manifest "$env:GITHUB_WORKSPACE/${{ steps.manifest.outputs.manifest_path }}" `
-            --source "$env:SOURCE_ROOT" `
+          $expected = $env:ACCEPTED_CODEX_SHA256.Trim().ToLowerInvariant()
+          if ($expected -notmatch '^[0-9a-f]{64}$') {
+            throw "accepted_codex_sha256 must be lowercase 64-hex"
+          }
+          $actual = (Get-FileHash -LiteralPath $env:ARTIFACT_PATH -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($actual -ne $expected) {
+            throw "formal codex.exe SHA-256 $actual differs from locally accepted CircleCI SHA-256 $expected"
+          }
 
       - name: Stage formal Release manifest without modifying the reviewed entry
         shell: pwsh
         run: |
+          & git -C "$env:SOURCE_ROOT" reset --hard "${{ steps.manifest.outputs.upstream_commit }}"
+          if ($LASTEXITCODE -ne 0) { throw "git reset failed" }
+          & git -C "$env:SOURCE_ROOT" clean -ffd
+          if ($LASTEXITCODE -ne 0) { throw "git clean failed" }
+
           $payloadParent = Join-Path $env:PATCHED_CODEX_ROOT "release-payload"
-          $stagedEntry = Join-Path $payloadParent "${{ steps.manifest.outputs.compat_id }}"
+          $stagedFamily = Join-Path $payloadParent "${{ steps.manifest.outputs.family_id }}"
           New-Item -ItemType Directory -Force $payloadParent | Out-Null
           Copy-Item `
-            -LiteralPath "$env:GITHUB_WORKSPACE/payload/codex/${{ steps.manifest.outputs.compat_id }}" `
-            -Destination $stagedEntry `
+            -LiteralPath "$env:GITHUB_WORKSPACE/payload/codex/${{ steps.manifest.outputs.family_id }}" `
+            -Destination $stagedFamily `
             -Recurse
 
-          $stagedManifest = Join-Path $stagedEntry "manifest.toml"
+          $stagedManifest = Join-Path $stagedFamily "bindings/${{ steps.manifest.outputs.compat_id }}/manifest.toml"
 
           # finalize() binds the formal compat-* download URL plus the exact
           # codex.exe size/hash in the disposable staged copy only.
@@ -272,15 +321,18 @@ jobs:
 
           "artifact_asset=$expected" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
 
-      - name: Rust cache statistics
-        if: always()
-        continue-on-error: true
-        run: sccache --show-stats
-
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: patched-codex-cli-release-${{ steps.manifest.outputs.compat_id }}
           path: ${{ runner.temp }}/csa-patched-codex/release-assets
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 1
+
+      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: patched-codex-cli-bundle-${{ steps.manifest.outputs.compat_id }}
+          path: ${{ runner.temp }}/csa-patched-codex/bundle
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
@@ -371,6 +423,7 @@ jobs:
           UPSTREAM_TAG: ${{ needs.build.outputs.upstream_tag }}
           UPSTREAM_COMMIT: ${{ needs.build.outputs.upstream_commit }}
           COMPAT_ID: ${{ needs.build.outputs.compat_id }}
+          ACCEPTED_CODEX_SHA256: ${{ inputs.accepted_codex_sha256 }}
         run: |
           set -euo pipefail
 
@@ -384,6 +437,7 @@ jobs:
 
           Compatibility ID: ${COMPAT_ID}
           Upstream: ${UPSTREAM_TAG} (${UPSTREAM_COMMIT})
+          Locally accepted CircleCI codex.exe SHA-256: ${ACCEPTED_CODEX_SHA256}
 
           This compatibility Release contains exactly one Codex executable product: the patched Codex CLI.
           It does not publish Codex App, Codex Desktop, app-server, exec-server, MCP server, or other Codex binaries.

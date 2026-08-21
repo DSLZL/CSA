@@ -901,8 +901,54 @@ fn bundled_p2_contract_requires_branding_and_runner_build_jobs() {
 
     assert_eq!(loaded.manifest.patch_set_version, 2);
     assert_eq!(loaded.patch_paths.len(), 6);
-    assert_eq!(contract.tests.len(), 8);
+    assert_eq!(contract.tests.len(), 11);
     assert!(!contract.build.env.contains_key("CARGO_BUILD_JOBS"));
+}
+
+#[test]
+fn family_bindings_resolve_to_the_exact_legacy_p2_payloads() {
+    let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
+    for version in ["0.147.0", "0.148.0"] {
+        let compat_id = format!("rust-v{version}-native-join-p2");
+        let legacy = repository
+            .join(format!("payload/codex/{compat_id}/manifest.toml"))
+            .canonicalize()
+            .unwrap();
+        let binding = repository
+            .join(format!(
+                "payload/codex/native-join-p2/bindings/{compat_id}/manifest.toml"
+            ))
+            .canonicalize()
+            .unwrap();
+        let legacy = LoadedCompatibility::load(&legacy).unwrap();
+        let binding = LoadedCompatibility::load(&binding).unwrap();
+
+        assert_eq!(binding.family_id(), Some("native-join-p2"));
+        assert_eq!(binding.manifest.compat_id, compat_id);
+        assert_eq!(
+            binding.test_contract().unwrap().tests.len(),
+            if version == "0.148.0" { 11 } else { 8 }
+        );
+        assert_eq!(
+            binding.payload_files().unwrap(),
+            legacy.payload_files().unwrap()
+        );
+    }
+
+    let shared = repository
+        .join("payload/codex/native-join-p2/shared/patches/0006-csa-version-display.patch")
+        .canonicalize()
+        .unwrap();
+    let binding = LoadedCompatibility::load(
+        &repository
+            .join(
+                "payload/codex/native-join-p2/bindings/rust-v0.148.0-native-join-p2/manifest.toml",
+            )
+            .canonicalize()
+            .unwrap(),
+    )
+    .unwrap();
+    assert_eq!(binding.patch_paths.last(), Some(&shared));
 }
 
 fn write_executable(path: &Path, bytes: &[u8]) {

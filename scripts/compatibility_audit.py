@@ -9,10 +9,10 @@ import os
 import subprocess
 import tempfile
 import tomllib
-from pathlib import Path
+from pathlib import Path, PurePosixPath
 from typing import Any
 
-from verify_patch_payload import _digest, _load_manifest, _run
+from verify_patch_payload import _digest, _load_payload, _payload_file, _run
 
 
 class AuditError(RuntimeError):
@@ -32,27 +32,30 @@ def files(root: Path) -> dict[str, str]:
 
 def validate_new_entry(root: Path) -> dict[str, Any]:
     manifest_path = root / "manifest.toml"
-    manifest = _load_manifest(manifest_path)
+    payload = _load_payload(manifest_path)
+    manifest = payload.manifest
     if manifest["compat_id"] != root.name:
         raise AuditError(f"compat_id must match its new directory: {root.name}")
-    expected_files = {"manifest.toml", "test-contract.json", manifest["source_hashes"]}
+    expected_files = {"manifest.toml"}
     for patch in manifest["patches"]:
-        patch_path = root / patch["path"]
+        patch_path = _payload_file(payload, patch["path"])
         if not patch_path.is_file() or _digest(patch_path.read_bytes()) != patch["sha256"]:
             raise AuditError(f"new entry patch mismatch: {patch['path']}")
-        expected_files.add(patch["path"])
-    source_hashes = root / manifest["source_hashes"]
+    source_hashes = _payload_file(payload, manifest["source_hashes"])
     if (
         not source_hashes.is_file()
         or _digest(source_hashes.read_bytes()) != manifest["source_hashes_sha256"]
     ):
         raise AuditError("new entry source-hashes mismatch")
     try:
-        contract = json.loads((root / "test-contract.json").read_bytes())
+        contract = json.loads(_payload_file(payload, "test-contract.json").read_bytes())
     except (OSError, json.JSONDecodeError) as error:
         raise AuditError(f"cannot read new entry test contract: {error}") from error
     if not isinstance(contract, dict) or contract.get("compat_id") != root.name:
         raise AuditError("new entry test contract identity mismatch")
+    for path in payload.files.values():
+        if path.is_relative_to(root):
+            expected_files.add(path.relative_to(root).as_posix())
     actual_files = set(files(root))
     if actual_files != expected_files:
         raise AuditError(
@@ -63,6 +66,66 @@ def validate_new_entry(root: Path) -> dict[str, Any]:
         "compat_id": root.name,
         "codex_version": manifest["codex_version"],
         "target": manifest["build_target"],
+    }
+
+
+def family_document(root: Path) -> dict[str, Any]:
+    try:
+        family = tomllib.loads((root / "family.toml").read_text(encoding="utf-8"))
+    except (OSError, tomllib.TOMLDecodeError) as error:
+        raise AuditError(f"cannot read patch family: {error}") from error
+    if not isinstance(family, dict) or not isinstance(family.get("bindings"), list):
+        raise AuditError("invalid patch family")
+    return family
+
+
+def validate_family(root: Path) -> dict[str, Any]:
+    family = family_document(root)
+    if family.get("family_id") != root.name:
+        raise AuditError("family_id must match its top-level directory")
+    expected_files = {"family.toml"}
+    bindings = []
+    for binding in family["bindings"]:
+        if not isinstance(binding, dict) or not isinstance(binding.get("manifest"), str):
+            raise AuditError("invalid family binding")
+        manifest_path = root / PurePosixPath(binding["manifest"])
+        payload = _load_payload(manifest_path)
+        bindings.append(validate_new_entry(manifest_path.parent))
+        expected_files.add(binding["manifest"])
+        for source in payload.files.values():
+            try:
+                expected_files.add(source.relative_to(root).as_posix())
+            except ValueError as error:
+                raise AuditError("family payload file escapes its root") from error
+    actual_files = set(files(root))
+    if actual_files != expected_files:
+        raise AuditError(
+            f"family file set mismatch; missing={sorted(expected_files - actual_files)}, "
+            f"unknown={sorted(actual_files - expected_files)}"
+        )
+    return {"family_id": root.name, "bindings": bindings}
+
+
+def check_family_immutability(baseline: Path, candidate: Path) -> dict[str, Any]:
+    before_document = (baseline / "family.toml").read_bytes()
+    after_document = (candidate / "family.toml").read_bytes()
+    if not after_document.startswith(before_document):
+        raise AuditError(f"patch family index is not append-only: {baseline.name}")
+    before = family_document(baseline)
+    after = family_document(candidate)
+    before_bindings = before.pop("bindings")
+    after_bindings = after.pop("bindings")
+    if before != after or after_bindings[: len(before_bindings)] != before_bindings:
+        raise AuditError(f"patch family metadata or existing rows changed: {baseline.name}")
+    before_files = files(baseline)
+    after_files = files(candidate)
+    for relative, digest in before_files.items():
+        if relative != "family.toml" and after_files.get(relative) != digest:
+            raise AuditError(f"immutable patch-family file changed: {baseline.name}/{relative}")
+    validate_family(candidate)
+    return {
+        "family_id": baseline.name,
+        "added_bindings": after_bindings[len(before_bindings) :],
     }
 
 
@@ -78,17 +141,23 @@ def check_immutability(baseline: Path, candidate: Path) -> dict[str, Any]:
     missing = set(baseline_entries) - set(candidate_entries)
     if missing:
         raise AuditError(f"compatibility entries were deleted: {sorted(missing)}")
+    changed_families = []
     for compat_id, root in baseline_entries.items():
-        if files(root) != files(candidate_entries[compat_id]):
+        candidate_root = candidate_entries[compat_id]
+        if (root / "family.toml").is_file():
+            changed_families.append(check_family_immutability(root, candidate_root))
+        elif files(root) != files(candidate_root):
             raise AuditError(f"immutable compatibility entry changed: {compat_id}")
     added = []
     for compat_id in sorted(set(candidate_entries) - set(baseline_entries)):
-        added.append(validate_new_entry(candidate_entries[compat_id]))
+        root = candidate_entries[compat_id]
+        added.append(validate_family(root) if (root / "family.toml").is_file() else validate_new_entry(root))
     return {
         "schema": 1,
         "result": "pass",
         "unchanged_entries": sorted(baseline_entries),
         "added_entries": added,
+        "changed_families": changed_families,
     }
 
 
@@ -98,12 +167,13 @@ def git_blob(source: Path, commit: str, relative: str) -> bytes | None:
 
 
 def patch_preflight(source: Path, commit: str, manifest_path: Path, manifest: dict[str, Any]) -> dict[str, Any]:
+    payload = _load_payload(manifest_path)
     with tempfile.TemporaryDirectory(prefix="codex-drift-index-") as temp_dir:
         env = os.environ.copy()
         env["GIT_INDEX_FILE"] = str(Path(temp_dir) / "index")
         _run(["git", "read-tree", commit], source, env=env)
         for patch in manifest["patches"]:
-            path = manifest_path.parent / patch["path"]
+            path = _payload_file(payload, patch["path"])
             check = _run(
                 ["git", "apply", "--cached", "--check", "--whitespace=error-all", str(path)],
                 source,
@@ -136,7 +206,7 @@ def report_drift(manifest_path: Path, source: Path, tag: str) -> dict[str, Any]:
         raise AuditError("manifest/source must be absolute and tag must be non-empty")
     manifest_path = manifest_path.resolve(strict=True)
     source = source.resolve(strict=True)
-    manifest = _load_manifest(manifest_path)
+    manifest = _load_payload(manifest_path).manifest
     if _run(["git", "status", "--porcelain=v1", "--untracked-files=all"], source).stdout:
         raise AuditError("candidate source worktree must be clean")
     commit = _run(["git", "rev-parse", "HEAD"], source).stdout.decode().strip()

@@ -90,10 +90,10 @@ jobs:
           gh issue edit "$ISSUE_NUMBER" --repo "$GITHUB_REPOSITORY" --title "Upstream patch blocked: $UPSTREAM_TAG" --body-file "$RUNNER_TEMP/csa-watch/updated.md"
 
   patch:
-    name: Port and test latest stable patch
+    name: Port latest stable patch
     needs: detect
     if: needs.detect.outputs.action == 'patch' && github.ref_name == github.event.repository.default_branch
-    runs-on: windows-2025
+    runs-on: ubuntu-24.04
     permissions:
       contents: write
       pull-requests: write
@@ -102,7 +102,6 @@ jobs:
       cancel-in-progress: false
     env:
       COMPAT_ID: ${{ needs.detect.outputs.compat_id }}
-      COMPAT_TAG: ${{ needs.detect.outputs.compat_release_tag }}
       UPSTREAM_TAG: ${{ needs.detect.outputs.upstream_tag }}
       UPSTREAM_COMMIT: ${{ needs.detect.outputs.upstream_commit }}
       BASE_MANIFEST: ${{ needs.detect.outputs.base_manifest }}
@@ -111,7 +110,7 @@ jobs:
       success: ${{ steps.outcome.outputs.success }}
       stage: ${{ steps.outcome.outputs.stage }}
     steps:
-      - name: Configure isolated build roots
+      - name: Configure isolated source root
         shell: pwsh
         run: |
           $root = Join-Path $env:RUNNER_TEMP "csa-watch"
@@ -119,8 +118,6 @@ jobs:
           @(
             "WATCH_ROOT=$root"
             "SOURCE_ROOT=$source"
-            "CARGO_TARGET_DIR=$(Join-Path $root 'cargo-target')"
-            "ARTIFACT_PATH=$(Join-Path $root 'cargo-target/x86_64-pc-windows-msvc/release/codex.exe')"
           ) | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
           $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP)
           $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)
@@ -132,19 +129,13 @@ jobs:
           if ($source.Equals($workspace, [StringComparison]::OrdinalIgnoreCase) -or $source.StartsWith("$workspace$separator", [StringComparison]::OrdinalIgnoreCase)) {
             throw "Codex source must not live inside the CSA repository: $source"
           }
-          New-Item -ItemType Directory -Force $root, (Join-Path $root 'home'), (Join-Path $root 'codex-home') | Out-Null
+          New-Item -ItemType Directory -Force $root | Out-Null
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
-      - name: Set up Cargo downloads and sccache
-        uses: ./.github/actions/setup-codex-rust-cache
-        with:
-          cache-scope: codex-${{ needs.detect.outputs.upstream_commit }}
-          toolchain: "1.95.0"
       - id: clone
         name: Clone exact upstream tag
         continue-on-error: true
@@ -174,90 +165,44 @@ jobs:
             --source "$env:SOURCE_ROOT" `
             --tag "$env:UPSTREAM_TAG" `
             --commit "$env:UPSTREAM_COMMIT" `
-            --output "$env:GITHUB_WORKSPACE/payload/codex/$env:COMPAT_ID" *> "$env:WATCH_ROOT/port.log"
+            --output "$env:GITHUB_WORKSPACE/payload/codex/native-join-p2/bindings/$env:COMPAT_ID" *> "$env:WATCH_ROOT/port.log"
           $code = $LASTEXITCODE
           Get-Content "$env:WATCH_ROOT/port.log"
           exit $code
-      - id: contract
-        name: Apply, test, and build exact contract
-        if: steps.port.outcome == 'success'
-        continue-on-error: true
-        env:
-          HOME: ${{ runner.temp }}/csa-watch/home
-          CODEX_HOME: ${{ runner.temp }}/csa-watch/codex-home
-        shell: pwsh
-        run: |
-          & python scripts/run_patch_contract.py `
-            --manifest "$env:GITHUB_WORKSPACE/payload/codex/$env:COMPAT_ID/manifest.toml" `
-            --source "$env:SOURCE_ROOT" `
-            --cargo-target "$env:CARGO_TARGET_DIR" `
-            --output "$env:WATCH_ROOT/contract-result.json" *> "$env:WATCH_ROOT/contract.log"
-          $code = $LASTEXITCODE
-          Get-Content "$env:WATCH_ROOT/contract.log"
-          exit $code
-      - id: finalize
-        name: Bind candidate artifact and revalidate
-        if: steps.contract.outcome == 'success'
-        continue-on-error: true
-        shell: pwsh
-        run: |
-          & python scripts/compat_release.py finalize `
-            --manifest "$env:GITHUB_WORKSPACE/payload/codex/$env:COMPAT_ID/manifest.toml" `
-            --artifact "$env:ARTIFACT_PATH" *> "$env:WATCH_ROOT/finalize.log"
-          if ($LASTEXITCODE -ne 0) { Get-Content "$env:WATCH_ROOT/finalize.log"; exit $LASTEXITCODE }
-          & git -C "$env:SOURCE_ROOT" reset --hard "$env:UPSTREAM_COMMIT" *>> "$env:WATCH_ROOT/finalize.log"
-          if ($LASTEXITCODE -ne 0) { Get-Content "$env:WATCH_ROOT/finalize.log"; exit $LASTEXITCODE }
-          & git -C "$env:SOURCE_ROOT" clean -ffd *>> "$env:WATCH_ROOT/finalize.log"
-          if ($LASTEXITCODE -ne 0) { Get-Content "$env:WATCH_ROOT/finalize.log"; exit $LASTEXITCODE }
-          & python scripts/verify_patch_payload.py `
-            --manifest "$env:GITHUB_WORKSPACE/payload/codex/$env:COMPAT_ID/manifest.toml" `
-            --source "$env:SOURCE_ROOT" `
-            --artifact "$env:ARTIFACT_PATH" *>> "$env:WATCH_ROOT/finalize.log"
-          $code = $LASTEXITCODE
-          Get-Content "$env:WATCH_ROOT/finalize.log"
-          exit $code
       - id: candidate
         name: Create review candidate PR
-        if: steps.finalize.outcome == 'success'
+        if: steps.port.outcome == 'success'
         continue-on-error: true
         shell: pwsh
         run: |
           $branch = "automation/compat-$env:COMPAT_ID"
           & git switch -c $branch *> "$env:WATCH_ROOT/candidate.log"
           if ($LASTEXITCODE -ne 0) { Get-Content "$env:WATCH_ROOT/candidate.log"; exit $LASTEXITCODE }
-          & git add -- "payload/codex/$env:COMPAT_ID" *>> "$env:WATCH_ROOT/candidate.log"
+          & git add -- `
+            "payload/codex/native-join-p2/family.toml" `
+            "payload/codex/native-join-p2/bindings/$env:COMPAT_ID" *>> "$env:WATCH_ROOT/candidate.log"
           if ($LASTEXITCODE -ne 0) { Get-Content "$env:WATCH_ROOT/candidate.log"; exit $LASTEXITCODE }
           $changed = @(& git diff --cached --name-only)
-          $prefix = "payload/codex/$env:COMPAT_ID/"
-          if ($changed.Count -eq 0 -or @($changed | Where-Object { -not $_.StartsWith($prefix) }).Count -ne 0) {
+          $familyIndex = "payload/codex/native-join-p2/family.toml"
+          $prefix = "payload/codex/native-join-p2/bindings/$env:COMPAT_ID/"
+          if ($changed.Count -eq 0 -or @($changed | Where-Object { $_ -ne $familyIndex -and -not $_.StartsWith($prefix) }).Count -ne 0) {
             "Candidate contains an empty or out-of-scope diff: $changed" | Add-Content "$env:WATCH_ROOT/candidate.log"
             Get-Content "$env:WATCH_ROOT/candidate.log"
             exit 2
           }
           & git -c user.name="github-actions[bot]" -c user.email="41898282+github-actions[bot]@users.noreply.github.com" commit -m "feat(compat): support $env:UPSTREAM_TAG" *>> "$env:WATCH_ROOT/candidate.log"
           if ($LASTEXITCODE -ne 0) { Get-Content "$env:WATCH_ROOT/candidate.log"; exit $LASTEXITCODE }
-          $sourceCommit = (& git rev-parse HEAD).Trim()
-          & python scripts/compat_release.py pack `
-            --manifest "$env:GITHUB_WORKSPACE/payload/codex/$env:COMPAT_ID/manifest.toml" `
-            --artifact "$env:ARTIFACT_PATH" `
-            --source-commit $sourceCommit `
-            --output "$env:WATCH_ROOT/release-assets" *>> "$env:WATCH_ROOT/candidate.log"
-          if ($LASTEXITCODE -ne 0) { Get-Content "$env:WATCH_ROOT/candidate.log"; exit $LASTEXITCODE }
           & git push --set-upstream origin $branch *>> "$env:WATCH_ROOT/candidate.log"
           if ($LASTEXITCODE -ne 0) { Get-Content "$env:WATCH_ROOT/candidate.log"; exit $LASTEXITCODE }
           @"
           Ports the reviewed Native Join patch set to ``$env:UPSTREAM_TAG`` at ``$env:UPSTREAM_COMMIT``.
 
-          The exact patch, generation, test, build, artifact, and release-asset contracts passed on `windows-2025`. This PR does not publish a GitHub Release; publication becomes eligible only after review and merge to the default branch.
+          The exact tag/commit, source preimages, cumulative patch preflight, and binding contracts passed. CircleCI compilation and local Windows acceptance from ``.dev`` are required before merge. This watcher does not build binaries or publish a GitHub Release.
           "@ | Set-Content -Encoding utf8 "$env:WATCH_ROOT/pr-body.md"
           & gh pr create --repo "$env:GITHUB_REPOSITORY" --base "$env:GITHUB_REF_NAME" --head $branch --title "feat(compat): support $env:UPSTREAM_TAG" --body-file "$env:WATCH_ROOT/pr-body.md" *>> "$env:WATCH_ROOT/candidate.log"
           $code = $LASTEXITCODE
           Get-Content "$env:WATCH_ROOT/candidate.log"
           exit $code
-      - name: Rust cache statistics
-        if: always()
-        continue-on-error: true
-        run: sccache --show-stats
       - id: outcome
         name: Record patch outcome
         if: always()
@@ -266,8 +211,6 @@ jobs:
           $stages = @(
             @{ Name = "clone_upstream"; Outcome = "${{ steps.clone.outcome }}"; Log = "clone.log" },
             @{ Name = "patch_preflight"; Outcome = "${{ steps.port.outcome }}"; Log = "port.log" },
-            @{ Name = "test_and_build"; Outcome = "${{ steps.contract.outcome }}"; Log = "contract.log" },
-            @{ Name = "artifact_finalize"; Outcome = "${{ steps.finalize.outcome }}"; Log = "finalize.log" },
             @{ Name = "candidate_pr"; Outcome = "${{ steps.candidate.outcome }}"; Log = "candidate.log" }
           )
           $failed = $stages | Where-Object { $_.Outcome -eq "failure" } | Select-Object -First 1
@@ -279,13 +222,6 @@ jobs:
             "stage=$($failed.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             Copy-Item "$env:WATCH_ROOT/$($failed.Log)" "$env:WATCH_ROOT/failure.log"
           }
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        if: steps.candidate.outcome == 'success'
-        with:
-          name: compatibility-candidate-${{ needs.detect.outputs.compat_id }}
-          path: ${{ runner.temp }}/csa-watch/release-assets
-          if-no-files-found: error
-          retention-days: 1
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         if: steps.outcome.outputs.success == 'false'
         with:
@@ -318,11 +254,13 @@ jobs:
             echo "- Release tag: \`$COMPAT_TAG\`"
             echo "- Upstream: \`$UPSTREAM_TAG\` / \`$UPSTREAM_COMMIT\`"
             echo
-            echo "Formal binary publication is intentionally manual."
+            echo "Before formal publication, build this reviewed commit in CircleCI, download the canonical bundle into .dev, and complete local Windows acceptance."
+            echo "The formal GitHub build must receive the SHA-256 of the locally accepted CircleCI codex.exe."
             echo
             echo '```text'
             echo "Actions -> Release patched Codex CLI -> Run workflow"
             echo "compat_id: $COMPAT_ID"
+            echo "accepted_codex_sha256: <SHA-256 from .dev>"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"
 

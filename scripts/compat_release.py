@@ -20,7 +20,15 @@ from pathlib import Path
 from typing import Any
 
 from compatibility_audit import validate_new_entry
-from verify_patch_payload import VerificationError, _digest, _load_manifest, _run, verify
+from verify_patch_payload import (
+    VerificationError,
+    _digest,
+    _load_manifest,
+    _load_payload,
+    _payload_file,
+    _run,
+    verify,
+)
 
 
 OPENAI_REPOSITORY = "openai/codex"
@@ -142,39 +150,53 @@ class GitHubApi:
 
 
 def latest_payload_manifest(repository: Path) -> Path:
-    candidates: list[tuple[tuple[int, int, int, int], Path]] = []
-    for path in (repository / "payload" / "codex").glob("*/manifest.toml"):
+    candidates: list[tuple[tuple[int, int, int, int, int], Path]] = []
+    for path in (repository / "payload" / "codex").rglob("manifest.toml"):
         try:
-            manifest = _load_manifest(path)
+            payload = _load_payload(path)
         except VerificationError:
             continue
+        manifest = payload.manifest
         match = COMPAT_ID.fullmatch(manifest["compat_id"])
         version = VERSION_TAG.fullmatch(manifest["upstream_tag"])
-        if (
-            match
-            and version
-            and manifest["build_target"] == BUILD_TARGET
-            and path.parent.name == manifest["compat_id"]
-        ):
-            candidates.append((tuple(map(int, version.groups())) + (int(match.group(1)),), path))
+        if match and version and manifest["build_target"] == BUILD_TARGET:
+            key = tuple(map(int, version.groups())) + (
+                int(match.group(1)),
+                int(payload.source_schema == 2),
+            )
+            candidates.append((key, path))
     if not candidates:
         raise CompatibilityReleaseError("no Windows x64 compatibility payload can seed a port")
-    return max(candidates)[1]
+    best = max(key for key, _ in candidates)
+    matches = [path for key, path in candidates if key == best]
+    if len(matches) != 1:
+        raise CompatibilityReleaseError("multiple family bindings claim the latest exact identity")
+    return matches[0]
 
 
 def exact_local_entry(repository: Path, compat_id: str, tag: str, commit: str) -> bool:
-    path = repository / "payload" / "codex" / compat_id / "manifest.toml"
-    if not path.exists():
+    root = repository / "payload" / "codex"
+    paths = [
+        *root.glob(f"*/bindings/{compat_id}/manifest.toml"),
+        root / compat_id / "manifest.toml",
+    ]
+    existing = [path for path in paths if path.is_file()]
+    if not existing:
         return False
-    manifest = _load_manifest(path)
-    if (
-        manifest["compat_id"] != compat_id
-        or manifest["upstream_tag"] != tag
-        or manifest["upstream_commit"] != commit
-        or manifest["codex_version"] != stable_version(tag)
-        or manifest["build_target"] != BUILD_TARGET
-    ):
-        raise CompatibilityReleaseError("local compatibility entry differs from the latest upstream identity")
+    if len(existing) - int((root / compat_id / "manifest.toml").is_file()) > 1:
+        raise CompatibilityReleaseError("multiple patch families claim the same compatibility ID")
+    for path in existing:
+        manifest = _load_manifest(path)
+        if (
+            manifest["compat_id"] != compat_id
+            or manifest["upstream_tag"] != tag
+            or manifest["upstream_commit"] != commit
+            or manifest["codex_version"] != stable_version(tag)
+            or manifest["build_target"] != BUILD_TARGET
+        ):
+            raise CompatibilityReleaseError(
+                "local compatibility entry differs from the latest upstream identity"
+            )
     return True
 
 
@@ -348,6 +370,50 @@ def render_manifest(manifest: dict[str, Any]) -> str:
     return "\n".join(lines)
 
 
+def render_binding_manifest(
+    manifest: dict[str, Any], family_id: str, files: dict[str, str]
+) -> str:
+    legacy = render_manifest(manifest).splitlines()
+    legacy[0] = "schema = 2"
+    legacy.insert(1, f"family_id = {toml_string(family_id)}")
+    legacy.extend(
+        [
+            "[files]",
+            *[
+                f"{toml_string(logical)} = {toml_string(physical)}"
+                for logical, physical in sorted(files.items())
+            ],
+            "",
+        ]
+    )
+    return "\n".join(legacy)
+
+
+def family_file_map(payload: object) -> dict[str, str]:
+    return {
+        logical: path.relative_to(payload.payload_root).as_posix()
+        for logical, path in payload.files.items()
+    }
+
+
+def family_with_digest(
+    data: bytes, compat_id: str, manifest_path: str, digest: str
+) -> bytes:
+    family = tomllib.loads(data.decode("utf-8"))
+    rows = [
+        row
+        for row in family.get("bindings", [])
+        if row.get("compat_id") == compat_id and row.get("manifest") == manifest_path
+    ]
+    if len(rows) != 1:
+        raise CompatibilityReleaseError("family index does not select the exact binding once")
+    old = rows[0].get("sha256")
+    needle = f'sha256 = "{old}"'.encode()
+    if not isinstance(old, str) or data.count(needle) != 1:
+        raise CompatibilityReleaseError("family binding digest is not uniquely replaceable")
+    return data.replace(needle, f'sha256 = "{digest}"'.encode(), 1)
+
+
 def validate_source(source: Path, tag: str, commit: str, version: str) -> None:
     if _run(["git", "status", "--porcelain=v1", "--untracked-files=all"], source).stdout:
         raise CompatibilityReleaseError("upstream source must be clean")
@@ -375,12 +441,23 @@ def port(base_manifest: Path, source: Path, tag: str, commit: str, output: Path)
     if not SHA1.fullmatch(commit):
         raise CompatibilityReleaseError("upstream commit must be lowercase 40-hex")
     validate_source(source, tag, commit, version)
-    manifest = _load_manifest(base_manifest)
+    payload = _load_payload(base_manifest)
+    manifest = payload.manifest
     compat_id = compatibility_id(version, manifest["patch_set_version"])
     if output.name != compat_id:
         raise CompatibilityReleaseError("output directory must equal the new compat_id")
+    if payload.source_schema == 2 and output.parent.resolve(strict=True) != (
+        payload.payload_root / "bindings"
+    ).resolve(strict=True):
+        raise CompatibilityReleaseError("family binding output must be under its bindings directory")
 
     temporary = Path(tempfile.mkdtemp(prefix=f".{compat_id}.", dir=output.parent))
+    family_path = payload.payload_root / "family.toml"
+    family_next = family_path.with_name("family.toml.next")
+    if payload.source_schema == 2 and family_next.exists():
+        raise CompatibilityReleaseError("staged family index already exists")
+    old_family: bytes | None = None
+    family_replaced = False
     try:
         manifest["compat_id"] = compat_id
         manifest["codex_version"] = version
@@ -399,14 +476,15 @@ def port(base_manifest: Path, source: Path, tag: str, commit: str, output: Path)
         manifest["preimage_absent"] = absent
 
         for patch in manifest["patches"]:
-            source_patch = base_manifest.parent / patch["path"]
-            destination = temporary / patch["path"]
-            destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source_patch, destination)
-            if file_digest(destination) != patch["sha256"]:
+            source_patch = _payload_file(payload, patch["path"])
+            if file_digest(source_patch) != patch["sha256"]:
                 raise CompatibilityReleaseError(f"base patch hash mismatch: {patch['path']}")
+            if payload.source_schema == 1:
+                destination = temporary / patch["path"]
+                destination.parent.mkdir(parents=True, exist_ok=True)
+                shutil.copyfile(source_patch, destination)
 
-        contract = json.loads((base_manifest.parent / "test-contract.json").read_bytes())
+        contract = json.loads(_payload_file(payload, "test-contract.json").read_bytes())
         contract["compat_id"] = compat_id
         (temporary / "test-contract.json").write_bytes(json_bytes(contract))
         hashes = {
@@ -428,14 +506,47 @@ def port(base_manifest: Path, source: Path, tag: str, commit: str, output: Path)
             f"https://github.com/{CSA_REPOSITORY}/releases/download/compat-{compat_id}/"
             f"{asset_name(compat_id, artifact['filename'])}"
         )
-        (temporary / "manifest.toml").write_text(render_manifest(manifest), encoding="utf-8", newline="\n")
-        verify((temporary / "manifest.toml").resolve(), source, False, None)
+        if payload.source_schema == 2:
+            files = family_file_map(payload)
+            files[manifest["source_hashes"]] = (
+                f"bindings/{compat_id}/{manifest['source_hashes']}"
+            )
+            files["test-contract.json"] = f"bindings/{compat_id}/test-contract.json"
+            binding = render_binding_manifest(manifest, payload.family_id, files).encode()
+            (temporary / "manifest.toml").write_bytes(binding)
+
+            old_family = family_path.read_bytes()
+            family = tomllib.loads(old_family.decode("utf-8"))
+            if any(row.get("compat_id") == compat_id for row in family["bindings"]):
+                raise CompatibilityReleaseError("family already declares the compatibility binding")
+            relative_manifest = f"bindings/{compat_id}/manifest.toml"
+            row = (
+                "[[bindings]]\n"
+                f"compat_id = {toml_string(compat_id)}\n"
+                f"manifest = {toml_string(relative_manifest)}\n"
+                f"sha256 = {toml_string(_digest(binding))}\n"
+            ).encode()
+            separator = b"\n" if old_family.endswith(b"\n") else b"\n\n"
+            family_next.write_bytes(old_family + separator + row)
+        else:
+            (temporary / "manifest.toml").write_text(
+                render_manifest(manifest), encoding="utf-8", newline="\n"
+            )
+
         temporary.replace(output)
+        if payload.source_schema == 2:
+            family_next.replace(family_path)
+            family_replaced = True
+        verify((output / "manifest.toml").resolve(), source, False, None)
     except Exception:
         shutil.rmtree(temporary, ignore_errors=True)
+        shutil.rmtree(output, ignore_errors=True)
+        if family_replaced and old_family is not None:
+            family_path.write_bytes(old_family)
+        family_next.unlink(missing_ok=True)
         raise
     return {
-        "schema": 1,
+        "schema": payload.source_schema,
         "result": "ported",
         "compat_id": compat_id,
         "manifest": str(output / "manifest.toml"),
@@ -449,7 +560,8 @@ def finalize(manifest_path: Path, artifact_path: Path) -> dict[str, Any]:
         raise CompatibilityReleaseError("manifest and artifact must be absolute")
     manifest_path = manifest_path.resolve(strict=True)
     artifact_path = artifact_path.resolve(strict=True)
-    manifest = _load_manifest(manifest_path)
+    payload = _load_payload(manifest_path)
+    manifest = payload.manifest
     artifact = manifest["artifacts"][manifest["build_target"]]
     if artifact_path.name != artifact["filename"]:
         raise CompatibilityReleaseError("built artifact filename differs from the manifest")
@@ -462,11 +574,42 @@ def finalize(manifest_path: Path, artifact_path: Path) -> dict[str, Any]:
     staged = manifest_path.with_name("manifest.toml.next")
     if staged.exists():
         raise CompatibilityReleaseError("staged manifest already exists")
-    staged.write_text(render_manifest(manifest), encoding="utf-8", newline="\n")
-    _load_manifest(staged)
-    staged.replace(manifest_path)
+    family_path = payload.payload_root / "family.toml"
+    family_next = family_path.with_name("family.toml.next")
+    if payload.source_schema == 2 and family_next.exists():
+        raise CompatibilityReleaseError("staged family index already exists")
+    old_manifest = manifest_path.read_bytes()
+    old_family: bytes | None = None
+    family_replaced = False
+    try:
+        if payload.source_schema == 2:
+            binding = render_binding_manifest(
+                manifest, payload.family_id, family_file_map(payload)
+            ).encode()
+            staged.write_bytes(binding)
+            old_family = family_path.read_bytes()
+            relative = manifest_path.relative_to(payload.payload_root).as_posix()
+            family_next.write_bytes(
+                family_with_digest(old_family, manifest["compat_id"], relative, _digest(binding))
+            )
+            tomllib.loads(binding.decode("utf-8"))
+        else:
+            staged.write_text(render_manifest(manifest), encoding="utf-8", newline="\n")
+            _load_manifest(staged)
+        staged.replace(manifest_path)
+        if payload.source_schema == 2:
+            family_next.replace(family_path)
+            family_replaced = True
+        _load_payload(manifest_path)
+    except Exception:
+        staged.unlink(missing_ok=True)
+        family_next.unlink(missing_ok=True)
+        manifest_path.write_bytes(old_manifest)
+        if family_replaced and old_family is not None:
+            family_path.write_bytes(old_family)
+        raise
     return {
-        "schema": 1,
+        "schema": payload.source_schema,
         "result": "finalized",
         "compat_id": manifest["compat_id"],
         "artifact": {
@@ -477,12 +620,17 @@ def finalize(manifest_path: Path, artifact_path: Path) -> dict[str, Any]:
     }
 
 
-def payload_paths(manifest_path: Path, manifest: dict[str, Any]) -> list[tuple[str, Path]]:
+def payload_bytes(manifest_path: Path) -> list[tuple[str, bytes]]:
+    payload = _load_payload(manifest_path)
+    manifest = payload.manifest
     values = [
-        ("manifest.toml", manifest_path),
-        (manifest["source_hashes"], manifest_path.parent / manifest["source_hashes"]),
-        ("test-contract.json", manifest_path.parent / "test-contract.json"),
-        *[(patch["path"], manifest_path.parent / patch["path"]) for patch in manifest["patches"]],
+        ("manifest.toml", render_manifest(manifest).encode()),
+        (manifest["source_hashes"], _payload_file(payload, manifest["source_hashes"]).read_bytes()),
+        ("test-contract.json", _payload_file(payload, "test-contract.json").read_bytes()),
+        *[
+            (patch["path"], _payload_file(payload, patch["path"]).read_bytes())
+            for patch in manifest["patches"]
+        ],
     ]
     if len({relative for relative, _ in values}) != len(values):
         raise CompatibilityReleaseError("compatibility payload contains duplicate paths")
@@ -514,13 +662,13 @@ def pack(manifest_path: Path, artifact_path: Path, source_commit: str, output: P
     try:
         payload = []
         names = set()
-        for relative, source in payload_paths(manifest_path, manifest):
+        for relative, contents in payload_bytes(manifest_path):
             name = asset_name(compat_id, relative)
             if name in names:
                 raise CompatibilityReleaseError(f"release asset name collision: {name}")
             names.add(name)
             destination = temporary / name
-            shutil.copyfile(source, destination)
+            destination.write_bytes(contents)
             payload.append(
                 {
                     "path": relative,
@@ -610,11 +758,20 @@ def blocker_body(
     )
     body = replace_block(existing, TARGET_START, TARGET_END, target)
     if stage is not None:
-        if not base_manifest or not re.fullmatch(
-            r"payload/codex/[A-Za-z0-9._-]+/manifest\.toml", base_manifest
-        ):
+        manifest_match = re.fullmatch(
+            r"payload/codex/(?:([A-Za-z0-9._-]+)/bindings/)?"
+            r"(rust-v\d+\.\d+\.\d+-native-join-p(\d+))/manifest\.toml",
+            base_manifest or "",
+        )
+        if not manifest_match:
             raise CompatibilityReleaseError("failure record requires a safe base manifest path")
-        compat_id = compatibility_id(stable_version(tag))
+        family_id, _, patch_set = manifest_match.groups()
+        compat_id = compatibility_id(stable_version(tag), int(patch_set))
+        output = (
+            f"$PWD/payload/codex/{family_id}/bindings/{compat_id}"
+            if family_id
+            else f"$PWD/payload/codex/{compat_id}"
+        )
         excerpt = (log or "no failure log was captured")[-12000:]
         failure = "\n".join(
             [
@@ -637,7 +794,7 @@ def blocker_body(
                 "  --source \"$sourceRoot\" `",
                 f"  --tag {tag} `",
                 f"  --commit {commit} `",
-                f"  --output \"$PWD/payload/codex/{compat_id}\"",
+                f"  --output \"{output}\"",
                 "```",
                 "",
                 "```text",

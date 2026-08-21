@@ -404,19 +404,15 @@ fn publish_compatibility(
     remove_managed_tree(&paths.root, &staged)?;
     ensure_managed_directory(&paths.root, &staged)?;
     let result = (|| {
-        for (relative, source) in &files {
+        for (relative, contents) in &files {
             let destination = staged.join(relative);
             let parent = destination.parent().ok_or_else(|| {
                 ManagerError::new("invalid_payload_path", "payload file has no parent")
             })?;
             ensure_managed_directory(&paths.root, parent)?;
-            fs::copy(source, &destination).map_err(|error| {
+            fs::write(&destination, contents).map_err(|error| {
                 ManagerError::io(
-                    &format!(
-                        "copy compatibility file {} to {}",
-                        source.display(),
-                        destination.display()
-                    ),
+                    &format!("write compatibility file {}", destination.display()),
                     error,
                 )
             })?;
@@ -436,8 +432,8 @@ fn publish_compatibility(
 }
 
 fn compare_payload_files(
-    expected: &BTreeMap<String, PathBuf>,
-    actual: &BTreeMap<String, PathBuf>,
+    expected: &BTreeMap<String, Vec<u8>>,
+    actual: &BTreeMap<String, Vec<u8>>,
 ) -> Result<()> {
     if expected.keys().ne(actual.keys()) {
         return Err(ManagerError::new(
@@ -445,19 +441,8 @@ fn compare_payload_files(
             "cached compatibility payload has a different file set",
         ));
     }
-    for (relative, expected_path) in expected {
-        let actual_path = &actual[relative];
-        if fs::read(expected_path).map_err(|error| {
-            ManagerError::io(
-                &format!("read compatibility file {}", expected_path.display()),
-                error,
-            )
-        })? != fs::read(actual_path).map_err(|error| {
-            ManagerError::io(
-                &format!("read compatibility file {}", actual_path.display()),
-                error,
-            )
-        })? {
+    for (relative, expected_contents) in expected {
+        if expected_contents != &actual[relative] {
             return Err(ManagerError::new(
                 "compatibility_cache_mismatch",
                 format!("cached compatibility file differs: {relative}"),

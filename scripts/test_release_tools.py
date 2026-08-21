@@ -12,6 +12,7 @@ import shutil
 import sys
 import tarfile
 import tempfile
+import tomllib
 from pathlib import Path
 from unittest.mock import patch
 
@@ -23,6 +24,7 @@ sys.path.insert(0, str(SCRIPTS))
 from assemble_release_candidate import ReleaseError, assemble, digest, load_matrix  # noqa: E402
 from ci_release import build_input, platform_artifact  # noqa: E402
 from compatibility_audit import AuditError, check_immutability  # noqa: E402
+from check_sccache_stats import StatsError, validate as validate_sccache_stats  # noqa: E402
 from compat_release import (  # noqa: E402
     CompatibilityReleaseError,
     blocker_body,
@@ -30,6 +32,7 @@ from compat_release import (  # noqa: E402
     finalize,
     pack,
     port,
+    render_binding_manifest,
     render_manifest,
     stable_version,
 )
@@ -39,6 +42,7 @@ from run_patch_contract import (  # noqa: E402
     execute_version,
     load_contract,
 )
+from verify_patch_payload import VerificationError, _load_payload, _payload_file  # noqa: E402
 
 
 def write_tar(path: Path, members: dict[str, bytes]) -> None:
@@ -263,6 +267,96 @@ def test_immutability(root: Path) -> None:
         raise AssertionError("mutation of an immutable entry was accepted")
 
 
+def test_family_payload(root: Path) -> None:
+    root.mkdir()
+    source = REPOSITORY / "payload" / "codex" / "native-join-p2"
+    family = root / "candidate" / source.name
+    family.parent.mkdir()
+    shutil.copytree(source, family)
+
+    empty = root / "empty"
+    empty.mkdir()
+    report = check_immutability(empty.resolve(), family.parent.resolve())
+    assert report["added_entries"][0]["family_id"] == "native-join-p2"
+
+    compat_id = "rust-v0.148.0-native-join-p2"
+    manifest = family / "bindings" / compat_id / "manifest.toml"
+    payload = _load_payload(manifest)
+    legacy = _load_payload(
+        REPOSITORY / "payload" / "codex" / compat_id / "manifest.toml"
+    )
+    assert payload.source_schema == 2 and payload.family_id == "native-join-p2"
+    assert payload.manifest == legacy.manifest
+    for logical in payload.files:
+        assert _payload_file(payload, logical).read_bytes() == _payload_file(
+            legacy, logical
+        ).read_bytes()
+    assert (
+        payload.files["patches/0006-csa-version-display.patch"].relative_to(
+            payload.payload_root
+        ).as_posix()
+        == "shared/patches/0006-csa-version-display.patch"
+    )
+
+    digest_drift = root / "digest-drift" / source.name
+    digest_drift.parent.mkdir()
+    shutil.copytree(source, digest_drift)
+    drifted_manifest = digest_drift / "bindings" / compat_id / "manifest.toml"
+    drifted_manifest.write_bytes(drifted_manifest.read_bytes() + b"\n")
+    try:
+        _load_payload(drifted_manifest)
+    except VerificationError:
+        pass
+    else:
+        raise AssertionError("family binding digest drift was accepted")
+
+    unsafe = root / "unsafe" / source.name
+    unsafe.parent.mkdir()
+    shutil.copytree(source, unsafe)
+    unsafe_manifest = unsafe / "bindings" / compat_id / "manifest.toml"
+    original = unsafe_manifest.read_bytes()
+    changed = original.replace(
+        b'"shared/patches/0006-csa-version-display.patch"', b'"../escape.patch"', 1
+    )
+    unsafe_manifest.write_bytes(changed)
+    family_index = unsafe / "family.toml"
+    family_index.write_bytes(
+        family_index.read_bytes().replace(
+            hashlib.sha256(original).hexdigest().encode(),
+            hashlib.sha256(changed).hexdigest().encode(),
+            1,
+        )
+    )
+    try:
+        _load_payload(unsafe_manifest)
+    except VerificationError:
+        pass
+    else:
+        raise AssertionError("family binding path escape was accepted")
+
+    artifact = root / "codex.exe"
+    artifact.write_bytes(b"family projection artifact")
+    finalize(manifest.resolve(), artifact.resolve())
+    assets = root / "assets"
+    pack(manifest.resolve(), artifact.resolve(), "d" * 40, assets.resolve())
+    descriptor = json.loads((assets / "compatibility-release.json").read_bytes())
+    projected = next(item for item in descriptor["payload"] if item["path"] == "manifest.toml")
+    projected_manifest = tomllib.loads((assets / projected["asset"]).read_text(encoding="utf-8"))
+    assert projected_manifest["schema"] == 1
+    assert "family_id" not in projected_manifest and "files" not in projected_manifest
+
+    baseline = root / "baseline"
+    shutil.copytree(family.parent, baseline)
+    shared = family / "shared" / "patches" / "0006-csa-version-display.patch"
+    shared.write_bytes(shared.read_bytes() + b"\n")
+    try:
+        check_immutability(baseline.resolve(), family.parent.resolve())
+    except AuditError:
+        pass
+    else:
+        raise AssertionError("mutation of an immutable shared family file was accepted")
+
+
 def test_contract_shape() -> None:
     p1 = REPOSITORY / "payload" / "codex" / "rust-v0.148.0-native-join-p1"
     p1_contract = load_contract(p1 / "test-contract.json", p1.name)
@@ -305,6 +399,36 @@ def test_contract_shape() -> None:
         raise AssertionError("absolute-path version mismatch was accepted")
 
 
+def test_sccache_statistics() -> None:
+    def metric(value: int) -> dict[str, object]:
+        return {"counts": {"Rust": value}, "adv_counts": {}}
+
+    document = {
+        "stats": {
+            "compile_requests": 100,
+            "cache_hits": metric(97),
+            "cache_misses": metric(3),
+            "cache_errors": metric(0),
+            "cache_read_errors": 0,
+            "cache_write_errors": 0,
+        }
+    }
+    assert validate_sccache_stats(document, 95)["rust_hit_rate"] == 97.0
+    for changed, message in (
+        ({"compile_requests": 0}, "zero requests"),
+        ({"cache_hits": metric(90), "cache_misses": metric(10)}, "low warm hit rate"),
+        ({"cache_write_errors": 1}, "cache write error"),
+    ):
+        candidate = json.loads(json.dumps(document))
+        candidate["stats"].update(changed)
+        try:
+            validate_sccache_stats(candidate, 95)
+        except StatsError:
+            pass
+        else:
+            raise AssertionError(f"sccache accepted {message}")
+
+
 def test_release_stream_contracts() -> None:
     watcher = (REPOSITORY / ".github" / "workflows" / "watch-codex-release.yml").read_text(
         encoding="utf-8"
@@ -313,55 +437,104 @@ def test_release_stream_contracts() -> None:
     assert watcher.count('cron: "0 * * * *"') == 1
     assert watcher.count("Codex source must not live inside the CSA repository") == 1
     assert watcher.count('--branch "$env:UPSTREAM_TAG" --single-branch') == 1
-    assert 'git add -- "payload/codex/$env:COMPAT_ID"' in watcher
+    assert '"payload/codex/native-join-p2/family.toml"' in watcher
+    assert '"payload/codex/native-join-p2/bindings/$env:COMPAT_ID"' in watcher
 
     patched_workflow = (
         REPOSITORY / ".github" / "workflows" / "release-patched-codex.yml"
     ).read_text(encoding="utf-8")
     assert patched_workflow.count("Codex source must not live inside the CSA repository") == 1
     assert 'default: "rust-v0.148.0-native-join-p2"' in patched_workflow
+    assert "accepted_codex_sha256:" in patched_workflow
+    assert "Match locally accepted CircleCI executable" in patched_workflow
+    assert "Get-FileHash -LiteralPath $env:ARTIFACT_PATH" in patched_workflow
 
+    ci_workflow = (REPOSITORY / ".github" / "workflows" / "ci.yml").read_text(
+        encoding="utf-8"
+    )
+    shared_build = (REPOSITORY / "scripts" / "build_patched_codex_bundle.sh").read_text(
+        encoding="utf-8"
+    )
     circleci = (REPOSITORY / ".circleci" / "config.yml").read_text(encoding="utf-8")
+    assert patched_workflow.count("build_patched_codex_bundle.sh") == 1
+    assert circleci.count("build_patched_codex_bundle.sh") == 1
+    assert "runs-on: ubuntu-26.04" in patched_workflow
+    assert "build_patched_codex_bundle.sh" not in ci_workflow
+    assert "build_patched_codex_bundle.sh" not in watcher
+    assert "compat_release.py finalize" not in watcher
+    assert "compat_release.py pack" not in watcher
+    assert "CircleCI compilation and local Windows acceptance" in watcher
+    assert "full_payload" not in ci_workflow
+    assert "warm_cache_acceptance" not in ci_workflow
     assert "default: false" in circleci
     assert "resource_class: large.gen3" in circleci
     assert 'CARGO_BUILD_JOBS: "4"' in circleci
     assert "csa-cargo-home-v5-linux-amd64-1.95.0-codex-" in circleci
-    assert "csa-rustup-v1-linux-amd64-rustup-1.29.0-rust-1.95.0-windows-msvc" in circleci
-    assert "csa-xwin-v1-linux-amd64-cargo-xwin-0.23.0-msvc17-x86_64" in circleci
+    assert "csa-rustup-v2-linux-amd64-rustup-1.29.0-rustc-" in circleci
+    assert "csa-xwin-v2-linux-amd64-cargo-xwin-0.23.0-msvc17-x86_64-pc-windows-msvc" in circleci
+    assert "csa-sccache-v4-linux-amd64-rustc-" in circleci
     assert "csa-sccache-v3-linux-amd64-1.95.0-xwin-0.23.0-codex-" in circleci
     assert "csa-sccache-v2-" not in circleci
     for cargo_download in ("registry/index", "registry/cache", "git/db"):
         assert f"/cargo-home/{cargo_download}" in circleci
-    assert "RUSTC_WRAPPER: sccache" in circleci
+    assert "RUSTC_WRAPPER: /home/circleci/.local/bin/sccache" in circleci
     assert "SCCACHE_CACHE_SIZE: 4G" in circleci
     assert "SCCACHE_CACHE_SIZE: 450M" not in circleci
     assert "caches: 7d" in circleci
     assert "sccache --max-cache-size" not in circleci
-    assert "rustup/archive/1.29.0/x86_64-unknown-linux-gnu/rustup-init" in circleci
-    assert "--cross-windows-msvc" in circleci
     assert 'root="$HOME/csa-patched-codex/$compat_id"' in circleci
     assert 'root="/tmp/csa-patched-codex/$compat_id"' not in circleci
     assert "TMPDIR: /home/circleci/csa-tmp" in circleci
-    assert circleci.index('mkdir -p "$TMPDIR"') < circleci.index('temp_root="$(mktemp -d)"')
-    assert circleci.count("when: always") == 1
     assert circleci.count("rust-v0.147.0-native-join-p2") == 1
     assert circleci.count("rust-v0.148.0-native-join-p2") == 2
     assert "build_latest_patched_codex:" in circleci
     assert "store_latest_patched_artifact:" in circleci
+    assert circleci.count("require_warm_cache:") == 3
+    assert "if << parameters.require_warm_cache >>; then" in circleci
+    assert "export CSA_MINIMUM_RUST_HIT_RATE=95" in circleci
+    assert "build=(timeout 30m bash)" in circleci
+    assert '"${build[@]}" scripts/build_patched_codex_bundle.sh' in circleci
+    assert "require_warm_cache: << pipeline.parameters.require_warm_cache >>" in circleci
+    assert 'require_warm_cache: "true"' not in circleci
+    assert "git clone +" not in circleci
     assert "condition: << parameters.store_artifact >>" in circleci
     assert "store_artifact: << pipeline.parameters.store_latest_patched_artifact >>" in circleci
-    assert "-p codex-code-mode-host" not in circleci
-    assert "codex-$codex_version-win32-x64.tgz" in circleci
-    assert "official Windows npm integrity mismatch" in circleci
     assert "sha512-oT7Ss5fAPf2fiWE9QNURqZcQGAAawSVxmIUdgPzckq4K" in circleci
     assert "sha512-/Jg8eYw0BqTGNUpnrzzWlK2kbu29NWg7t6pnUDEfxqp" in circleci
-    assert 'cp "$artifact" "$output/bin/codex.exe"' in circleci
-    assert '"$output/bin/codex-code-mode-host.exe"' in circleci
-    assert '"$output/codex-resources/codex-command-runner.exe"' in circleci
-    assert '"$output/codex-resources/codex-windows-sandbox-setup.exe"' in circleci
-    assert '"$output/codex-path/rg.exe"' in circleci
-    assert "codex-path/rg.exe > SHA256SUMS" in circleci
     assert "OPENAI_API_KEY" not in circleci
+    family_index = tomllib.loads(
+        (REPOSITORY / "payload" / "codex" / "native-join-p2" / "family.toml").read_text(
+            encoding="utf-8"
+        )
+    )
+    for binding in family_index["bindings"]:
+        assert f"binding_sha256: {binding['sha256']}" in circleci
+
+    assert "--portable-evidence" in shared_build
+    assert "--stats-format json" in shared_build
+    assert "CSA_MINIMUM_RUST_HIT_RATE" in shared_build
+    assert "d1368d4a94c7ac4bf09296f68516343a76ce11aa375363d4fcddc7fe8ef09730" in shared_build
+    for path in (
+        "build-environment.txt",
+        "contract-result.json",
+        "SHA256SUMS",
+        "bin/codex.exe",
+        "bin/codex-code-mode-host.exe",
+        "codex-resources/codex-command-runner.exe",
+        "codex-resources/codex-windows-sandbox-setup.exe",
+        "codex-path/rg.exe",
+    ):
+        assert path in shared_build
+    assert "actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7" in patched_workflow
+    assert "csa-sccache-v4-linux-X64-rustc-" in patched_workflow
+    assert "SCCACHE_DIR" in patched_workflow
+    assert "csa-sccache-v3-" not in patched_workflow
+    for workflow in (ci_workflow, watcher):
+        assert "csa-sccache-v4-linux-X64-rustc-" not in workflow
+
+    online = (REPOSITORY / "src" / "online.rs").read_text(encoding="utf-8")
+    assert 'format!("rust-v{upstream_version}-native-join-p2")' in online
+    assert 'format!("rust-v{upstream_version}-native-join-p1")' not in online
 
     manager_workflow = (
         REPOSITORY / ".github" / "workflows" / "release-csa.yml"
@@ -386,16 +559,13 @@ def test_release_stream_contracts() -> None:
     assert "inputs.target" not in cache_action
     assert "inputs.profile" not in cache_action
 
-    ci_workflow = (REPOSITORY / ".github" / "workflows" / "ci.yml").read_text(
-        encoding="utf-8"
-    )
     assert 'branches: ["main"]' in ci_workflow
     assert "cancel-in-progress: true" in ci_workflow
     for workflow, expected in (
-        (ci_workflow, 2),
+        (ci_workflow, 1),
         (manager_workflow, 1),
-        (patched_workflow, 1),
-        (watcher, 2),
+        (patched_workflow, 2),
+        (watcher, 1),
     ):
         assert workflow.count("retention-days: 1") == expected
     schema = json.loads(
@@ -521,6 +691,61 @@ def test_compatibility_release_tools(root: Path) -> None:
     assert checksum_names == {path.name for path in assets.iterdir() if path.name != "SHA256SUMS"}
     assert all(not name.endswith(".tgz") and not name.startswith("csa-") for name in checksum_names)
 
+    family_container = root / "family-port"
+    family = family_container / "native-join-p2"
+    base_compat_id = manifest.parent.name
+    binding = family / "bindings" / base_compat_id
+    family_container.mkdir()
+    shutil.copytree(manifest.parent, binding)
+    base_manifest = tomllib.loads(manifest.read_text(encoding="utf-8"))
+    logical = [
+        base_manifest["source_hashes"],
+        "test-contract.json",
+        *[patch["path"] for patch in base_manifest["patches"]],
+    ]
+    files = {path: f"bindings/{base_compat_id}/{path}" for path in logical}
+    binding_bytes = render_binding_manifest(base_manifest, family.name, files).encode()
+    (binding / "manifest.toml").write_bytes(binding_bytes)
+    (family / "family.toml").write_text(
+        "\n".join(
+            [
+                "schema = 2",
+                f'family_id = "{family.name}"',
+                "patch_api = 1",
+                "patch_set_version = 2",
+                "",
+                "[[bindings]]",
+                f'compat_id = "{base_compat_id}"',
+                f'manifest = "bindings/{base_compat_id}/manifest.toml"',
+                f'sha256 = "{hashlib.sha256(binding_bytes).hexdigest()}"',
+                "",
+            ]
+        ),
+        encoding="utf-8",
+    )
+    family_baseline = root / "family-port-baseline"
+    shutil.copytree(family_container, family_baseline)
+    family_candidate = family / "bindings" / candidate.name
+    family_ported = port(
+        (binding / "manifest.toml").resolve(),
+        source.resolve(),
+        "rust-v2.0.0",
+        commit,
+        family_candidate.resolve(),
+    )
+    assert family_ported["schema"] == 2
+    loaded_family_candidate = _load_payload(family_candidate / "manifest.toml")
+    assert loaded_family_candidate.family_id == family.name
+    assert all(
+        not path.is_relative_to(family_candidate)
+        for logical_path, path in loaded_family_candidate.files.items()
+        if logical_path.startswith("patches/")
+    )
+    family_audit = check_immutability(
+        family_baseline.resolve(), family_container.resolve()
+    )
+    assert len(family_audit["changed_families"][0]["added_bindings"]) == 1
+
     first = blocker_body(
         "",
         "rust-v2.0.0",
@@ -596,7 +821,9 @@ def main() -> int:
         test_assembler(root)
         test_ci_input(root)
         test_immutability(root)
+        test_family_payload(root / "family")
         test_contract_shape()
+        test_sccache_statistics()
         test_release_stream_contracts()
         test_compatibility_release_tools(root / "compat-release")
     print(
@@ -609,7 +836,9 @@ def main() -> int:
                 "deterministic_source_bundle": "pass",
                 "ci_input": "pass",
                 "compatibility_immutability": "pass",
+                "multi_version_family": "pass",
                 "patch_contract_shape": "pass",
+                "sccache_statistics": "pass",
                 "release_stream_contracts": "pass",
                 "absolute_path_version_execution": "pass",
                 "compatibility_release_pack": "pass",

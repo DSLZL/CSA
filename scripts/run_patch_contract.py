@@ -13,7 +13,7 @@ import sys
 from pathlib import Path
 from typing import Any
 
-from verify_patch_payload import VerificationError, _load_manifest, verify
+from verify_patch_payload import VerificationError, _load_payload, _payload_file, verify
 
 
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*\Z")
@@ -142,6 +142,7 @@ def run_contract(
     cargo_target: Path,
     output: Path,
     cross_windows_msvc: bool = False,
+    portable_evidence: bool = False,
 ) -> dict[str, Any]:
     for path, label in (
         (manifest_path, "manifest"),
@@ -158,19 +159,28 @@ def run_contract(
     if cargo_target.exists():
         raise ContractError("cargo target must not already exist")
     cargo_target.parent.mkdir(parents=True, exist_ok=True)
-    manifest = _load_manifest(manifest_path)
+    payload = _load_payload(manifest_path)
+    manifest = payload.manifest
     if cross_windows_msvc:
         if os.name == "nt":
             raise ContractError("cross-Windows mode requires a non-Windows host")
         if manifest["build_target"] != "x86_64-pc-windows-msvc":
             raise ContractError("cross-Windows mode requires x86_64-pc-windows-msvc")
-    contract = load_contract(manifest_path.parent / "test-contract.json", manifest["compat_id"])
+    contract = load_contract(_payload_file(payload, "test-contract.json"), manifest["compat_id"])
     expected_cwd = expand(contract["cwd"], source, cargo_target)
     cwd = (source / "codex-rs").resolve(strict=True)
     if Path(expected_cwd).resolve(strict=True) != cwd:
         raise ContractError("contract cwd must be the candidate codex-rs directory")
 
     verification = verify(manifest_path, source, True, None)
+    if portable_evidence:
+        verification.update(
+            {
+                "manifest": "manifest.toml",
+                "source": "{source}",
+                "patches": [patch["path"] for patch in manifest["patches"]],
+            }
+        )
     steps = []
     for step in contract["generation"]:
         steps.append(run_step(step, "generation", cwd, contract["common_env"], source, cargo_target))
@@ -205,7 +215,7 @@ def run_contract(
         "source_verification": verification,
         "steps": steps,
         "artifact": {
-            "path": str(artifact_path),
+            "path": build["artifact"] if portable_evidence else str(artifact_path),
             "size": actual_size,
             "sha256": actual_hash,
             "manifest_size": artifact["size"],
@@ -228,6 +238,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--cargo-target", type=Path, required=True)
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cross-windows-msvc", action="store_true")
+    parser.add_argument("--portable-evidence", action="store_true")
     return parser.parse_args()
 
 
@@ -240,6 +251,7 @@ def main() -> int:
             args.cargo_target,
             args.output,
             args.cross_windows_msvc,
+            args.portable_evidence,
         )
     except (ContractError, OSError, VerificationError) as error:
         print(json.dumps({"schema": 1, "error": str(error)}, indent=2), file=sys.stderr)

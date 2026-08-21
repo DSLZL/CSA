@@ -5,12 +5,6 @@ on:
     branches: ["main"]
   pull_request:
   workflow_dispatch:
-    inputs:
-      full_payload:
-        description: Run the disposable upstream Codex patch/test/build lane
-        required: false
-        default: false
-        type: boolean
 
 concurrency:
   group: csa-ci-${{ github.workflow }}-${{ github.event_name }}-${{ github.event.pull_request.number || github.ref }}
@@ -188,51 +182,3 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
-  payload:
-    name: Exact Codex payload
-    if: github.event_name == 'workflow_dispatch' && inputs.full_payload
-    runs-on: windows-2025
-    steps:
-      - name: Configure payload root
-        shell: pwsh
-        run: |
-          $root = Join-Path $env:RUNNER_TEMP "csa-payload"
-          "PAYLOAD_ROOT=$root" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
-          New-Item -ItemType Directory -Force $root | Out-Null
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
-        with:
-          persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
-        with:
-          python-version: "3.13"
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
-      - name: Set up Cargo downloads and sccache
-        uses: ./.github/actions/setup-codex-rust-cache
-        with:
-          cache-scope: codex-3ba0f711642a888aec92a611a3f3b2211157ff89
-          toolchain: "1.95.0"
-      - name: Clone exact upstream tag
-        shell: pwsh
-        run: |
-          git clone --filter=blob:none --no-checkout --branch rust-v0.148.0 --single-branch https://github.com/openai/codex.git "$env:PAYLOAD_ROOT/source"
-          git -C "$env:PAYLOAD_ROOT/source" checkout --detach 3ba0f711642a888aec92a611a3f3b2211157ff89
-      - name: Apply, test, and build disposable payload
-        shell: pwsh
-        run: |
-          python scripts/run_patch_contract.py `
-            --manifest "$env:GITHUB_WORKSPACE/payload/codex/rust-v0.148.0-native-join-p2/manifest.toml" `
-            --source "$env:PAYLOAD_ROOT/source" `
-            --cargo-target "$env:PAYLOAD_ROOT/cargo-target" `
-            --output "$env:PAYLOAD_ROOT/payload-result.json"
-      - name: Rust cache statistics
-        if: always()
-        continue-on-error: true
-        run: sccache --show-stats
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: patched-codex-cli-windows-x64
-          path: |
-            ${{ runner.temp }}/csa-payload/payload-result.json
-            ${{ runner.temp }}/csa-payload/cargo-target/x86_64-pc-windows-msvc/release/codex.exe
-          if-no-files-found: error
-          retention-days: 1
