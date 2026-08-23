@@ -66,7 +66,8 @@
     }
   ],
   "known_upstream_errata": [
-    "The rust-v0.149.0 Cargo.lock records workspace packages as 0.0.0; Cargo 1.95.0 mechanically normalizes those entries to 0.149.0 before the build."
+    "The rust-v0.149.0 Cargo.lock records workspace packages as 0.0.0; Cargo 1.95.0 mechanically normalizes those entries to 0.149.0 before the build.",
+    "The upstream codex-tui app::tests::background_exit_tests::exit_interrupts_before_requesting_shutdown test can observe an unrelated asynchronous event first under parallel load; the contract runs it separately with one test thread and skips only its duplicate parallel execution."
   ],
   "parameters": {
     "cargo_target": "absolute disposable Cargo target path",
@@ -242,7 +243,23 @@
         "-p",
         "codex-tui",
         "--lib",
+        "app::tests::background_exit_tests::exit_interrupts_before_requesting_shutdown",
         "--",
+        "--test-threads=1",
+        "--format=terse"
+      ],
+      "name": "TUI background exit isolation"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-tui",
+        "--lib",
+        "--",
+        "--skip",
+        "app::tests::background_exit_tests::exit_interrupts_before_requesting_shutdown",
         "--format=terse"
       ],
       "name": "complete TUI library"

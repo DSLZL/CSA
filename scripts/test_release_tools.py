@@ -390,15 +390,19 @@ def test_contract_shape() -> None:
     assert len(p3_manifest["patches"]) == 14
     assert p3_manifest["patches"][-1]["path"] == "patches/0014-csa-version-snapshots.patch"
     assert len(p3_contract["generation"]) == 2
-    assert len(p3_contract["tests"]) == 16
+    assert len(p3_contract["tests"]) == 17
     assert p3_contract["tests"][0]["name"] == "workspace formatting"
-    assert p3_contract["tests"][-4]["name"] == "TUI live state and panel"
+    assert p3_contract["tests"][-5]["name"] == "TUI live state and panel"
+    assert p3_contract["tests"][-4]["name"] == "TUI background exit isolation"
     assert p3_contract["tests"][-3]["name"] == "complete TUI library"
     assert p3_contract["tests"][-2]["name"] == "TUI clippy"
     assert p3_contract["tests"][-1]["name"] == "CSA official runtime overlay"
+    assert "--test-threads=1" in p3_contract["tests"][-5]["argv"]
     assert "--test-threads=1" in p3_contract["tests"][-4]["argv"]
     assert "--test-threads=1" not in p3_contract["tests"][-3]["argv"]
-    assert "--skip" not in p3_contract["tests"][-3]["argv"]
+    assert "--skip" in p3_contract["tests"][-3]["argv"]
+    assert p3_contract["tests"][-4]["argv"][5] in p3_contract["tests"][-3]["argv"]
+    assert "unrelated asynchronous event" in p3_contract["known_upstream_errata"][-1]
     assert p3_contract["common_env"]["CARGO_BUILD_JOBS"] == "2"
     assert p3_contract["common_env"]["INSTA_WORKSPACE_ROOT"] == "{source}/codex-rs"
     assert p3_contract["build"]["env"]["CARGO_BUILD_JOBS"] == "2"

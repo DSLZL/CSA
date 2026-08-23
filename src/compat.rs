@@ -729,6 +729,8 @@ impl TestContract {
     fn validate(&self, manifest: &CompatibilityManifest) -> Result<()> {
         let p2 = manifest.patch_set_version == 2;
         let p3 = matches!(manifest.patch_set_version, 3..=6);
+        let p3_isolates_background_exit = manifest.patch_set_version == 6;
+        let p3_tui_offset = usize::from(p3_isolates_background_exit);
         let p3_offset = usize::from(p3);
         let batch_join = (p2 || p3)
             && manifest
@@ -742,7 +744,7 @@ impl TestContract {
             3 if batch_join => 15,
             4 if batch_join => 16,
             5 if batch_join => 16,
-            6 if batch_join => 16,
+            6 if batch_join => 17,
             _ => {
                 return Err(ManagerError::new(
                     "invalid_test_contract",
@@ -845,7 +847,7 @@ impl TestContract {
                 &[
                     (
                         "CARGO_BUILD_JOBS",
-                        if manifest.patch_set_version == 6 {
+                        if p3_isolates_background_exit {
                             "2"
                         } else {
                             "1"
@@ -1007,6 +1009,57 @@ impl TestContract {
             ],
             &[],
         );
+        let background_exit_test_matches = !p3_isolates_background_exit
+            || step_matches(
+                &self.tests[13],
+                "TUI background exit isolation",
+                &[
+                    "cargo",
+                    "test",
+                    "-p",
+                    "codex-tui",
+                    "--lib",
+                    "app::tests::background_exit_tests::exit_interrupts_before_requesting_shutdown",
+                    "--",
+                    "--test-threads=1",
+                    "--format=terse",
+                ],
+                &[],
+            );
+        let complete_tui_test_matches = !p3
+            || if p3_isolates_background_exit {
+                step_matches(
+                    &self.tests[13 + p3_tui_offset],
+                    "complete TUI library",
+                    &[
+                        "cargo",
+                        "test",
+                        "-p",
+                        "codex-tui",
+                        "--lib",
+                        "--",
+                        "--skip",
+                        "app::tests::background_exit_tests::exit_interrupts_before_requesting_shutdown",
+                        "--format=terse",
+                    ],
+                    &[],
+                )
+            } else {
+                step_matches(
+                    &self.tests[13],
+                    "complete TUI library",
+                    &[
+                        "cargo",
+                        "test",
+                        "-p",
+                        "codex-tui",
+                        "--lib",
+                        "--",
+                        "--format=terse",
+                    ],
+                    &[],
+                )
+            };
         let p3_tests_match = !p3
             || (step_matches(
                 &self.tests[0],
@@ -1028,38 +1081,27 @@ impl TestContract {
                     "--format=terse",
                 ],
                 &[],
-            ) && step_matches(
-                &self.tests[13],
-                "complete TUI library",
-                &[
-                    "cargo",
-                    "test",
-                    "-p",
-                    "codex-tui",
-                    "--lib",
-                    "--",
-                    "--format=terse",
-                ],
-                &[],
-            ) && step_matches(
-                &self.tests[14],
-                "TUI clippy",
-                &[
-                    "cargo",
-                    "clippy",
-                    "-p",
-                    "codex-tui",
-                    "--lib",
-                    "--tests",
-                    "--",
-                    "-D",
-                    "warnings",
-                ],
-                &[],
-            ));
+            ) && background_exit_test_matches
+                && complete_tui_test_matches
+                && step_matches(
+                    &self.tests[14 + p3_tui_offset],
+                    "TUI clippy",
+                    &[
+                        "cargo",
+                        "clippy",
+                        "-p",
+                        "codex-tui",
+                        "--lib",
+                        "--tests",
+                        "--",
+                        "-D",
+                        "warnings",
+                    ],
+                    &[],
+                ));
         let overlay_test_matches = !matches!(manifest.patch_set_version, 4..=6)
             || step_matches(
-                &self.tests[15],
+                &self.tests[15 + p3_tui_offset],
                 "CSA official runtime overlay",
                 &[
                     "cargo",
