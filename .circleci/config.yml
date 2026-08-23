@@ -84,6 +84,7 @@ jobs:
           no_output_timeout: 20m
           command: |
             set -euo pipefail
+            umask 077
             compat_id="<< parameters.compat_id >>"
             upstream_tag="<< parameters.upstream_tag >>"
             upstream_commit="<< parameters.upstream_commit >>"

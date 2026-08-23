@@ -511,6 +511,7 @@ def test_release_stream_contracts() -> None:
     assert 'root="$HOME/csa-patched-codex/$compat_id"' in circleci
     assert 'root="/tmp/csa-patched-codex/$compat_id"' not in circleci
     assert "TMPDIR: /home/circleci/csa-tmp" in circleci
+    assert "umask 077" in circleci
     assert 'chmod 0700 "$TMPDIR"' in circleci
     assert circleci.count("rust-v0.147.0-native-join-p2") == 1
     assert circleci.count("rust-v0.148.0-native-join-p2") == 1
