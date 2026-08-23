@@ -473,6 +473,8 @@ def test_release_stream_contracts() -> None:
     assert patched_workflow.count("build_patched_codex_bundle.sh") == 1
     assert circleci.count("build_patched_codex_bundle.sh") == 1
     assert "runs-on: ubuntu-26.04" in patched_workflow
+    assert "CARGO_HOME: ${{ runner.temp }}" not in patched_workflow
+    assert '"CARGO_HOME=$(Join-Path $root \'cache/cargo-home\')"' in patched_workflow
     assert "build_patched_codex_bundle.sh" not in ci_workflow
     assert "build_patched_codex_bundle.sh" not in watcher
     assert "compat_release.py finalize" not in watcher

@@ -35,13 +35,6 @@ jobs:
     name: Build exact patched Codex CLI
     runs-on: ubuntu-26.04
     timeout-minutes: 120
-    env:
-      CARGO_HOME: ${{ runner.temp }}/csa-patched-codex/cache/cargo-home
-      CSA_TOOL_BIN: ${{ runner.temp }}/csa-patched-codex/tools
-      RUSTUP_HOME: ${{ runner.temp }}/csa-patched-codex/cache/rustup
-      SCCACHE_DIR: ${{ runner.temp }}/csa-patched-codex/cache/sccache
-      TMPDIR: ${{ runner.temp }}/csa-patched-codex/tmp
-      XWIN_CACHE_DIR: ${{ runner.temp }}/csa-patched-codex/cache/xwin
     outputs:
       compat_id: ${{ steps.manifest.outputs.compat_id }}
       release_tag: ${{ steps.manifest.outputs.release_tag }}
@@ -56,10 +49,17 @@ jobs:
         run: |
           $root = Join-Path $env:RUNNER_TEMP "csa-patched-codex"
           $source = Join-Path $root "source"
+          $temp = Join-Path $root "tmp"
           @(
             "PATCHED_CODEX_ROOT=$root"
             "SOURCE_ROOT=$source"
             "CARGO_TARGET_DIR=$(Join-Path $root 'cargo-target')"
+            "CARGO_HOME=$(Join-Path $root 'cache/cargo-home')"
+            "CSA_TOOL_BIN=$(Join-Path $root 'tools')"
+            "RUSTUP_HOME=$(Join-Path $root 'cache/rustup')"
+            "SCCACHE_DIR=$(Join-Path $root 'cache/sccache')"
+            "TMPDIR=$temp"
+            "XWIN_CACHE_DIR=$(Join-Path $root 'cache/xwin')"
           ) | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
 
           $runnerTemp = [IO.Path]::GetFullPath($env:RUNNER_TEMP)
@@ -79,7 +79,7 @@ jobs:
             $root, `
             (Join-Path $root "home"), `
             (Join-Path $root "codex-home"), `
-            $env:TMPDIR | Out-Null
+            $temp | Out-Null
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
