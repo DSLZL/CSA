@@ -1132,18 +1132,10 @@ impl TestContract {
                     ("SOURCE_DATE_EPOCH", "1786063808"),
                 ],
             ),
-            3..=5 => map_matches(
+            3..=6 => map_matches(
                 &self.build.env,
                 &[
                     ("CARGO_BUILD_JOBS", "2"),
-                    ("CARGO_PROFILE_RELEASE_DEBUG", "0"),
-                    ("SOURCE_DATE_EPOCH", "1786063808"),
-                ],
-            ),
-            6 => map_matches(
-                &self.build.env,
-                &[
-                    ("CARGO_BUILD_JOBS", "4"),
                     ("CARGO_PROFILE_RELEASE_DEBUG", "0"),
                     ("SOURCE_DATE_EPOCH", "1786063808"),
                 ],

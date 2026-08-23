@@ -1210,7 +1210,7 @@ fn bundled_p3_contract_requires_full_tui_gates() {
             .env
             .get("CARGO_BUILD_JOBS")
             .map(String::as_str),
-        Some("4")
+        Some("2")
     );
 }
 

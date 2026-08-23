@@ -405,7 +405,7 @@ def test_contract_shape() -> None:
     assert "unrelated asynchronous event" in p3_contract["known_upstream_errata"][-1]
     assert p3_contract["common_env"]["CARGO_BUILD_JOBS"] == "2"
     assert p3_contract["common_env"]["INSTA_WORKSPACE_ROOT"] == "{source}/codex-rs"
-    assert p3_contract["build"]["env"]["CARGO_BUILD_JOBS"] == "4"
+    assert p3_contract["build"]["env"]["CARGO_BUILD_JOBS"] == "2"
     try:
         cross_windows_build_argv(["cargo", "test"])
     except ContractError:
@@ -526,7 +526,7 @@ def test_release_stream_contracts() -> None:
     assert circleci.count("require_warm_cache:") == 3
     assert "if << parameters.require_warm_cache >>; then" in circleci
     assert "export CSA_MINIMUM_RUST_HIT_RATE=95" in circleci
-    assert "build=(timeout 45m bash)" in circleci
+    assert "build=(timeout 50m bash)" in circleci
     assert "build=(timeout 30m bash)" in circleci
     assert '"${build[@]}" scripts/build_patched_codex_bundle.sh' in circleci
     assert "require_warm_cache: << pipeline.parameters.require_warm_cache >>" in circleci
