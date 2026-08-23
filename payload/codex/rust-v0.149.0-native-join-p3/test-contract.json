@@ -66,8 +66,7 @@
     }
   ],
   "known_upstream_errata": [
-    "The rust-v0.149.0 Cargo.lock records workspace packages as 0.0.0; Cargo 1.95.0 mechanically normalizes those entries to 0.149.0 before the build.",
-    "The upstream codex-tui ide_context::ipc::tests::fetch_ide_context_does_not_fall_back_after_primary_protocol_error test blocks indefinitely on CircleCI Linux even when run alone; the complete TUI gate skips only this test."
+    "The rust-v0.149.0 Cargo.lock records workspace packages as 0.0.0; Cargo 1.95.0 mechanically normalizes those entries to 0.149.0 before the build."
   ],
   "parameters": {
     "cargo_target": "absolute disposable Cargo target path",
@@ -244,8 +243,6 @@
         "codex-tui",
         "--lib",
         "--",
-        "--skip",
-        "ide_context::ipc::tests::fetch_ide_context_does_not_fall_back_after_primary_protocol_error",
         "--format=terse"
       ],
       "name": "complete TUI library"

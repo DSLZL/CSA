@@ -729,7 +729,6 @@ impl TestContract {
     fn validate(&self, manifest: &CompatibilityManifest) -> Result<()> {
         let p2 = manifest.patch_set_version == 2;
         let p3 = matches!(manifest.patch_set_version, 3..=6);
-        let p3_skips_hanging_ipc = manifest.patch_set_version == 6;
         let p3_offset = usize::from(p3);
         let batch_join = (p2 || p3)
             && manifest
@@ -846,7 +845,11 @@ impl TestContract {
                 &[
                     (
                         "CARGO_BUILD_JOBS",
-                        if p3_skips_hanging_ipc { "2" } else { "1" },
+                        if manifest.patch_set_version == 6 {
+                            "2"
+                        } else {
+                            "1"
+                        },
                     ),
                     ("CARGO_INCREMENTAL", "0"),
                     ("CARGO_TARGET_DIR", "{cargo_target}"),
@@ -1004,41 +1007,6 @@ impl TestContract {
             ],
             &[],
         );
-        let p3_complete_tui_matches = if !p3 {
-            true
-        } else if p3_skips_hanging_ipc {
-            step_matches(
-                &self.tests[13],
-                "complete TUI library",
-                &[
-                    "cargo",
-                    "test",
-                    "-p",
-                    "codex-tui",
-                    "--lib",
-                    "--",
-                    "--skip",
-                    "ide_context::ipc::tests::fetch_ide_context_does_not_fall_back_after_primary_protocol_error",
-                    "--format=terse",
-                ],
-                &[],
-            )
-        } else {
-            step_matches(
-                &self.tests[13],
-                "complete TUI library",
-                &[
-                    "cargo",
-                    "test",
-                    "-p",
-                    "codex-tui",
-                    "--lib",
-                    "--",
-                    "--format=terse",
-                ],
-                &[],
-            )
-        };
         let p3_tests_match = !p3
             || (step_matches(
                 &self.tests[0],
@@ -1060,23 +1028,35 @@ impl TestContract {
                     "--format=terse",
                 ],
                 &[],
-            ) && p3_complete_tui_matches
-                && step_matches(
-                    &self.tests[14],
-                    "TUI clippy",
-                    &[
-                        "cargo",
-                        "clippy",
-                        "-p",
-                        "codex-tui",
-                        "--lib",
-                        "--tests",
-                        "--",
-                        "-D",
-                        "warnings",
-                    ],
-                    &[],
-                ));
+            ) && step_matches(
+                &self.tests[13],
+                "complete TUI library",
+                &[
+                    "cargo",
+                    "test",
+                    "-p",
+                    "codex-tui",
+                    "--lib",
+                    "--",
+                    "--format=terse",
+                ],
+                &[],
+            ) && step_matches(
+                &self.tests[14],
+                "TUI clippy",
+                &[
+                    "cargo",
+                    "clippy",
+                    "-p",
+                    "codex-tui",
+                    "--lib",
+                    "--tests",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+                &[],
+            ));
         let overlay_test_matches = !matches!(manifest.patch_set_version, 4..=6)
             || step_matches(
                 &self.tests[15],

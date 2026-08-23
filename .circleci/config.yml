@@ -99,6 +99,7 @@ jobs:
             stats="$root/sccache-stats.json"
 
             mkdir -p "$root" "$TMPDIR" "$CSA_TOOL_BIN" "$CARGO_HOME" "$RUSTUP_HOME" "$SCCACHE_DIR" "$XWIN_CACHE_DIR"
+            chmod 0700 "$TMPDIR"
             git clone \
               --filter=blob:none \
               --no-checkout \

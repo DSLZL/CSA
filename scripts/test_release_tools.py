@@ -398,8 +398,7 @@ def test_contract_shape() -> None:
     assert p3_contract["tests"][-1]["name"] == "CSA official runtime overlay"
     assert "--test-threads=1" in p3_contract["tests"][-4]["argv"]
     assert "--test-threads=1" not in p3_contract["tests"][-3]["argv"]
-    assert "--skip" in p3_contract["tests"][-3]["argv"]
-    assert "blocks indefinitely on CircleCI Linux" in p3_contract["known_upstream_errata"][-1]
+    assert "--skip" not in p3_contract["tests"][-3]["argv"]
     assert p3_contract["common_env"]["CARGO_BUILD_JOBS"] == "2"
     assert p3_contract["common_env"]["INSTA_WORKSPACE_ROOT"] == "{source}/codex-rs"
     assert p3_contract["build"]["env"]["CARGO_BUILD_JOBS"] == "2"
@@ -512,6 +511,7 @@ def test_release_stream_contracts() -> None:
     assert 'root="$HOME/csa-patched-codex/$compat_id"' in circleci
     assert 'root="/tmp/csa-patched-codex/$compat_id"' not in circleci
     assert "TMPDIR: /home/circleci/csa-tmp" in circleci
+    assert 'chmod 0700 "$TMPDIR"' in circleci
     assert circleci.count("rust-v0.147.0-native-join-p2") == 1
     assert circleci.count("rust-v0.148.0-native-join-p2") == 1
     assert circleci.count("rust-v0.149.0-native-join-p3") == 2
