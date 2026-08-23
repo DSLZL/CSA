@@ -2,7 +2,7 @@
 
 CSA 提供一个 fail-closed 的 Rust 管理器和一份绑定具体 Codex 版本的 Native Join 补丁。它与官方 Codex CLI 并排安装，不覆盖官方安装。
 
-当前状态：**Windows x64 的本地 p3 hybrid candidate 已完成验证，但未执行任何发布**。13-patch Codex `0.149.0` payload 已精确应用，install-context 测试和 release build 通过；disposable manager 的 install/start/uninstall 生命周期复用了完整的官方 Bun runtime，没有复制 companion executable。托管 Release workflow 仍是唯一发布入口。详见 [release-readiness.md](release-readiness.md)。
+当前状态：**Windows x64 的本地 p3 hybrid candidate 已完成验证，但未执行任何发布**。14-patch Codex `0.149.0` payload 已精确应用，install-context 测试和 release build 通过；disposable manager 的 install/start/uninstall 生命周期复用了完整的官方 Bun runtime，没有复制 companion executable。托管 Release workflow 仍是唯一发布入口。详见 [release-readiness.md](release-readiness.md)。
 
 [English README](README.md)
 

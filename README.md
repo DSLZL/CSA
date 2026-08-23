@@ -2,7 +2,7 @@
 
 CSA packages a fail-closed manager and a version-pinned Codex patch that adds one native `join` operation for child runs. It installs beside the official Codex CLI and never replaces it.
 
-Current status: **the local Windows x64 p3 hybrid candidate is validated; nothing was published**. The 13-patch Codex `0.149.0` payload applies exactly, its install-context tests and release build pass, and the disposable manager install/start/uninstall lifecycle reuses a complete official Bun runtime without copying companion executables. Hosted Release workflows remain the only publication path. See [release-readiness.md](release-readiness.md).
+Current status: **the local Windows x64 p3 hybrid candidate is validated; nothing was published**. The 14-patch Codex `0.149.0` payload applies exactly, its install-context tests and release build pass, and the disposable manager install/start/uninstall lifecycle reuses a complete official Bun runtime without copying companion executables. Hosted Release workflows remain the only publication path. See [release-readiness.md](release-readiness.md).
 
 [中文说明](README_ZH.md)
 

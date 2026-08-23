@@ -243,7 +243,6 @@
         "codex-tui",
         "--lib",
         "--",
-        "--test-threads=1",
         "--format=terse"
       ],
       "name": "complete TUI library"

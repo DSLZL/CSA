@@ -105,7 +105,7 @@ Evidence may contain paths, versions, hashes, timestamps, and exit results. It m
 
 ## Known limitations
 
-- Codex `0.149.0` p3 on Windows x64 passed exact 13-patch replay, install-context tests, release build, and the hybrid manager lifecycle; no formal compatibility Release was published.
+- Codex `0.149.0` p3 on Windows x64 passed exact 14-patch replay, install-context tests, release build, and the hybrid manager lifecycle; no formal compatibility Release was published.
 - Non-Windows manager/npm jobs exist but have not produced verified release artifacts.
 - POSIX process-group signal behavior is covered by the launcher test only when run on POSIX; it is not verified by the local Windows run.
 - Authenticated external-provider lanes and production persistent activation remain `NOT VERIFIED`; the p3 request-count lane used a loopback fake provider, and temporary local plug/unplug used only a disposable manager root and child-only PATH.

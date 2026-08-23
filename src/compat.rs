@@ -496,10 +496,11 @@ fn validate_manifest(manifest: &CompatibilityManifest) -> Result<()> {
         3 => 11,
         4 => 12,
         5 => 13,
+        6 => 14,
         _ => {
             return Err(ManagerError::new(
                 "unsupported_manifest",
-                "only patch sets 1, 2, 3, 4, and 5 are supported",
+                "only patch sets 1, 2, 3, 4, 5, and 6 are supported",
             ));
         }
     };
@@ -727,7 +728,7 @@ pub struct BuildContract {
 impl TestContract {
     fn validate(&self, manifest: &CompatibilityManifest) -> Result<()> {
         let p2 = manifest.patch_set_version == 2;
-        let p3 = matches!(manifest.patch_set_version, 3..=5);
+        let p3 = matches!(manifest.patch_set_version, 3..=6);
         let p3_offset = usize::from(p3);
         let batch_join = (p2 || p3)
             && manifest
@@ -741,6 +742,7 @@ impl TestContract {
             3 if batch_join => 15,
             4 if batch_join => 16,
             5 if batch_join => 16,
+            6 if batch_join => 16,
             _ => {
                 return Err(ManagerError::new(
                     "invalid_test_contract",
@@ -1029,7 +1031,6 @@ impl TestContract {
                     "codex-tui",
                     "--lib",
                     "--",
-                    "--test-threads=1",
                     "--format=terse",
                 ],
                 &[],
@@ -1049,7 +1050,7 @@ impl TestContract {
                 ],
                 &[],
             ));
-        let overlay_test_matches = !matches!(manifest.patch_set_version, 4 | 5)
+        let overlay_test_matches = !matches!(manifest.patch_set_version, 4..=6)
             || step_matches(
                 &self.tests[15],
                 "CSA official runtime overlay",
@@ -1082,7 +1083,7 @@ impl TestContract {
                     ("SOURCE_DATE_EPOCH", "1786063808"),
                 ],
             ),
-            3..=5 => map_matches(
+            3..=6 => map_matches(
                 &self.build.env,
                 &[
                     ("CARGO_BUILD_JOBS", "2"),

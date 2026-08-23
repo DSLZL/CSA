@@ -81,7 +81,7 @@ jobs:
 
       - run:
           name: Build canonical patched Codex bundle
-          no_output_timeout: 120m
+          no_output_timeout: 20m
           command: |
             set -euo pipefail
             compat_id="<< parameters.compat_id >>"
@@ -117,7 +117,7 @@ jobs:
               "<< parameters.official_windows_npm_integrity >>"
               "$stats"
             )
-            build=(bash)
+            build=(timeout 35m bash)
             if << parameters.require_warm_cache >>; then
               export CSA_MINIMUM_RUST_HIT_RATE=95
               build=(timeout 30m bash)
@@ -165,7 +165,7 @@ workflows:
           compat_id: rust-v0.149.0-native-join-p3
           upstream_tag: rust-v0.149.0
           upstream_commit: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
-          binding_sha256: 07f465feceffa5811a8af80a6d18cc594c153e063d068e90328867c74315924c
+          binding_sha256: b964d5b08aeb3049c4a52f3efc9eae52ce14a6a029250c14e1d1b7599192cde4
           official_windows_npm_integrity: "sha512-qKbwSOOO/fdhQ5MlXE2fts6taPxRPZ/zqeC+eqHD72hLRymV9rFCUbUxOCquognUPRPvS/2/kRCV0UVhoDd3yQ=="
           store_artifact: << pipeline.parameters.store_latest_patched_artifact >>
           require_warm_cache: << pipeline.parameters.require_warm_cache >>
@@ -191,5 +191,5 @@ workflows:
           compat_id: rust-v0.149.0-native-join-p3
           upstream_tag: rust-v0.149.0
           upstream_commit: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
-          binding_sha256: 07f465feceffa5811a8af80a6d18cc594c153e063d068e90328867c74315924c
+          binding_sha256: b964d5b08aeb3049c4a52f3efc9eae52ce14a6a029250c14e1d1b7599192cde4
           official_windows_npm_integrity: "sha512-qKbwSOOO/fdhQ5MlXE2fts6taPxRPZ/zqeC+eqHD72hLRymV9rFCUbUxOCquognUPRPvS/2/kRCV0UVhoDd3yQ=="

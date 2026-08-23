@@ -4,12 +4,12 @@ codex_version = "0.149.0"
 upstream_tag = "rust-v0.149.0"
 upstream_commit = "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0"
 patch_api = 1
-patch_set_version = 5
+patch_set_version = 6
 rust_toolchain = "1.95.0"
 rustc_commit = "59807616e1fa2540724bfbac14d7976d7e4a3860"
 build_target = "x86_64-pc-windows-msvc"
 source_hashes = "expected/source-hashes.json"
-source_hashes_sha256 = "5d4c89c237a5a726f9db3b8c1046dd1521d586bed2e3d0150d2b690c6f71ba33"
+source_hashes_sha256 = "6b2aaa1f6106766797a6617ebcaccd486807e6f3d6646ac5beb3fa7df09526b2"
 preimage_absent = [
   "codex-rs/core/src/agent/completion.rs",
   "codex-rs/core/src/tools/handlers/multi_agents_v2/join.rs",
@@ -73,6 +73,10 @@ sha256 = "b63e1a940ed2d903da87fc8079653b4f36ca47c2e468140c5284020681e8402b"
 path = "patches/0013-subagent-live-polish.patch"
 sha256 = "5e435189cc44bbe61ad4fa62fb8d54b55764527a1eae2531e9f30248918c0784"
 
+[[patches]]
+path = "patches/0014-csa-version-snapshots.patch"
+sha256 = "046afd412c619969f94a5fb76e8eb12d9095c67526808e48671663624be8623e"
+
 [preimage]
 "codex-rs/analytics/src/reducer.rs" = "9939a76b5c196a70c95a6036b3c97b1ee4764e2f348e410d8c7799c7dfa45202"
 "codex-rs/app-server-protocol/src/protocol/v2/item.rs" = "95dd99bac8a2abdcc4ff9b7f92ea798e937bb3494c9764656f31513ff60488bb"
@@ -125,6 +129,8 @@ sha256 = "5e435189cc44bbe61ad4fa62fb8d54b55764527a1eae2531e9f30248918c0784"
 "codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_clamps_to_narrow_width.snap" = "c6b5b1f8a534f967bdd35d06590677a67a3b651a4f27a55c0971913432b4db6e"
 "codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_halfwidth_directory.snap" = "d58d0131d1d9ee0463ca268cd4d2e353c8b28884f9e0727b9f635605a756cdc8"
 "codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_halfwidth_sound_marks.snap" = "ab039f71f035da2cbd5fcd34cfca5b981430d691202fbf75e35ca3d7ad3d1433"
+"codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_header_indicates_yolo_mode.snap" = "44574bab826bd065957aad480527b45a22f5ea88eec3e5f8fb900b09e646bfbc"
+"codex-rs/tui/src/history_cell/snapshots/codex_tui__history_cell__tests__session_info_availability_nux_tooltip_snapshot.snap" = "ff27952438f1e130d0f7fdefdb8ef87aed6c08a3ac0349abf535d39ba2452162"
 "codex-rs/tui/src/history_cell/tests.rs" = "3a430b96a08e68d8bfb9647392de6af954ea17468d96becd4c69a5154a13dfa7"
 "codex-rs/tui/src/lib.rs" = "13f0e2cd43f51432833e4d7320d3eeb6477e16c68c81903a305808554bb4369f"
 "codex-rs/tui/src/model_migration.rs" = "3a0606c52e52a2ca82a645d93d62ec58fd8e656964a1c01cb290c8a5b25ebfab"
@@ -133,6 +139,8 @@ sha256 = "5e435189cc44bbe61ad4fa62fb8d54b55764527a1eae2531e9f30248918c0784"
 "codex-rs/tui/src/onboarding/onboarding_screen.rs" = "194a93f64587a38fc1ee067f5e3b3ff774e7f1d58569983cd2ccdca437a9d119"
 "codex-rs/tui/src/pets/mod.rs" = "55244e5606ef3ec698ea52e3b90475ea953207dacb7074d86e55a5b370d63cf6"
 "codex-rs/tui/src/resume_picker.rs" = "3be9736b88e15db16941f455a4a91406cf148e0e44e0b900c5fe4be4023cf26f"
+"codex-rs/tui/src/snapshots/codex_tui__app__tests__clear_ui_after_long_transcript_fresh_header_only.snap" = "df60cf6c1374ebb352d2144a21a48ec034652ebb91353b8aa1675fdf8766e84d"
+"codex-rs/tui/src/snapshots/codex_tui__app__tests__clear_ui_header_fast_status_fast_capable_models.snap" = "c014365a4f3a3f80f89db77213364f900925f1a8e1b9cda07164fcc73271c61d"
 "codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_fresh_session_transitions.snap" = "fbd23d34e1cc9e19e658549efdfd74bdea140833b9abaf16cc4a9a9190572673"
 "codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_full_frames.snap" = "dc489a7b3eae4841555c6051f5bb005a6726a204330dd5319fa0faf321bf951b"
 "codex-rs/tui/src/snapshots/codex_tui__startup_draft__tests__startup_draft_onboarding_transition.snap" = "82ed0c1b1bb3a67a381d55bf0172f494a8f4dd3473588b191ce0cdcd6c31d482"

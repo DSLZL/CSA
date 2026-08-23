@@ -257,6 +257,7 @@ jobs:
             echo '```text'
             echo "Actions -> Release patched Codex CLI -> Run workflow"
             echo "compat_id: $COMPAT_ID"
+            echo "official_windows_npm_integrity: <sha512 integrity from the official Windows npm package>"
             echo "accepted_codex_sha256: <SHA-256 from .dev>"
             echo '```'
           } >> "$GITHUB_STEP_SUMMARY"

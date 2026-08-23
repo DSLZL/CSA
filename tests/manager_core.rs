@@ -1187,8 +1187,8 @@ fn bundled_p3_contract_requires_full_tui_gates() {
     let loaded = LoadedCompatibility::load(&manifest).unwrap();
     let contract = loaded.test_contract().unwrap();
 
-    assert_eq!(loaded.manifest.patch_set_version, 5);
-    assert_eq!(loaded.patch_paths.len(), 13);
+    assert_eq!(loaded.manifest.patch_set_version, 6);
+    assert_eq!(loaded.patch_paths.len(), 14);
     assert_eq!(contract.tests.len(), 16);
     assert_eq!(
         contract

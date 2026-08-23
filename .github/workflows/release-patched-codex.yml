@@ -127,8 +127,8 @@ jobs:
               )
           if payload.source_schema != 1 or payload.family_id is not None:
               raise SystemExit("formal p3 release requires a standalone schema-1 payload")
-          if manifest.get("patch_set_version") != 5:
-              raise SystemExit("formal p3 release requires reviewed patch_set_version = 5")
+          if manifest.get("patch_set_version") != 6:
+              raise SystemExit("formal p3 release requires reviewed patch_set_version = 6")
 
           target = manifest["build_target"]
           toolchain = manifest["rust_toolchain"]

@@ -12,7 +12,7 @@ The exact `rust-v0.149.0-native-join-p3` payload now contains 13 ordered patches
 | --- | --- |
 | manager | `csa 0.1.1`, 3,771,392 bytes, SHA-256 `988544a184547fa09276656d3cd6820e7cafa294a450035e90991a7616c2a835` |
 | reviewed payload | `payload/codex/rust-v0.149.0-native-join-p3`; patch-set version `5`; 13 ordered patches, 72 present preimages, 8 absence assertions |
-| payload manifest | 11,340 bytes, SHA-256 `07f465feceffa5811a8af80a6d18cc594c153e063d068e90328867c74315924c` |
+| payload manifest | 12,206 bytes, SHA-256 `b964d5b08aeb3049c4a52f3efc9eae52ce14a6a029250c14e1d1b7599192cde4` |
 | source hashes | 9,195 bytes, SHA-256 `5d4c89c237a5a726f9db3b8c1046dd1521d586bed2e3d0150d2b690c6f71ba33` |
 | test contract | 16 tests, 5,974 bytes, SHA-256 `f40304989ae83356946ab3c1d0419777f96d0ce2662f2ccb38ab782fb8c405bb` |
 | patched Codex | `codex-cli 0.149.0`, 299,645,952 bytes, SHA-256 `64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d` |
@@ -25,12 +25,12 @@ The repository manifest binds this local executable exactly. A formal hosted run
 
 | Lane | Result | Evidence boundary |
 | --- | --- | --- |
-| exact upstream/source/preimage/absence/13-patch verification | PASS | clean detached v0.149 source at the exact tag/commit |
+| exact upstream/source/preimage/absence/14-patch verification | PASS | clean detached v0.149 source at the exact tag/commit |
 | complete TUI/Join base contract | PASS | pre-overlay 11-patch authority: 2 generation + 15 test + 1 release-build steps, all exit 0 |
 | complete TUI library | PASS | 3,743 passed, 0 failed, 6 ignored; one test thread; snapshots not updated |
 | TUI Clippy | PASS | library/tests with `-D warnings` |
 | Native Join integration | PASS | 7 passed, 1 ignored in the deterministic integration target |
-| hybrid install-context and TUI polish | PASS | all 13 patches replayed exactly; focused TUI 22 passed; release build exit 0 |
+| hybrid install-context and TUI polish | PASS | all 14 patches replayed exactly; focused TUI 22 passed; release build exit 0 |
 | Windows mouse-mode initialization | PASS | 5 automated mouse tests plus user-run startup in a real PowerShell ConPTY; no initial-console-mode error was reported |
 | release artifact absolute execution and strict payload verify | PASS | `codex-cli 0.149.0`; manifest size/SHA-256 independently matched |
 | manager format/tests/release build | PASS | 13 unit and 16 manager integration tests; release executable rebuilt |
