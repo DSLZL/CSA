@@ -166,7 +166,7 @@ workflows:
           upstream_tag: rust-v0.149.0
           upstream_commit: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
           binding_sha256: 07f465feceffa5811a8af80a6d18cc594c153e063d068e90328867c74315924c
-          official_windows_npm_integrity: "sha512-i4dryj2Y1j+00Mb5n+0n71EYnTK9/KDc2cdFo/dXD0d1oTog2bhUssKDEIOnKmnEf51P0Z/HJTWvTKw/UHyOvQ=="
+          official_windows_npm_integrity: "sha512-qKbwSOOO/fdhQ5MlXE2fts6taPxRPZ/zqeC+eqHD72hLRymV9rFCUbUxOCquognUPRPvS/2/kRCV0UVhoDd3yQ=="
           store_artifact: << pipeline.parameters.store_latest_patched_artifact >>
           require_warm_cache: << pipeline.parameters.require_warm_cache >>
   csa-patched-build:
@@ -192,4 +192,4 @@ workflows:
           upstream_tag: rust-v0.149.0
           upstream_commit: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
           binding_sha256: 07f465feceffa5811a8af80a6d18cc594c153e063d068e90328867c74315924c
-          official_windows_npm_integrity: "sha512-i4dryj2Y1j+00Mb5n+0n71EYnTK9/KDc2cdFo/dXD0d1oTog2bhUssKDEIOnKmnEf51P0Z/HJTWvTKw/UHyOvQ=="
+          official_windows_npm_integrity: "sha512-qKbwSOOO/fdhQ5MlXE2fts6taPxRPZ/zqeC+eqHD72hLRymV9rFCUbUxOCquognUPRPvS/2/kRCV0UVhoDd3yQ=="

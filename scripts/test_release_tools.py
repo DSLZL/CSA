@@ -520,7 +520,7 @@ def test_release_stream_contracts() -> None:
     assert "store_artifact: << pipeline.parameters.store_latest_patched_artifact >>" in circleci
     assert "sha512-oT7Ss5fAPf2fiWE9QNURqZcQGAAawSVxmIUdgPzckq4K" in circleci
     assert "sha512-/Jg8eYw0BqTGNUpnrzzWlK2kbu29NWg7t6pnUDEfxqp" in circleci
-    assert "sha512-i4dryj2Y1j+00Mb5n+0n71EYnTK9/KDc2cdFo/dXD0d1" in circleci
+    assert "sha512-qKbwSOOO/fdhQ5MlXE2fts6taPxRPZ/zqeC+eqHD72hLRymV9" in circleci
     assert "OPENAI_API_KEY" not in circleci
     family_index = tomllib.loads(
         (REPOSITORY / "payload" / "codex" / "native-join-p2" / "family.toml").read_text(
