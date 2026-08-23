@@ -534,7 +534,9 @@ def test_release_stream_contracts() -> None:
     assert "--stats-format json" in shared_build
     assert "CSA_MINIMUM_RUST_HIT_RATE" in shared_build
     assert "| grep -Fq" not in shared_build
-    assert '[[ "$(rustc -Vv)" == *"commit-hash: $rustc_commit"* ]]' in shared_build
+    assert 'require_identity_contains rustc "commit-hash: $rustc_commit"' in shared_build
+    assert "identity mismatch; expected output to contain" in shared_build
+    assert "identity mismatch; expected exactly" in shared_build
     assert "d1368d4a94c7ac4bf09296f68516343a76ce11aa375363d4fcddc7fe8ef09730" in shared_build
     assert "64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d" in shared_build
     for path in (

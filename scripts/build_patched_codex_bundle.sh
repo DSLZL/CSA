@@ -128,13 +128,19 @@ binding_sha256="${identity[8]}"
 [[ "$rust_toolchain" == 1.95.0 ]]
 [[ "$rustc_commit" == 59807616e1fa2540724bfbac14d7976d7e4a3860 ]]
 [[ "$build_target" == x86_64-pc-windows-msvc && "$artifact_filename" == codex.exe ]]
-[[ "$(rustc -Vv)" == *"commit-hash: $rustc_commit"* ]]
-[[ "$(cargo xwin --version)" == "cargo-xwin 0.23.0" ]]
-[[ "$(sccache --version)" == "sccache 0.16.0" ]]
-[[ "$(clang-cl --version)" == *'21.1.8'* ]]
-[[ "$(lld-link --version)" == *'21.1.8'* ]]
-command -v llvm-lib >/dev/null
-command -v ninja >/dev/null
+require_exact_identity() {
+  [[ "$3" == "$2" ]] || { printf '%s identity mismatch; expected exactly %s, got:\n%s\n' "$1" "$2" "$3" >&2; exit 1; }
+}
+require_identity_contains() {
+  [[ "$3" == *"$2"* ]] || { printf '%s identity mismatch; expected output to contain %s, got:\n%s\n' "$1" "$2" "$3" >&2; exit 1; }
+}
+require_identity_contains rustc "commit-hash: $rustc_commit" "$(rustc -Vv)"
+require_exact_identity cargo-xwin "cargo-xwin 0.23.0" "$(cargo xwin --version)"
+require_exact_identity sccache "sccache 0.16.0" "$(sccache --version)"
+require_identity_contains clang-cl 21.1.8 "$(clang-cl --version)"
+require_identity_contains lld-link 21.1.8 "$(lld-link --version)"
+command -v llvm-lib >/dev/null || { echo 'llvm-lib is unavailable' >&2; exit 1; }
+command -v ninja >/dev/null || { echo 'ninja is unavailable' >&2; exit 1; }
 
 if [[ "$official_windows_npm_integrity" == registry ]]; then
   official_windows_npm_integrity="$(python3 - "$codex_version" <<'PY'
