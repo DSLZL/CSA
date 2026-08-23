@@ -1189,7 +1189,14 @@ fn bundled_p3_contract_requires_full_tui_gates() {
 
     assert_eq!(loaded.manifest.patch_set_version, 6);
     assert_eq!(loaded.patch_paths.len(), 14);
-    assert_eq!(contract.tests.len(), 16);
+    assert_eq!(contract.tests.len(), 17);
+    assert_eq!(
+        contract
+            .common_env
+            .get("CARGO_BUILD_JOBS")
+            .map(String::as_str),
+        Some("2")
+    );
     assert_eq!(
         contract
             .common_env

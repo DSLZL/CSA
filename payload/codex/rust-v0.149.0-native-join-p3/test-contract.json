@@ -19,7 +19,7 @@
     }
   },
   "common_env": {
-    "CARGO_BUILD_JOBS": "1",
+    "CARGO_BUILD_JOBS": "2",
     "CARGO_INCREMENTAL": "0",
     "CARGO_TARGET_DIR": "{cargo_target}",
     "INSTA_OUTPUT": "none",
@@ -242,7 +242,23 @@
         "-p",
         "codex-tui",
         "--lib",
+        "ide_context::ipc::tests::fetch_ide_context_does_not_fall_back_after_primary_protocol_error",
         "--",
+        "--test-threads=1",
+        "--format=terse"
+      ],
+      "name": "TUI IPC protocol error isolation"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-tui",
+        "--lib",
+        "--",
+        "--skip",
+        "ide_context::ipc::tests::fetch_ide_context_does_not_fall_back_after_primary_protocol_error",
         "--format=terse"
       ],
       "name": "complete TUI library"
