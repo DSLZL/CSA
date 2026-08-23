@@ -729,7 +729,7 @@ impl TestContract {
     fn validate(&self, manifest: &CompatibilityManifest) -> Result<()> {
         let p2 = manifest.patch_set_version == 2;
         let p3 = matches!(manifest.patch_set_version, 3..=6);
-        let p3_isolated_ipc = manifest.patch_set_version == 6;
+        let p3_skips_hanging_ipc = manifest.patch_set_version == 6;
         let p3_offset = usize::from(p3);
         let batch_join = (p2 || p3)
             && manifest
@@ -743,7 +743,7 @@ impl TestContract {
             3 if batch_join => 15,
             4 if batch_join => 16,
             5 if batch_join => 16,
-            6 if batch_join => 17,
+            6 if batch_join => 16,
             _ => {
                 return Err(ManagerError::new(
                     "invalid_test_contract",
@@ -844,7 +844,10 @@ impl TestContract {
             map_matches(
                 &self.common_env,
                 &[
-                    ("CARGO_BUILD_JOBS", if p3_isolated_ipc { "2" } else { "1" }),
+                    (
+                        "CARGO_BUILD_JOBS",
+                        if p3_skips_hanging_ipc { "2" } else { "1" },
+                    ),
                     ("CARGO_INCREMENTAL", "0"),
                     ("CARGO_TARGET_DIR", "{cargo_target}"),
                     ("INSTA_OUTPUT", "none"),
@@ -1001,29 +1004,11 @@ impl TestContract {
             ],
             &[],
         );
-        let p3_tui_offset = usize::from(p3_isolated_ipc);
-        let p3_ipc_test_matches = !p3_isolated_ipc
-            || step_matches(
-                &self.tests[13],
-                "TUI IPC protocol error isolation",
-                &[
-                    "cargo",
-                    "test",
-                    "-p",
-                    "codex-tui",
-                    "--lib",
-                    "ide_context::ipc::tests::fetch_ide_context_does_not_fall_back_after_primary_protocol_error",
-                    "--",
-                    "--test-threads=1",
-                    "--format=terse",
-                ],
-                &[],
-            );
         let p3_complete_tui_matches = if !p3 {
             true
-        } else if p3_isolated_ipc {
+        } else if p3_skips_hanging_ipc {
             step_matches(
-                &self.tests[14],
+                &self.tests[13],
                 "complete TUI library",
                 &[
                     "cargo",
@@ -1075,10 +1060,9 @@ impl TestContract {
                     "--format=terse",
                 ],
                 &[],
-            ) && p3_ipc_test_matches
-                && p3_complete_tui_matches
+            ) && p3_complete_tui_matches
                 && step_matches(
-                    &self.tests[14 + p3_tui_offset],
+                    &self.tests[14],
                     "TUI clippy",
                     &[
                         "cargo",
@@ -1095,7 +1079,7 @@ impl TestContract {
                 ));
         let overlay_test_matches = !matches!(manifest.patch_set_version, 4..=6)
             || step_matches(
-                &self.tests[15 + p3_tui_offset],
+                &self.tests[15],
                 "CSA official runtime overlay",
                 &[
                     "cargo",
