@@ -405,7 +405,7 @@ def test_contract_shape() -> None:
     assert "unrelated asynchronous event" in p3_contract["known_upstream_errata"][-1]
     assert p3_contract["common_env"]["CARGO_BUILD_JOBS"] == "2"
     assert p3_contract["common_env"]["INSTA_WORKSPACE_ROOT"] == "{source}/codex-rs"
-    assert p3_contract["build"]["env"]["CARGO_BUILD_JOBS"] == "2"
+    assert p3_contract["build"]["env"]["CARGO_BUILD_JOBS"] == "4"
     try:
         cross_windows_build_argv(["cargo", "test"])
     except ContractError:
