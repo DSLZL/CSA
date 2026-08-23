@@ -79,10 +79,16 @@ install_release_binary \
   https://static.rust-lang.org/rustup/archive/1.29.0/x86_64-unknown-linux-gnu/rustup-init \
   4acc9acc76d5079515b46346a485974457b5a79893cfb01112423c89aeb5aa10
 
-rustup-init --no-modify-path --profile minimal --default-toolchain none -y
-rustup toolchain install 1.95.0 --profile minimal
-rustup default 1.95.0
-rustup target add --toolchain 1.95.0 x86_64-pc-windows-msvc
+rustup_log="$temp_root/rustup.log"
+if ! {
+  rustup-init --no-modify-path --profile minimal --default-toolchain none -y &&
+    rustup toolchain install 1.95.0 --profile minimal &&
+    rustup default 1.95.0 &&
+    rustup target add --toolchain 1.95.0 x86_64-pc-windows-msvc
+} >"$rustup_log" 2>&1; then
+  tail -n 200 "$rustup_log" >&2
+  exit 1
+fi
 xwin_cache_log="$temp_root/xwin-cache.log"
 if ! cargo xwin cache xwin >"$xwin_cache_log" 2>&1; then
   tail -n 200 "$xwin_cache_log" >&2
