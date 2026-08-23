@@ -83,7 +83,11 @@ rustup-init --no-modify-path --profile minimal --default-toolchain none -y
 rustup toolchain install 1.95.0 --profile minimal
 rustup default 1.95.0
 rustup target add --toolchain 1.95.0 x86_64-pc-windows-msvc
-cargo xwin cache xwin
+xwin_cache_log="$temp_root/xwin-cache.log"
+if ! cargo xwin cache xwin >"$xwin_cache_log" 2>&1; then
+  tail -n 200 "$xwin_cache_log" >&2
+  exit 1
+fi
 
 mapfile -t identity < <(python3 - "$manifest" "$repository" <<'PY'
 import sys

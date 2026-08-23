@@ -223,12 +223,12 @@ impl Fixture {
         }
     }
 
-    fn set_official_package_target(&self, _target: &str) {
-        #[cfg(windows)]
+    #[cfg(windows)]
+    fn set_official_package_target(&self, target: &str) {
         fs::write(
             self.official_package.join("codex-package.json"),
             format!(
-                r#"{{"layoutVersion":1,"version":"{VERSION}","target":"{_target}","variant":"codex","entrypoint":"bin/codex.exe","resourcesDir":"codex-resources","pathDir":"codex-path"}}"#
+                r#"{{"layoutVersion":1,"version":"{VERSION}","target":"{target}","variant":"codex","entrypoint":"bin/codex.exe","resourcesDir":"codex-resources","pathDir":"codex-path"}}"#
             ),
         )
         .unwrap();
@@ -633,18 +633,21 @@ fn prepare_rejects_hash_version_and_same_path_without_state() {
     assert!(!version_root.join("state.json").exists());
     fixture.set_official_package_version(VERSION);
 
-    let target_root = temp.join("manager-target");
-    fixture.set_official_package_target("aarch64-pc-windows-msvc");
-    let error = prepare(
-        fixture.options(target_root.clone()),
-        &runner,
-        &FixedClock,
-        &OfflineArtifactProvider,
-    )
-    .unwrap_err();
-    assert_eq!(error.code, "official_runtime_incomplete");
-    assert!(!target_root.join("state.json").exists());
-    fixture.set_official_package_target(BUILD_TARGET);
+    #[cfg(windows)]
+    {
+        let target_root = temp.join("manager-target");
+        fixture.set_official_package_target("aarch64-pc-windows-msvc");
+        let error = prepare(
+            fixture.options(target_root.clone()),
+            &runner,
+            &FixedClock,
+            &OfflineArtifactProvider,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "official_runtime_incomplete");
+        assert!(!target_root.join("state.json").exists());
+        fixture.set_official_package_target(BUILD_TARGET);
+    }
 
     let same = Fixture::new(&temp, b"official-launcher");
     let same_root = temp.join("manager-same");
@@ -1086,7 +1089,7 @@ fn schema_one_state_falls_back_and_is_replaced_only_by_reinstall() {
     .unwrap();
     let upgraded: Value = serde_json::from_slice(&fs::read(&paths.state).unwrap()).unwrap();
     assert_eq!(upgraded["schema"], Value::from(2));
-    assert!(upgraded["official"]["runtime"].is_object());
+    assert_eq!(upgraded["official"]["runtime"].is_object(), cfg!(windows));
     assert!(uninstall(Some(root)).unwrap().changed);
 }
 
