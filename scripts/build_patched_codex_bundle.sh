@@ -135,7 +135,7 @@ require_identity_contains() {
   [[ "$3" == *"$2"* ]] || { printf '%s identity mismatch; expected output to contain %s, got:\n%s\n' "$1" "$2" "$3" >&2; exit 1; }
 }
 require_identity_contains rustc "commit-hash: $rustc_commit" "$(rustc -Vv)"
-require_exact_identity cargo-xwin "cargo-xwin 0.23.0" "$(cargo xwin --version)"
+require_exact_identity cargo-xwin "cargo-xwin 0.23.0" "$(cargo-xwin --version)"
 require_exact_identity sccache "sccache 0.16.0" "$(sccache --version)"
 require_identity_contains clang-cl 21.1.8 "$(clang-cl --version)"
 require_identity_contains lld-link 21.1.8 "$(lld-link --version)"
