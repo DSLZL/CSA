@@ -119,7 +119,7 @@ jobs:
               "<< parameters.official_windows_npm_integrity >>"
               "$stats"
             )
-            build=(timeout 35m bash)
+            build=(timeout 40m bash)
             if << parameters.require_warm_cache >>; then
               export CSA_MINIMUM_RUST_HIT_RATE=95
               build=(timeout 30m bash)

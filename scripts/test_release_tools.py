@@ -526,7 +526,7 @@ def test_release_stream_contracts() -> None:
     assert circleci.count("require_warm_cache:") == 3
     assert "if << parameters.require_warm_cache >>; then" in circleci
     assert "export CSA_MINIMUM_RUST_HIT_RATE=95" in circleci
-    assert "build=(timeout 35m bash)" in circleci
+    assert "build=(timeout 40m bash)" in circleci
     assert "build=(timeout 30m bash)" in circleci
     assert '"${build[@]}" scripts/build_patched_codex_bundle.sh' in circleci
     assert "require_warm_cache: << pipeline.parameters.require_warm_cache >>" in circleci
