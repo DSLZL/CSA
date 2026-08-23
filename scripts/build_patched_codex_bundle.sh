@@ -47,7 +47,8 @@ cleanup() {
 trap cleanup EXIT
 
 install_release_binary() {
-  local name="$1" url="$2" expected_sha256="$3" download="$temp_root/$name"
+  local name="$1" url="$2" expected_sha256="$3"
+  local download="$temp_root/$name"
   curl --fail --location --retry 3 --output "$download" "$url"
   printf '%s  %s\n' "$expected_sha256" "$download" | sha256sum --check --strict
   install -m 0755 "$download" "$tool_bin/$name"
