@@ -187,13 +187,12 @@ actual_codex_sha256="$(sha256sum "$artifact" | cut -d ' ' -f 1)"
 if [[ "$compat_id" == rust-v0.148.0-native-join-p2 ]]; then
   [[ "$actual_codex_sha256" == d1368d4a94c7ac4bf09296f68516343a76ce11aa375363d4fcddc7fe8ef09730 ]]
 fi
+if [[ "$compat_id" == rust-v0.149.0-native-join-p3 ]]; then
+  [[ "$actual_codex_sha256" == 64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d ]]
+fi
 
-mkdir -p "$output/bin" "$output/codex-resources" "$output/codex-path"
+mkdir -p "$output/bin"
 cp "$artifact" "$output/bin/codex.exe"
-cp "$official_root/bin/codex-code-mode-host.exe" "$output/bin/codex-code-mode-host.exe"
-cp "$official_root/codex-resources/codex-command-runner.exe" "$output/codex-resources/codex-command-runner.exe"
-cp "$official_root/codex-resources/codex-windows-sandbox-setup.exe" "$output/codex-resources/codex-windows-sandbox-setup.exe"
-cp "$official_root/codex-path/rg.exe" "$output/codex-path/rg.exe"
 cp "$contract_result" "$output/contract-result.json"
 cat > "$output/build-environment.txt" <<EOF
 schema=1
@@ -229,8 +228,6 @@ paths = sorted(path for path in root.rglob("*") if path.is_file())
 actual = {path.relative_to(root).as_posix() for path in root.rglob("*") if path.is_file()}
 expected = {
     "build-environment.txt", "contract-result.json", "SHA256SUMS", "bin/codex.exe",
-    "bin/codex-code-mode-host.exe", "codex-resources/codex-command-runner.exe",
-    "codex-resources/codex-windows-sandbox-setup.exe", "codex-path/rg.exe",
 }
 if actual != expected:
     raise SystemExit(f"canonical bundle mismatch; missing={sorted(expected-actual)}, unknown={sorted(actual-expected)}")

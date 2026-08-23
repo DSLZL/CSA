@@ -6,12 +6,15 @@ The current local compatibility candidate is:
 
 | Field | Value |
 | --- | --- |
-| compatibility ID | `rust-v0.148.0-native-join-p1` |
-| Codex version/tag | `0.148.0` / `rust-v0.148.0` |
-| upstream commit | `3ba0f711642a888aec92a611a3f3b2211157ff89` |
+| compatibility ID | `rust-v0.149.0-native-join-p3` |
+| Codex version/tag | `0.149.0` / `rust-v0.149.0` |
+| upstream commit | `758ef40f50c1a458425c7cfbf1eb12cbc07af0b0` |
 | Rust toolchain | `1.95.0` |
 | target | `x86_64-pc-windows-msvc` |
-| patched artifact SHA-256 | `795930548B858AAE020B26C7C90464C5DD27C9B83CA0315BC78A072897747D6F` |
+| patch-set version/count | `4` / `12` |
+| patched artifact size | `299,645,952` bytes |
+| patched artifact SHA-256 | `64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d` |
+| repository manifest SHA-256 | `42d9692f042bed157bdd7a439d8a2117e4dc82fe2a3a9b603f8626c4f720c92e` |
 
 Do not retarget this payload in place. A new Codex tag or changed preimage requires a new compatibility ID, updated expected hashes, a new ordered patch set, and the full gate matrix.
 
@@ -32,9 +35,11 @@ Core commands:
 
 ```text
 python scripts/compatibility_audit.py drift --manifest <manifest> --source <clean-source> --tag <exact-tag> --output <drift.json>
-python scripts/run_patch_contract.py --manifest <manifest> --source <clean-source> --cargo-target <new-target-dir> --output <evidence-dir>
-python scripts/verify_patch_payload.py <payload-dir>
+python scripts/run_patch_contract.py --manifest <absolute-manifest> --source <absolute-clean-source> --cargo-target <new-target-dir> --output <new-report.json>
+python scripts/verify_patch_payload.py --manifest <absolute-manifest> --source <absolute-clean-source> [--artifact <absolute-binary>]
 ```
+
+The repository manifest binds the locally accepted executable exactly. A formal hosted run must rebuild from a reviewed clean default-branch commit and reproduce that size/SHA-256 before packing or publication. The canonical production bundle contains only four CSA-owned files: `build-environment.txt`, `contract-result.json`, `SHA256SUMS`, and `bin/codex.exe`. The official package is an exact validation input; its metadata, code-mode host, command runner, sandbox setup helper, and bundled `rg` never enter CSA output.
 
 ## Hourly upstream watcher
 
@@ -109,7 +114,7 @@ Publish every scoped platform package first and the meta package last:
 ```text
 npm publish <platform-package.tgz> --access public --provenance
 npm publish <next-platform-package.tgz> --access public --provenance
-npm publish <dslzl-csa-0.1.0.tgz> --access public --provenance
+npm publish <dslzl-csa-0.1.1.tgz> --access public --provenance
 ```
 
 Then create an annotated `v<manager-version>` tag and GitHub Release from the same clean commit, attach only the manager/npm candidate artifacts and `SHA256SUMS`, and record registry/release URLs in provenance. Never attach compatibility payloads or patched Codex binaries to this Release. Never reuse a version after a partial publication; finish missing packages only when their bytes match the approved candidate, otherwise increment the version.
@@ -131,7 +136,7 @@ This lane changes user command resolution and requires explicit authorization:
 
 Rollback: run `unplug`; if resolution still reaches the manager directory, remove only that PATH entry and open a new shell. Run `uninstall` only after official fallback works. Do not delete official Codex or user auth/session data.
 
-Status for this repository: **not executed**.
+Status for this repository: **production plug not executed**. Disposable local install/reinstall/default-config launch/doctor/uninstall-twice passed under `.dev/p3-manager-e2e-hybrid`; it did not edit a profile, persistent PATH, global npm prefix, user config, or official installation.
 
 ## Required release evidence
 

@@ -4,19 +4,17 @@ on:
   workflow_dispatch:
     inputs:
       compat_id:
-        description: Reviewed compatibility ID under the Native Join P2 family
+        description: Reviewed standalone Native Join compatibility ID
         required: true
-        default: "rust-v0.148.0-native-join-p2"
+        default: "rust-v0.149.0-native-join-p3"
         type: string
       official_windows_npm_integrity:
         description: Exact @openai/codex Windows x64 npm integrity
         required: true
-        default: "sha512-/Jg8eYw0BqTGNUpnrzzWlK2kbu29NWg7t6pnUDEfxqpTUf+mK8r3okXQn60Zjbk9InYZ4d8SwSjrtOa+i5hSPw=="
         type: string
       accepted_codex_sha256:
         description: SHA-256 of codex.exe accepted from the CircleCI bundle on local Windows
         required: true
-        default: "d1368d4a94c7ac4bf09296f68516343a76ce11aa375363d4fcddc7fe8ef09730"
         type: string
 
 concurrency:
@@ -36,7 +34,7 @@ jobs:
   build:
     name: Build exact patched Codex CLI
     runs-on: ubuntu-26.04
-    timeout-minutes: 30
+    timeout-minutes: 120
     env:
       CARGO_HOME: ${{ runner.temp }}/csa-patched-codex/cache/cargo-home
       CSA_TOOL_BIN: ${{ runner.temp }}/csa-patched-codex/tools
@@ -117,10 +115,7 @@ jobs:
           if not re.fullmatch(r"[A-Za-z0-9._-]+", compat_id):
               raise SystemExit(f"unsafe compatibility ID: {compat_id!r}")
 
-          manifest_path = (
-              Path("payload") / "codex" / "native-join-p2" / "bindings" /
-              compat_id / "manifest.toml"
-          )
+          manifest_path = Path("payload") / "codex" / compat_id / "manifest.toml"
           if not manifest_path.is_file():
               raise SystemExit(f"reviewed compatibility manifest does not exist: {manifest_path}")
 
@@ -130,6 +125,10 @@ jobs:
               raise SystemExit(
                   f"compatibility ID mismatch: requested={compat_id}, manifest={manifest.get('compat_id')}"
               )
+          if payload.source_schema != 1 or payload.family_id is not None:
+              raise SystemExit("formal p3 release requires a standalone schema-1 payload")
+          if manifest.get("patch_set_version") != 5:
+              raise SystemExit("formal p3 release requires reviewed patch_set_version = 5")
 
           target = manifest["build_target"]
           toolchain = manifest["rust_toolchain"]
@@ -160,7 +159,6 @@ jobs:
               "build_target": target,
               "artifact_filename": artifact["filename"],
               "manifest_path": manifest_path.as_posix(),
-              "family_id": payload.family_id,
               "binding_sha256": hashlib.sha256(manifest_path.read_bytes()).hexdigest(),
           }
 
@@ -262,14 +260,14 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "git clean failed" }
 
           $payloadParent = Join-Path $env:PATCHED_CODEX_ROOT "release-payload"
-          $stagedFamily = Join-Path $payloadParent "${{ steps.manifest.outputs.family_id }}"
+          $stagedPayload = Join-Path $payloadParent "${{ steps.manifest.outputs.compat_id }}"
           New-Item -ItemType Directory -Force $payloadParent | Out-Null
           Copy-Item `
-            -LiteralPath "$env:GITHUB_WORKSPACE/payload/codex/${{ steps.manifest.outputs.family_id }}" `
-            -Destination $stagedFamily `
+            -LiteralPath "$env:GITHUB_WORKSPACE/payload/codex/${{ steps.manifest.outputs.compat_id }}" `
+            -Destination $stagedPayload `
             -Recurse
 
-          $stagedManifest = Join-Path $stagedFamily "bindings/${{ steps.manifest.outputs.compat_id }}/manifest.toml"
+          $stagedManifest = Join-Path $stagedPayload "manifest.toml"
 
           # finalize() binds the formal compat-* download URL plus the exact
           # codex.exe size/hash in the disposable staged copy only.

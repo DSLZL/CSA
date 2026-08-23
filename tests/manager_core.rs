@@ -54,6 +54,8 @@ struct Fixture {
     manifest: PathBuf,
     official: PathBuf,
     native: PathBuf,
+    official_package: PathBuf,
+    managed_package: PathBuf,
     artifact: PathBuf,
     source: PathBuf,
     artifact_bytes: Vec<u8>,
@@ -130,22 +132,63 @@ impl Fixture {
         )
         .unwrap();
 
-        let official = temp.join(if cfg!(windows) {
-            "official.exe"
-        } else {
-            "official"
-        });
-        let native = temp.join(if cfg!(windows) {
-            "official-native.exe"
-        } else {
-            "official-native"
-        });
-        write_executable(&official, b"official-launcher");
-        write_executable(&native, b"official-native");
+        #[cfg(windows)]
+        let (official, native, official_package, managed_package) = {
+            let bun_root = temp.join(".bun");
+            let managed_package = bun_root.join("install/global/node_modules/@openai/codex");
+            let official_package = bun_root
+                .join("install/global/node_modules/@openai/codex-win32-x64/vendor")
+                .join(BUILD_TARGET);
+            fs::create_dir_all(bun_root.join("bin")).unwrap();
+            fs::create_dir_all(official_package.join("bin")).unwrap();
+            fs::create_dir_all(official_package.join("codex-resources")).unwrap();
+            fs::create_dir_all(official_package.join("codex-path")).unwrap();
+            fs::create_dir_all(&managed_package).unwrap();
+            fs::write(
+                managed_package.join("package.json"),
+                format!(r#"{{"name":"@openai/codex","version":"{VERSION}"}}"#),
+            )
+            .unwrap();
+            fs::write(
+                official_package.join("codex-package.json"),
+                format!(
+                    r#"{{"layoutVersion":1,"version":"{VERSION}","target":"{BUILD_TARGET}","variant":"codex","entrypoint":"bin/codex.exe","resourcesDir":"codex-resources","pathDir":"codex-path"}}"#
+                ),
+            )
+            .unwrap();
+            for relative in [
+                "bin/codex-code-mode-host.exe",
+                "codex-resources/codex-command-runner.exe",
+                "codex-resources/codex-windows-sandbox-setup.exe",
+                "codex-path/rg.exe",
+            ] {
+                write_executable(&official_package.join(relative), relative.as_bytes());
+            }
+            let official = bun_root.join("bin/codex.exe");
+            let native = official_package.join("bin/codex.exe");
+            write_executable(&official, b"official-launcher");
+            write_executable(&native, b"official-native");
+            (official, native, official_package, managed_package)
+        };
+        #[cfg(not(windows))]
+        let (official, native, official_package, managed_package) = {
+            let official = temp.join("official");
+            let native = temp.join("official-native");
+            write_executable(&official, b"official-launcher");
+            write_executable(&native, b"official-native");
+            (
+                official,
+                native,
+                temp.join("official-package"),
+                temp.join("managed-package"),
+            )
+        };
         Self {
             manifest,
             official,
             native,
+            official_package,
+            managed_package,
             artifact,
             source,
             artifact_bytes: artifact_bytes.to_vec(),
@@ -161,6 +204,35 @@ impl Fixture {
             artifact: Some(self.artifact.clone()),
             source: None,
         }
+    }
+
+    fn set_official_package_version(&self, version: &str) {
+        #[cfg(windows)]
+        {
+            fs::write(
+                self.managed_package.join("package.json"),
+                format!(r#"{{"name":"@openai/codex","version":"{version}"}}"#),
+            )
+            .unwrap();
+            fs::write(
+                self.official_package.join("codex-package.json"),
+                format!(
+                    r#"{{"layoutVersion":1,"version":"{version}","target":"{BUILD_TARGET}","variant":"codex","entrypoint":"bin/codex.exe","resourcesDir":"codex-resources","pathDir":"codex-path"}}"#
+                ),
+            )
+            .unwrap();
+        }
+    }
+
+    fn set_official_package_target(&self, target: &str) {
+        #[cfg(windows)]
+        fs::write(
+            self.official_package.join("codex-package.json"),
+            format!(
+                r#"{{"layoutVersion":1,"version":"{VERSION}","target":"{target}","variant":"codex","entrypoint":"bin/codex.exe","resourcesDir":"codex-resources","pathDir":"codex-path"}}"#
+            ),
+        )
+        .unwrap();
     }
 }
 
@@ -313,6 +385,54 @@ impl Clock for FixedClock {
     }
 }
 
+#[cfg(windows)]
+#[test]
+fn official_runtime_is_discovered_from_the_launcher_and_requires_all_helpers() {
+    let temp = TempDir::new();
+    let fixture = Fixture::new(&temp, b"patched-binary");
+    let runner = FakeRunner::new(&fixture.artifact_bytes);
+    let mut options = fixture.options(temp.join("manager"));
+    options.official_native = None;
+    let report = prepare(options, &runner, &FixedClock, &OfflineArtifactProvider).unwrap();
+    let runtime = report.state.official.runtime.unwrap();
+    assert_eq!(runtime.files.len(), 6);
+    assert_eq!(
+        runtime.package_root,
+        fixture.official_package.canonicalize().unwrap()
+    );
+    assert_eq!(
+        runtime.managed_package_root,
+        fixture.managed_package.canonicalize().unwrap()
+    );
+
+    let incomplete = Fixture::new(&temp, b"second-patched-binary");
+    fs::remove_file(
+        incomplete
+            .official_package
+            .join("bin/codex-code-mode-host.exe"),
+    )
+    .unwrap();
+    let error = prepare(
+        incomplete.options(temp.join("incomplete-manager")),
+        &FakeRunner::new(&incomplete.artifact_bytes),
+        &FixedClock,
+        &OfflineArtifactProvider,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "official_runtime_incomplete");
+
+    let overlap_root = fixture.official_package.join("manager");
+    let error = prepare(
+        fixture.options(overlap_root.clone()),
+        &runner,
+        &FixedClock,
+        &OfflineArtifactProvider,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "official_in_manager_root");
+    assert!(!overlap_root.join("state.json").exists());
+}
+
 #[test]
 fn prebuilt_prepare_status_and_isolated_exec_are_fail_closed() {
     let temp = TempDir::new();
@@ -333,6 +453,23 @@ fn prebuilt_prepare_status_and_isolated_exec_are_fail_closed() {
             .state
             .artifact_path
             .starts_with(manager_root.canonicalize().unwrap())
+    );
+    assert_eq!(
+        report
+            .state
+            .artifact_path
+            .parent()
+            .and_then(Path::file_name),
+        Some(std::ffi::OsStr::new("bin"))
+    );
+    assert_eq!(
+        report
+            .state
+            .artifact_path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name),
+        Some(std::ffi::OsStr::new("runtime"))
     );
     assert_eq!(
         fs::read(&report.state.artifact_path).unwrap(),
@@ -395,6 +532,51 @@ fn prebuilt_prepare_status_and_isolated_exec_are_fail_closed() {
         )
     );
     assert!(!child.env.contains_key(&OsString::from("PATH")));
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            child.env.get(&OsString::from("CODEX_MANAGED_BY_BUN")),
+            Some(&OsString::from("1"))
+        );
+        assert_eq!(
+            child.env.get(&OsString::from("CODEX_MANAGED_PACKAGE_ROOT")),
+            Some(
+                &fixture
+                    .managed_package
+                    .canonicalize()
+                    .unwrap()
+                    .into_os_string()
+            )
+        );
+        assert_eq!(
+            child
+                .env
+                .get(&OsString::from("CSA_CODEX_OFFICIAL_PACKAGE_ROOT")),
+            Some(
+                &fixture
+                    .official_package
+                    .canonicalize()
+                    .unwrap()
+                    .into_os_string()
+            )
+        );
+        for key in [
+            "CODEX_MANAGED_BY_NPM",
+            "CODEX_MANAGED_BY_BUN",
+            "CODEX_MANAGED_BY_PNPM",
+        ] {
+            assert!(child.env_remove.contains(&OsString::from(key)));
+        }
+        assert!(
+            !report
+                .state
+                .artifact_path
+                .parent()
+                .unwrap()
+                .join("codex-code-mode-host.exe")
+                .exists()
+        );
+    }
 }
 
 #[test]
@@ -440,6 +622,7 @@ fn prepare_rejects_hash_version_and_same_path_without_state() {
 
     let version_root = temp.join("manager-version");
     runner.set_version("9.9.9");
+    fixture.set_official_package_version("9.9.9");
     let error = prepare(
         fixture.options(version_root.clone()),
         &runner,
@@ -449,6 +632,20 @@ fn prepare_rejects_hash_version_and_same_path_without_state() {
     .unwrap_err();
     assert_eq!(error.code, "unsupported_official_version");
     assert!(!version_root.join("state.json").exists());
+    fixture.set_official_package_version(VERSION);
+
+    let target_root = temp.join("manager-target");
+    fixture.set_official_package_target("aarch64-pc-windows-msvc");
+    let error = prepare(
+        fixture.options(target_root.clone()),
+        &runner,
+        &FixedClock,
+        &OfflineArtifactProvider,
+    )
+    .unwrap_err();
+    assert_eq!(error.code, "official_runtime_incomplete");
+    assert!(!target_root.join("state.json").exists());
+    fixture.set_official_package_target(BUILD_TARGET);
 
     let same = Fixture::new(&temp, b"official-launcher");
     let same_root = temp.join("manager-same");
@@ -683,6 +880,26 @@ fn activation_lifecycle_is_reversible_and_drift_falls_back_without_recursion() {
     assert_eq!(forwarded.program, prepared_artifact);
     assert!(forwarded.inherit_stdio);
     assert_eq!(forwarded.cwd, None);
+    #[cfg(windows)]
+    {
+        assert_eq!(
+            forwarded.env.get(&OsString::from("CODEX_MANAGED_BY_BUN")),
+            Some(&OsString::from("1"))
+        );
+        assert_eq!(
+            forwarded
+                .env
+                .get(&OsString::from("CSA_CODEX_OFFICIAL_PACKAGE_ROOT")),
+            Some(
+                &fixture
+                    .official_package
+                    .canonicalize()
+                    .unwrap()
+                    .into_os_string()
+            )
+        );
+    }
+    #[cfg(not(windows))]
     assert!(forwarded.env.is_empty());
 
     let fallback_bin = temp.join("official-bin");
@@ -711,6 +928,7 @@ fn activation_lifecycle_is_reversible_and_drift_falls_back_without_recursion() {
     assert_eq!(locked_fallback.program, fallback.canonicalize().unwrap());
 
     runner.set_version("9.9.9");
+    fixture.set_official_package_version("9.9.9");
     let selection = select_shim_target(&paths, Some(&fallback_path), &shim, &runner).unwrap();
     assert_eq!(selection.mode, "official");
     assert_eq!(selection.target, fallback.canonicalize().unwrap());
@@ -724,6 +942,7 @@ fn activation_lifecycle_is_reversible_and_drift_falls_back_without_recursion() {
     assert_eq!(drifted.status, "invalidated");
     assert_eq!(drifted.activation.status, "fallback");
     runner.set_version(VERSION);
+    fixture.set_official_package_version(VERSION);
 
     assert!(unplug(Some(root.clone())).unwrap().changed);
     assert!(!shim.exists());
@@ -736,6 +955,16 @@ fn activation_lifecycle_is_reversible_and_drift_falls_back_without_recursion() {
     assert!(!paths.downloads.exists());
     assert!(!purge(Some(root)).unwrap().changed);
     assert_eq!(fs::read(&fixture.official).unwrap(), b"official-launcher");
+    #[cfg(windows)]
+    assert_eq!(
+        fs::read(
+            fixture
+                .official_package
+                .join("bin/codex-code-mode-host.exe")
+        )
+        .unwrap(),
+        b"bin/codex-code-mode-host.exe"
+    );
 }
 
 #[test]
@@ -821,6 +1050,48 @@ fn interrupted_activation_recovers_to_unplugged() {
 }
 
 #[test]
+fn schema_one_state_falls_back_and_is_replaced_only_by_reinstall() {
+    let temp = TempDir::new();
+    let fixture = Fixture::new(&temp, b"patched-binary");
+    let root = temp.join("manager");
+    let manager = temp.join(if cfg!(windows) { "csa.exe" } else { "csa" });
+    write_executable(&manager, b"manager-forwarder");
+    let runner = FakeRunner::new(&fixture.artifact_bytes);
+    install(
+        InstallOptions::Local(fixture.options(root.clone())),
+        &runner,
+        &FixedClock,
+        &OfflineArtifactProvider,
+        &manager,
+    )
+    .unwrap();
+    let paths = ManagerPaths::resolve(Some(root.clone())).unwrap();
+    let mut state: Value = serde_json::from_slice(&fs::read(&paths.state).unwrap()).unwrap();
+    state["schema"] = Value::from(1);
+    state["official"].as_object_mut().unwrap().remove("runtime");
+    fs::write(&paths.state, serde_json::to_vec_pretty(&state).unwrap()).unwrap();
+
+    let legacy = status(Some(root.clone()), &runner).unwrap();
+    assert_eq!(legacy.status, "invalidated");
+    assert!(legacy.reason.unwrap().contains("state_upgrade_required"));
+    let selection = select_shim_target(&paths, None, &shim_path(&paths), &runner).unwrap();
+    assert_eq!(selection.mode, "official");
+
+    install(
+        InstallOptions::Local(fixture.options(root.clone())),
+        &runner,
+        &FixedClock,
+        &OfflineArtifactProvider,
+        &manager,
+    )
+    .unwrap();
+    let upgraded: Value = serde_json::from_slice(&fs::read(&paths.state).unwrap()).unwrap();
+    assert_eq!(upgraded["schema"], Value::from(2));
+    assert!(upgraded["official"]["runtime"].is_object());
+    assert!(uninstall(Some(root)).unwrap().changed);
+}
+
+#[test]
 fn manifest_types_are_strict() {
     let temp = TempDir::new();
     let fixture = Fixture::new(&temp, b"patched-binary");
@@ -903,6 +1174,35 @@ fn bundled_p2_contract_requires_branding_and_runner_build_jobs() {
     assert_eq!(loaded.patch_paths.len(), 6);
     assert_eq!(contract.tests.len(), 11);
     assert!(!contract.build.env.contains_key("CARGO_BUILD_JOBS"));
+}
+
+#[test]
+fn bundled_p3_contract_requires_full_tui_gates() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("payload/codex/rust-v0.149.0-native-join-p3/manifest.toml")
+        .canonicalize()
+        .unwrap();
+    let loaded = LoadedCompatibility::load(&manifest).unwrap();
+    let contract = loaded.test_contract().unwrap();
+
+    assert_eq!(loaded.manifest.patch_set_version, 5);
+    assert_eq!(loaded.patch_paths.len(), 13);
+    assert_eq!(contract.tests.len(), 16);
+    assert_eq!(
+        contract
+            .common_env
+            .get("INSTA_WORKSPACE_ROOT")
+            .map(String::as_str),
+        Some("{source}/codex-rs")
+    );
+    assert_eq!(
+        contract
+            .build
+            .env
+            .get("CARGO_BUILD_JOBS")
+            .map(String::as_str),
+        Some("2")
+    );
 }
 
 #[test]

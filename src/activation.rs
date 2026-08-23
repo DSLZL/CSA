@@ -1,6 +1,8 @@
-use crate::detect::{FileFingerprint, OfficialCodex, find_executable, fingerprint};
+use crate::detect::{
+    FileFingerprint, OfficialCodex, detect_official, find_codex_launcher, fingerprint,
+};
 use crate::error::{ManagerError, Result};
-use crate::manager::validate_prepared_state;
+use crate::manager::{official_command, patched_command, validate_prepared_state};
 use crate::process::{CommandSpec, ProcessRunner};
 use crate::state::{
     Clock, ManagerPaths, PrepareLock, PreparedState, StateStore, remove_file_if_exists,
@@ -101,6 +103,7 @@ pub struct PurgeReport {
 pub struct ShimSelection {
     pub mode: &'static str,
     pub target: PathBuf,
+    pub official: OfficialCodex,
     pub fallback_reason: Option<String>,
 }
 
@@ -135,7 +138,8 @@ pub fn plug(
 
     if let Ok(active) = read_active(&paths.active) {
         let final_shim = shim_path(&paths);
-        if active.binding.matches(&prepared)
+        if active.schema == 2
+            && active.binding.matches(&prepared)
             && active.shim_sha256 == source.sha256
             && active.shim_size == source.size
             && fingerprint(&final_shim)
@@ -168,7 +172,7 @@ pub fn plug(
     }
 
     let active = ActivationState {
-        schema: 1,
+        schema: 2,
         binding: ActivationBinding::from_prepared(&prepared),
         shim_sha256: staged_fingerprint.sha256,
         shim_size: staged_fingerprint.size,
@@ -353,23 +357,30 @@ pub fn forward_shim(
         Ok(_lock) => select_shim_target(paths, path_value, current_shim, runner)?,
         Err(lock_error) => {
             let fallback_state = StateStore::new(paths).load().ok().flatten();
+            let (target, official) = resolve_official_fallback(
+                paths,
+                path_value,
+                current_shim,
+                fallback_state.as_ref(),
+                runner,
+            )?;
             ShimSelection {
                 mode: "official",
-                target: resolve_official_fallback(
-                    paths,
-                    path_value,
-                    current_shim,
-                    fallback_state.as_ref(),
-                )?,
+                target,
+                official,
                 fallback_reason: Some(lock_error.to_string()),
             }
         }
     };
-    let result = runner.run(
-        &CommandSpec::captured(&selection.target)
-            .args(args)
-            .inherited(),
-    )?;
+    let command = CommandSpec::captured(&selection.target)
+        .args(args)
+        .inherited();
+    let command = if selection.mode == "patched" {
+        patched_command(command, &selection.official)?
+    } else {
+        official_command(command, &selection.official)?
+    };
+    let result = runner.run(&command)?;
     Ok(result.code.unwrap_or(1))
 }
 
@@ -390,7 +401,7 @@ pub fn select_shim_target(
         let prepared = prepared?.ok_or_else(|| {
             ManagerError::new("not_prepared", "no verified prepared state exists")
         })?;
-        validate_prepared_state(&prepared, paths, runner)?;
+        let official = validate_prepared_state(&prepared, paths, runner)?;
         let active = read_active(&paths.active)?;
         if !active.binding.matches(&prepared) {
             return Err(ManagerError::new(
@@ -405,25 +416,31 @@ pub fn select_shim_target(
                 "running shim does not match active state",
             ));
         }
-        Ok(prepared.artifact_path)
+        Ok((prepared.artifact_path, official))
     })();
 
     match patched {
-        Ok(target) => Ok(ShimSelection {
+        Ok((target, official)) => Ok(ShimSelection {
             mode: "patched",
             target,
+            official,
             fallback_reason: None,
         }),
-        Err(error) => Ok(ShimSelection {
-            mode: "official",
-            target: resolve_official_fallback(
+        Err(error) => {
+            let (target, official) = resolve_official_fallback(
                 paths,
                 path_value,
                 current_shim,
                 fallback_state.as_ref(),
-            )?,
-            fallback_reason: Some(error.to_string()),
-        }),
+                runner,
+            )?;
+            Ok(ShimSelection {
+                mode: "official",
+                target,
+                official,
+                fallback_reason: Some(error.to_string()),
+            })
+        }
     }
 }
 
@@ -481,7 +498,7 @@ fn read_active(path: &Path) -> Result<ActivationState> {
             format!("active state JSON: {error}"),
         )
     })?;
-    if state.schema != 1 {
+    if !matches!(state.schema, 1 | 2) {
         return Err(ManagerError::new(
             "invalid_activation_state",
             format!("unsupported active state schema: {}", state.schema),
@@ -502,7 +519,11 @@ fn reject_shim_source(
         || official
             .native
             .as_ref()
-            .is_some_and(|native| source.path == native.path);
+            .is_some_and(|native| source.path == native.path)
+        || official.runtime.as_ref().is_some_and(|runtime| {
+            source.path.starts_with(&runtime.package_root)
+                || source.path.starts_with(&runtime.managed_package_root)
+        });
     if conflicts {
         return Err(ManagerError::new(
             "unsafe_shim_source",
@@ -517,22 +538,55 @@ fn resolve_official_fallback(
     path_value: Option<&OsStr>,
     current_shim: &Path,
     prepared: Option<&PreparedState>,
-) -> Result<PathBuf> {
-    if let Ok(path) = find_executable("codex", path_value, std::slice::from_ref(&paths.root))
-        && safe_fallback(&path, paths, current_shim, prepared)
+    runner: &dyn ProcessRunner,
+) -> Result<(PathBuf, OfficialCodex)> {
+    if let Ok(launcher) = find_codex_launcher(path_value, std::slice::from_ref(&paths.root))
+        && let Ok(official) = detect_official(
+            runner,
+            Some(&launcher),
+            None,
+            std::slice::from_ref(&paths.root),
+        )
     {
-        return Ok(path);
+        let target = official_target(&official);
+        if safe_fallback(&target, paths, current_shim, prepared) {
+            return Ok((target, official));
+        }
     }
-    if let Some(prepared) = prepared
-        && let Ok(official) = fingerprint(&prepared.official.executable.path)
-        && safe_fallback(&official.path, paths, current_shim, Some(prepared))
-    {
-        return Ok(official.path);
+    if let Some(prepared) = prepared {
+        let saved = &prepared.official;
+        if let Ok(official) = detect_official(
+            runner,
+            Some(&saved.executable.path),
+            saved.native.as_ref().map(|native| native.path.as_path()),
+            std::slice::from_ref(&paths.root),
+        ) {
+            let target = official_target(&official);
+            if safe_fallback(&target, paths, current_shim, Some(prepared)) {
+                return Ok((target, official));
+            }
+        }
+        if fingerprint(&saved.executable.path).is_ok_and(|current| current == saved.executable)
+            && safe_fallback(&saved.executable.path, paths, current_shim, Some(prepared))
+        {
+            return Ok((saved.executable.path.clone(), saved.clone()));
+        }
     }
     Err(ManagerError::new(
         "official_fallback_unavailable",
         "could not resolve a safe official Codex outside the managed activation tree",
     ))
+}
+
+fn official_target(official: &OfficialCodex) -> PathBuf {
+    official
+        .runtime
+        .as_ref()
+        .and(official.native.as_ref())
+        .map_or_else(
+            || official.executable.path.clone(),
+            |native| native.path.clone(),
+        )
 }
 
 fn safe_fallback(

@@ -69,7 +69,7 @@ def package_fixtures(root: Path) -> tuple[Path, Path, Path, Path]:
         "bin": {"csa": "bin/csa.js"},
         "optionalDependencies": optional,
     }
-    meta = root / "dslzl-csa-0.1.0.tgz"
+    meta = root / "dslzl-csa-0.1.1.tgz"
     write_tar(
         meta,
         {
@@ -93,7 +93,7 @@ def package_fixtures(root: Path) -> tuple[Path, Path, Path, Path]:
             "sha256": manager_hash,
         },
     }
-    npm_platform = root / "dslzl-csa-win32-x64-0.1.0.tgz"
+    npm_platform = root / "dslzl-csa-win32-x64-0.1.1.tgz"
     write_tar(
         npm_platform,
         {
@@ -135,7 +135,7 @@ def release_input(
         )
     value = {
         "schema": 1,
-        "release_version": "0.1.0",
+        "release_version": "0.1.1",
         "source": {"revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ref": None, "repository": None},
         "meta_tarball": str(meta),
         "platforms": results,
@@ -172,8 +172,8 @@ def test_assembler(root: Path) -> None:
     provenance = json.loads((first / "provenance.json").read_bytes())
     assert all(not Path(asset["path"]).is_absolute() for asset in provenance["assets"])
     assemble(REPOSITORY, inputs, second)
-    assert digest(first / "source" / "csa-0.1.0.tar.gz") == digest(
-        second / "source" / "csa-0.1.0.tar.gz"
+    assert digest(first / "source" / "csa-0.1.1.tar.gz") == digest(
+        second / "source" / "csa-0.1.1.tar.gz"
     )
 
     corrupt = root / "corrupt-platform.tgz"
@@ -236,7 +236,7 @@ def test_ci_input(root: Path) -> None:
         artifact_root,
         output,
         "a" * 40,
-        "refs/tags/v0.1.0",
+        "refs/tags/v0.1.1",
         "https://example.invalid/csa",
     )
     assert value["platforms"]["win32-x64"]["status"] == "pass"
@@ -382,6 +382,18 @@ def test_contract_shape() -> None:
         "xwin",
         "build",
     ]
+
+    p3 = REPOSITORY / "payload" / "codex" / "rust-v0.149.0-native-join-p3"
+    p3_contract = load_contract(p3 / "test-contract.json", p3.name)
+    assert len(p3_contract["generation"]) == 2
+    assert len(p3_contract["tests"]) == 16
+    assert p3_contract["tests"][0]["name"] == "workspace formatting"
+    assert p3_contract["tests"][-4]["name"] == "TUI live state and panel"
+    assert p3_contract["tests"][-3]["name"] == "complete TUI library"
+    assert p3_contract["tests"][-2]["name"] == "TUI clippy"
+    assert p3_contract["tests"][-1]["name"] == "CSA official runtime overlay"
+    assert p3_contract["common_env"]["INSTA_WORKSPACE_ROOT"] == "{source}/codex-rs"
+    assert p3_contract["build"]["env"]["CARGO_BUILD_JOBS"] == "2"
     try:
         cross_windows_build_argv(["cargo", "test"])
     except ContractError:
@@ -437,14 +449,16 @@ def test_release_stream_contracts() -> None:
     assert watcher.count('cron: "0 * * * *"') == 1
     assert watcher.count("Codex source must not live inside the CSA repository") == 1
     assert watcher.count('--branch "$env:UPSTREAM_TAG" --single-branch') == 1
-    assert '"payload/codex/native-join-p2/family.toml"' in watcher
-    assert '"payload/codex/native-join-p2/bindings/$env:COMPAT_ID"' in watcher
+    assert '"payload/codex/$env:COMPAT_ID"' in watcher
+    assert '"payload/codex/native-join-p2/family.toml"' not in watcher
 
     patched_workflow = (
         REPOSITORY / ".github" / "workflows" / "release-patched-codex.yml"
     ).read_text(encoding="utf-8")
     assert patched_workflow.count("Codex source must not live inside the CSA repository") == 1
-    assert 'default: "rust-v0.148.0-native-join-p2"' in patched_workflow
+    assert 'default: "rust-v0.149.0-native-join-p3"' in patched_workflow
+    assert 'Path("payload") / "codex" / compat_id / "manifest.toml"' in patched_workflow
+    assert 'manifest.get("patch_set_version") != 5' in patched_workflow
     assert "accepted_codex_sha256:" in patched_workflow
     assert "Match locally accepted CircleCI executable" in patched_workflow
     assert "Get-FileHash -LiteralPath $env:ARTIFACT_PATH" in patched_workflow
@@ -468,6 +482,7 @@ def test_release_stream_contracts() -> None:
     assert "warm_cache_acceptance" not in ci_workflow
     assert "default: false" in circleci
     assert "resource_class: large.gen3" in circleci
+    assert "no_output_timeout: 120m" in circleci
     assert 'CARGO_BUILD_JOBS: "4"' in circleci
     assert "csa-cargo-home-v5-linux-amd64-1.95.0-codex-" in circleci
     assert "csa-rustup-v2-linux-amd64-rustup-1.29.0-rustc-" in circleci
@@ -486,7 +501,9 @@ def test_release_stream_contracts() -> None:
     assert 'root="/tmp/csa-patched-codex/$compat_id"' not in circleci
     assert "TMPDIR: /home/circleci/csa-tmp" in circleci
     assert circleci.count("rust-v0.147.0-native-join-p2") == 1
-    assert circleci.count("rust-v0.148.0-native-join-p2") == 2
+    assert circleci.count("rust-v0.148.0-native-join-p2") == 1
+    assert circleci.count("rust-v0.149.0-native-join-p3") == 2
+    assert circleci.count("07f465feceffa5811a8af80a6d18cc594c153e063d068e90328867c74315924c") == 2
     assert "build_latest_patched_codex:" in circleci
     assert "store_latest_patched_artifact:" in circleci
     assert circleci.count("require_warm_cache:") == 3
@@ -501,6 +518,7 @@ def test_release_stream_contracts() -> None:
     assert "store_artifact: << pipeline.parameters.store_latest_patched_artifact >>" in circleci
     assert "sha512-oT7Ss5fAPf2fiWE9QNURqZcQGAAawSVxmIUdgPzckq4K" in circleci
     assert "sha512-/Jg8eYw0BqTGNUpnrzzWlK2kbu29NWg7t6pnUDEfxqp" in circleci
+    assert "sha512-i4dryj2Y1j+00Mb5n+0n71EYnTK9/KDc2cdFo/dXD0d1" in circleci
     assert "OPENAI_API_KEY" not in circleci
     family_index = tomllib.loads(
         (REPOSITORY / "payload" / "codex" / "native-join-p2" / "family.toml").read_text(
@@ -514,17 +532,22 @@ def test_release_stream_contracts() -> None:
     assert "--stats-format json" in shared_build
     assert "CSA_MINIMUM_RUST_HIT_RATE" in shared_build
     assert "d1368d4a94c7ac4bf09296f68516343a76ce11aa375363d4fcddc7fe8ef09730" in shared_build
+    assert "64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d" in shared_build
     for path in (
         "build-environment.txt",
         "contract-result.json",
         "SHA256SUMS",
         "bin/codex.exe",
+    ):
+        assert path in shared_build
+    for path in (
         "bin/codex-code-mode-host.exe",
         "codex-resources/codex-command-runner.exe",
         "codex-resources/codex-windows-sandbox-setup.exe",
         "codex-path/rg.exe",
     ):
         assert path in shared_build
+        assert f'cp "$official_root/{path}"' not in shared_build
     assert "actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7" in patched_workflow
     assert "csa-sccache-v4-linux-X64-rustc-" in patched_workflow
     assert "SCCACHE_DIR" in patched_workflow
@@ -533,7 +556,8 @@ def test_release_stream_contracts() -> None:
         assert "csa-sccache-v4-linux-X64-rustc-" not in workflow
 
     online = (REPOSITORY / "src" / "online.rs").read_text(encoding="utf-8")
-    assert 'format!("rust-v{upstream_version}-native-join-p2")' in online
+    assert '"0.149.0" => Some("rust-v0.149.0-native-join-p3")' in online
+    assert 'format!("rust-v{upstream_version}-native-join-p2")' not in online
     assert 'format!("rust-v{upstream_version}-native-join-p1")' not in online
 
     manager_workflow = (
@@ -789,7 +813,7 @@ def test_compatibility_release_tools(root: Path) -> None:
             if repository == "openai/codex":
                 assert tag == "rust-v9.8.7"
                 return "f" * 40
-            assert repository == "dslzl/CSA" and tag == "compat-rust-v9.8.7-native-join-p2"
+            assert repository == "dslzl/CSA" and tag == "compat-rust-v9.8.7-native-join-p5"
             return "d" * 40
 
     fake = FakeApi()
@@ -802,13 +826,13 @@ def test_compatibility_release_tools(root: Path) -> None:
     detection = detect(REPOSITORY.resolve(), fake)
     assert detection["action"] == "blocked" and detection["issue_needs_update"] is False
     fake.issue_body = ""
-    fake.pulls = [{"head": {"ref": "automation/compat-rust-v9.8.7-native-join-p2"}}]
+    fake.pulls = [{"head": {"ref": "automation/compat-rust-v9.8.7-native-join-p5"}}]
     assert detect(REPOSITORY.resolve(), fake)["action"] == "candidate_open"
     fake.pulls = []
     with patch("compat_release.exact_local_entry", return_value=True):
         assert detect(REPOSITORY.resolve(), fake)["action"] == "publish"
     fake.release = {
-        "tag_name": "compat-rust-v9.8.7-native-join-p2",
+        "tag_name": "compat-rust-v9.8.7-native-join-p5",
         "draft": False,
         "prerelease": False,
     }

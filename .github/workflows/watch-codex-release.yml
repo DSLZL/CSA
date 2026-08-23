@@ -165,7 +165,7 @@ jobs:
             --source "$env:SOURCE_ROOT" `
             --tag "$env:UPSTREAM_TAG" `
             --commit "$env:UPSTREAM_COMMIT" `
-            --output "$env:GITHUB_WORKSPACE/payload/codex/native-join-p2/bindings/$env:COMPAT_ID" *> "$env:WATCH_ROOT/port.log"
+            --output "$env:GITHUB_WORKSPACE/payload/codex/$env:COMPAT_ID" *> "$env:WATCH_ROOT/port.log"
           $code = $LASTEXITCODE
           Get-Content "$env:WATCH_ROOT/port.log"
           exit $code
@@ -178,14 +178,11 @@ jobs:
           $branch = "automation/compat-$env:COMPAT_ID"
           & git switch -c $branch *> "$env:WATCH_ROOT/candidate.log"
           if ($LASTEXITCODE -ne 0) { Get-Content "$env:WATCH_ROOT/candidate.log"; exit $LASTEXITCODE }
-          & git add -- `
-            "payload/codex/native-join-p2/family.toml" `
-            "payload/codex/native-join-p2/bindings/$env:COMPAT_ID" *>> "$env:WATCH_ROOT/candidate.log"
+          & git add -- "payload/codex/$env:COMPAT_ID" *>> "$env:WATCH_ROOT/candidate.log"
           if ($LASTEXITCODE -ne 0) { Get-Content "$env:WATCH_ROOT/candidate.log"; exit $LASTEXITCODE }
           $changed = @(& git diff --cached --name-only)
-          $familyIndex = "payload/codex/native-join-p2/family.toml"
-          $prefix = "payload/codex/native-join-p2/bindings/$env:COMPAT_ID/"
-          if ($changed.Count -eq 0 -or @($changed | Where-Object { $_ -ne $familyIndex -and -not $_.StartsWith($prefix) }).Count -ne 0) {
+          $prefix = "payload/codex/$env:COMPAT_ID/"
+          if ($changed.Count -eq 0 -or @($changed | Where-Object { -not $_.StartsWith($prefix) }).Count -ne 0) {
             "Candidate contains an empty or out-of-scope diff: $changed" | Add-Content "$env:WATCH_ROOT/candidate.log"
             Get-Content "$env:WATCH_ROOT/candidate.log"
             exit 2
@@ -197,7 +194,7 @@ jobs:
           @"
           Ports the reviewed Native Join patch set to ``$env:UPSTREAM_TAG`` at ``$env:UPSTREAM_COMMIT``.
 
-          The exact tag/commit, source preimages, cumulative patch preflight, and binding contracts passed. CircleCI compilation and local Windows acceptance from ``.dev`` are required before merge. This watcher does not build binaries or publish a GitHub Release.
+          The exact tag/commit, source preimages, cumulative patch preflight, and payload contracts passed. CircleCI compilation and local Windows acceptance from ``.dev`` are required before merge. This watcher does not build binaries or publish a GitHub Release.
           "@ | Set-Content -Encoding utf8 "$env:WATCH_ROOT/pr-body.md"
           & gh pr create --repo "$env:GITHUB_REPOSITORY" --base "$env:GITHUB_REF_NAME" --head $branch --title "feat(compat): support $env:UPSTREAM_TAG" --body-file "$env:WATCH_ROOT/pr-body.md" *>> "$env:WATCH_ROOT/candidate.log"
           $code = $LASTEXITCODE

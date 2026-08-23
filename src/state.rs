@@ -174,10 +174,10 @@ impl<'a> StateStore<'a> {
     }
 
     pub fn save(&self, state: &PreparedState) -> Result<()> {
-        if state.schema != 1 {
+        if state.schema != 2 {
             return Err(ManagerError::new(
                 "invalid_state",
-                "only manager state schema 1 is supported",
+                "only manager state schema 2 can be saved",
             ));
         }
         self.recover()?;
@@ -302,7 +302,7 @@ fn read_state(path: &Path) -> Result<PreparedState> {
         .map_err(|error| ManagerError::io(&format!("read state {}", path.display()), error))?;
     let state: PreparedState = serde_json::from_slice(&bytes)
         .map_err(|error| ManagerError::new("invalid_state", format!("state JSON: {error}")))?;
-    if state.schema != 1 {
+    if !matches!(state.schema, 1 | 2) {
         return Err(ManagerError::new(
             "invalid_state",
             format!("unsupported state schema: {}", state.schema),

@@ -170,11 +170,11 @@ jobs:
           npm pack "${{ runner.temp }}/csa/stage/platforms/${{ matrix.id }}" --json --pack-destination "${{ runner.temp }}/csa/tarballs"
       - name: Temporary-prefix install
         run: |
-          npm install --prefix "${{ runner.temp }}/csa/npm-prefix" --offline --no-audit --no-fund "${{ runner.temp }}/csa/tarballs/dslzl-csa-${{ matrix.id }}-0.1.0.tgz" "${{ runner.temp }}/csa/tarballs/dslzl-csa-0.1.0.tgz"
+          npm install --prefix "${{ runner.temp }}/csa/npm-prefix" --offline --no-audit --no-fund "${{ runner.temp }}/csa/tarballs/dslzl-csa-${{ matrix.id }}-0.1.1.tgz" "${{ runner.temp }}/csa/tarballs/dslzl-csa-0.1.1.tgz"
           node scripts/test_installed_launcher.mjs "${{ runner.temp }}/csa/npm-prefix"
           npm uninstall --prefix "${{ runner.temp }}/csa/npm-prefix" --offline --no-audit --no-fund "@dslzl/csa" "@dslzl/csa-${{ matrix.id }}"
       - name: Record platform artifact
-        run: python scripts/ci_release.py platform --repository "${{ github.workspace }}" --platform "${{ matrix.id }}" --manager "${{ runner.temp }}/csa/cargo-target/${{ matrix.target }}/release/${{ matrix.binary }}" --meta-tarball "${{ runner.temp }}/csa/tarballs/dslzl-csa-0.1.0.tgz" --npm-tarball "${{ runner.temp }}/csa/tarballs/dslzl-csa-${{ matrix.id }}-0.1.0.tgz" --isolation-root "${{ runner.temp }}/csa" --output "${{ runner.temp }}/csa/artifact/${{ matrix.id }}"
+        run: python scripts/ci_release.py platform --repository "${{ github.workspace }}" --platform "${{ matrix.id }}" --manager "${{ runner.temp }}/csa/cargo-target/${{ matrix.target }}/release/${{ matrix.binary }}" --meta-tarball "${{ runner.temp }}/csa/tarballs/dslzl-csa-0.1.1.tgz" --npm-tarball "${{ runner.temp }}/csa/tarballs/dslzl-csa-${{ matrix.id }}-0.1.1.tgz" --isolation-root "${{ runner.temp }}/csa" --output "${{ runner.temp }}/csa/artifact/${{ matrix.id }}"
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: platform-${{ matrix.id }}

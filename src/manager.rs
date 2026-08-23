@@ -286,7 +286,7 @@ pub fn prepare(
     let artifact = fingerprint(&artifact_path)?;
     let compatibility = publish_compatibility(&compatibility, &paths)?;
     let state = PreparedState {
-        schema: 1,
+        schema: 2,
         compat_id: compatibility.manifest.compat_id.clone(),
         manifest_path: compatibility.manifest_path.clone(),
         build_target: compatibility.manifest.build_target.clone(),
@@ -524,13 +524,16 @@ pub fn exec(options: ExecOptions, runner: &dyn ProcessRunner) -> Result<ExecOutc
     };
     let isolation = IsolationPlan::create(options.isolation, &paths, &official_before)?;
     let patched_before = fingerprint(&state.artifact_path)?;
-    let mut command = CommandSpec::captured(&state.artifact_path)
-        .args(options.args)
-        .cwd(&isolation.cwd)
-        .env("CODEX_HOME", isolation.codex_home.as_os_str())
-        .env("CSA_LOG_DIR", isolation.logs_dir.as_os_str())
-        .env("CSA_STATE_DIR", isolation.state_dir.as_os_str())
-        .inherited();
+    let mut command = patched_command(
+        CommandSpec::captured(&state.artifact_path)
+            .args(options.args)
+            .cwd(&isolation.cwd)
+            .env("CODEX_HOME", isolation.codex_home.as_os_str())
+            .env("CSA_LOG_DIR", isolation.logs_dir.as_os_str())
+            .env("CSA_STATE_DIR", isolation.state_dir.as_os_str())
+            .inherited(),
+        &official_before,
+    )?;
     if let Some(prefix) = &isolation.npm_prefix {
         command = command.env("npm_config_prefix", prefix.as_os_str());
     }
@@ -593,6 +596,59 @@ pub fn exec(options: ExecOptions, runner: &dyn ProcessRunner) -> Result<ExecOutc
     })
 }
 
+pub(crate) fn patched_command(
+    command: CommandSpec,
+    official: &OfficialCodex,
+) -> Result<CommandSpec> {
+    command_with_official_runtime(command, official, true)
+}
+
+pub(crate) fn official_command(
+    command: CommandSpec,
+    official: &OfficialCodex,
+) -> Result<CommandSpec> {
+    command_with_official_runtime(command, official, false)
+}
+
+fn command_with_official_runtime(
+    mut command: CommandSpec,
+    official: &OfficialCodex,
+    patched: bool,
+) -> Result<CommandSpec> {
+    for key in [
+        "CODEX_MANAGED_BY_NPM",
+        "CODEX_MANAGED_BY_BUN",
+        "CODEX_MANAGED_BY_PNPM",
+        "CODEX_MANAGED_PACKAGE_ROOT",
+        "CSA_CODEX_OFFICIAL_PACKAGE_ROOT",
+    ] {
+        command = command.env_remove(key);
+    }
+    let Some(runtime) = &official.runtime else {
+        #[cfg(windows)]
+        if patched {
+            return Err(ManagerError::new(
+                "state_upgrade_required",
+                "patched Codex has no verified official runtime binding; run csa install again",
+            ));
+        }
+        return Ok(command);
+    };
+    command = command
+        .env(
+            "CODEX_MANAGED_PACKAGE_ROOT",
+            runtime.managed_package_root.as_os_str(),
+        )
+        .env(runtime.package_manager.environment_key(), "1");
+    if patched {
+        command = command.env(
+            "CSA_CODEX_OFFICIAL_PACKAGE_ROOT",
+            runtime.package_root.as_os_str(),
+        );
+    }
+    Ok(command)
+}
+
 fn execution_record(
     official_before: &OfficialCodex,
     official_after: OfficialCodex,
@@ -641,6 +697,13 @@ fn require_compatible_official(
             ),
         ));
     }
+    #[cfg(windows)]
+    if official.runtime.is_none() {
+        return Err(ManagerError::new(
+            "official_runtime_incomplete",
+            "the selected Codex launcher is not backed by a complete official npm, Bun, or pnpm package",
+        ));
+    }
     Ok(())
 }
 
@@ -649,6 +712,12 @@ pub(crate) fn validate_prepared_state(
     paths: &ManagerPaths,
     runner: &dyn ProcessRunner,
 ) -> Result<OfficialCodex> {
+    if state.schema != 2 {
+        return Err(ManagerError::new(
+            "state_upgrade_required",
+            "prepared state predates official runtime binding; run csa install again",
+        ));
+    }
     let compatibility = LoadedCompatibility::load(&state.manifest_path)?;
     if state.compat_id != compatibility.manifest.compat_id
         || state.build_target != compatibility.manifest.build_target
@@ -733,7 +802,9 @@ fn publish_artifact(
     let directory = paths
         .artifacts
         .join(&compatibility.manifest.compat_id)
-        .join(&entry.sha256);
+        .join(&entry.sha256)
+        .join("runtime")
+        .join("bin");
     ensure_managed_directory(&paths.root, &directory)?;
     let final_path = directory.join(&entry.filename);
     if final_path.exists() {

@@ -125,7 +125,7 @@ if ([string]::IsNullOrEmpty($outputParent) -or -not (Test-Path -LiteralPath $out
     throw "output parent is missing: $outputParent"
 }
 
-$npm = (Get-Command npm.cmd -CommandType Application).Source
+$npm = (Get-Command npm.cmd -CommandType Application | Select-Object -First 1).Source
 $python = (Get-Command python.exe -CommandType Application | Select-Object -First 1).Source
 $git = (Get-Command git.exe -CommandType Application | Select-Object -First 1).Source
 $powershell = (Get-Process -Id $PID).Path
@@ -275,7 +275,7 @@ try {
 
     $version = Invoke-External $launcher @('--version')
     Assert-Success 'packaged manager version' $version
-    if ($version.output -notmatch 'csa 0\.1\.0') {
+    if ($version.output -notmatch 'csa 0\.1\.1') {
         throw "unexpected packaged manager version: $($version.output)"
     }
 
@@ -308,7 +308,7 @@ try {
         '-TempRoot', $pluggedChildTemp,
         '-OutputPath', $pluggedChildPath,
         '-ExpectedExecutable', $shim,
-        '-ExpectedOutput', 'codex-cli 0.147.0'
+        '-ExpectedOutput', 'codex-cli 0.149.0'
     )
     Assert-Success 'packaged plugged child PATH probe' $pluggedChild
 
@@ -324,7 +324,7 @@ try {
         '--', '--version'
     )
     Assert-Success 'packaged isolated exec' $isolated
-    if ($isolated.output -notmatch 'codex-cli 0\.147\.0' -or -not (Test-Path -LiteralPath $record -PathType Leaf)) {
+    if ($isolated.output -notmatch 'codex-cli 0\.149\.0' -or -not (Test-Path -LiteralPath $record -PathType Leaf)) {
         throw "packaged isolated exec evidence is incomplete: $($isolated.output)"
     }
 
@@ -341,7 +341,7 @@ try {
         '-TempRoot', $unpluggedChildTemp,
         '-OutputPath', $unpluggedChildPath,
         '-ExpectedExecutable', $officialPath,
-        '-ExpectedOutput', 'codex-cli 0.147.0'
+        '-ExpectedOutput', 'codex-cli 0.149.0'
     )
     Assert-Success 'packaged uninstalled child PATH probe' $unpluggedChild
 
@@ -360,8 +360,8 @@ try {
         schema = 1
         result = 'pass'
         packages = [ordered]@{
-            meta = '@dslzl/csa@0.1.0'
-            platform = '@dslzl/csa-win32-x64@0.1.0'
+            meta = '@dslzl/csa@0.1.1'
+            platform = '@dslzl/csa-win32-x64@0.1.1'
             lifecycle_scripts = $false
         }
         install = [ordered]@{
@@ -372,12 +372,12 @@ try {
             manager_state_created = $false
         }
         manager = [ordered]@{
-            version = 'csa 0.1.0'
+            version = 'csa 0.1.1'
             doctor = 'pass'
             cold_install = 'pass'
             status = 'prepared_and_plugged'
             plugged_child_resolution = $shim
-            isolated_exec = 'codex-cli 0.147.0'
+            isolated_exec = 'codex-cli 0.149.0'
             isolated_record_created = $true
             cold_uninstall = 'pass'
             uninstalled_child_resolution = $officialPath

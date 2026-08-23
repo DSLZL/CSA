@@ -81,13 +81,17 @@ jobs:
 
       - run:
           name: Build canonical patched Codex bundle
-          no_output_timeout: 30m
+          no_output_timeout: 120m
           command: |
             set -euo pipefail
             compat_id="<< parameters.compat_id >>"
             upstream_tag="<< parameters.upstream_tag >>"
             upstream_commit="<< parameters.upstream_commit >>"
-            manifest="$PWD/payload/codex/native-join-p2/bindings/$compat_id/manifest.toml"
+            manifest="$PWD/payload/codex/$compat_id/manifest.toml"
+            if [[ ! -f "$manifest" ]]; then
+              manifest="$PWD/payload/codex/native-join-p2/bindings/$compat_id/manifest.toml"
+            fi
+            test -f "$manifest"
             root="$HOME/csa-patched-codex/$compat_id"
             source="$root/source"
             cargo_target="$root/cargo-target"
@@ -157,12 +161,12 @@ workflows:
         - not: << pipeline.parameters.build_patched_codex >>
     jobs:
       - build-patched-codex:
-          name: codex-0.148.0-cross-windows-msvc-latest
-          compat_id: rust-v0.148.0-native-join-p2
-          upstream_tag: rust-v0.148.0
-          upstream_commit: 3ba0f711642a888aec92a611a3f3b2211157ff89
-          binding_sha256: 8b0acfc159187b25bab0baac40efa470a60d1f220fc91d6fb7b8703e70184a99
-          official_windows_npm_integrity: "sha512-/Jg8eYw0BqTGNUpnrzzWlK2kbu29NWg7t6pnUDEfxqpTUf+mK8r3okXQn60Zjbk9InYZ4d8SwSjrtOa+i5hSPw=="
+          name: codex-0.149.0-cross-windows-msvc-latest
+          compat_id: rust-v0.149.0-native-join-p3
+          upstream_tag: rust-v0.149.0
+          upstream_commit: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
+          binding_sha256: 07f465feceffa5811a8af80a6d18cc594c153e063d068e90328867c74315924c
+          official_windows_npm_integrity: "sha512-i4dryj2Y1j+00Mb5n+0n71EYnTK9/KDc2cdFo/dXD0d1oTog2bhUssKDEIOnKmnEf51P0Z/HJTWvTKw/UHyOvQ=="
           store_artifact: << pipeline.parameters.store_latest_patched_artifact >>
           require_warm_cache: << pipeline.parameters.require_warm_cache >>
   csa-patched-build:
@@ -182,3 +186,10 @@ workflows:
           upstream_commit: 3ba0f711642a888aec92a611a3f3b2211157ff89
           binding_sha256: 8b0acfc159187b25bab0baac40efa470a60d1f220fc91d6fb7b8703e70184a99
           official_windows_npm_integrity: "sha512-/Jg8eYw0BqTGNUpnrzzWlK2kbu29NWg7t6pnUDEfxqpTUf+mK8r3okXQn60Zjbk9InYZ4d8SwSjrtOa+i5hSPw=="
+      - build-patched-codex:
+          name: codex-0.149.0-cross-windows-msvc
+          compat_id: rust-v0.149.0-native-join-p3
+          upstream_tag: rust-v0.149.0
+          upstream_commit: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
+          binding_sha256: 07f465feceffa5811a8af80a6d18cc594c153e063d068e90328867c74315924c
+          official_windows_npm_integrity: "sha512-i4dryj2Y1j+00Mb5n+0n71EYnTK9/KDc2cdFo/dXD0d1oTog2bhUssKDEIOnKmnEf51P0Z/HJTWvTKw/UHyOvQ=="

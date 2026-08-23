@@ -1,5 +1,5 @@
 use crate::error::{ManagerError, Result};
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::ffi::{OsStr, OsString};
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
@@ -10,6 +10,7 @@ pub struct CommandSpec {
     pub args: Vec<OsString>,
     pub cwd: Option<PathBuf>,
     pub env: BTreeMap<OsString, OsString>,
+    pub env_remove: BTreeSet<OsString>,
     pub inherit_stdio: bool,
 }
 
@@ -20,6 +21,7 @@ impl CommandSpec {
             args: Vec::new(),
             cwd: None,
             env: BTreeMap::new(),
+            env_remove: BTreeSet::new(),
             inherit_stdio: false,
         }
     }
@@ -45,6 +47,11 @@ impl CommandSpec {
 
     pub fn env(mut self, key: impl Into<OsString>, value: impl Into<OsString>) -> Self {
         self.env.insert(key.into(), value.into());
+        self
+    }
+
+    pub fn env_remove(mut self, key: impl Into<OsString>) -> Self {
+        self.env_remove.insert(key.into());
         self
     }
 
@@ -92,7 +99,11 @@ pub struct RealProcessRunner;
 impl ProcessRunner for RealProcessRunner {
     fn run(&self, spec: &CommandSpec) -> Result<CommandResult> {
         let mut command = Command::new(&spec.program);
-        command.args(&spec.args).envs(&spec.env);
+        command.args(&spec.args);
+        for key in &spec.env_remove {
+            command.env_remove(key);
+        }
+        command.envs(&spec.env);
         if let Some(cwd) = &spec.cwd {
             command.current_dir(cwd);
         }

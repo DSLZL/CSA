@@ -493,10 +493,13 @@ fn validate_manifest(manifest: &CompatibilityManifest) -> Result<()> {
     let expected_patch_count = match manifest.patch_set_version {
         1 => 5,
         2 => 6,
+        3 => 11,
+        4 => 12,
+        5 => 13,
         _ => {
             return Err(ManagerError::new(
                 "unsupported_manifest",
-                "only patch sets 1 and 2 are supported",
+                "only patch sets 1, 2, 3, 4, and 5 are supported",
             ));
         }
     };
@@ -723,7 +726,10 @@ pub struct BuildContract {
 
 impl TestContract {
     fn validate(&self, manifest: &CompatibilityManifest) -> Result<()> {
-        let batch_join = manifest.patch_set_version == 2
+        let p2 = manifest.patch_set_version == 2;
+        let p3 = matches!(manifest.patch_set_version, 3..=5);
+        let p3_offset = usize::from(p3);
+        let batch_join = (p2 || p3)
             && manifest
                 .patches
                 .iter()
@@ -732,6 +738,9 @@ impl TestContract {
             1 => 7,
             2 if batch_join => 11,
             2 => 8,
+            3 if batch_join => 15,
+            4 if batch_join => 16,
+            5 if batch_join => 16,
             _ => {
                 return Err(ManagerError::new(
                     "invalid_test_contract",
@@ -756,10 +765,9 @@ impl TestContract {
             ));
         }
 
-        let p2 = manifest.patch_set_version == 2;
-        let branding_matches = !p2
+        let branding_matches = !(p2 || p3)
             || step_matches(
-                &self.tests[0],
+                &self.tests[p3_offset],
                 "CSA startup version display",
                 &[
                     "cargo",
@@ -773,7 +781,7 @@ impl TestContract {
                 &[],
             );
         let first_native_test = if batch_join {
-            2
+            2 + p3_offset
         } else if p2 {
             1
         } else {
@@ -782,7 +790,7 @@ impl TestContract {
         let native_tests = &self.tests[first_native_test..];
         let batch_tests_match = !batch_join
             || (step_matches(
-                &self.tests[1],
+                &self.tests[1 + p3_offset],
                 "ephemeral parent full-history fork",
                 &[
                     "cargo",
@@ -795,7 +803,7 @@ impl TestContract {
                 ],
                 &[],
             ) && step_matches(
-                &self.tests[7],
+                &self.tests[7 + p3_offset],
                 "batch Join tool schema",
                 &[
                     "cargo",
@@ -808,7 +816,7 @@ impl TestContract {
                 ],
                 &[],
             ) && step_matches(
-                &self.tests[8],
+                &self.tests[8 + p3_offset],
                 "batch Join waits for every exact run",
                 &[
                     "cargo",
@@ -829,14 +837,29 @@ impl TestContract {
                 ("cargo_target", "absolute disposable Cargo target path"),
             ],
         );
-        let common_env_matches = map_matches(
-            &self.common_env,
-            &[
-                ("CARGO_INCREMENTAL", "0"),
-                ("CARGO_TARGET_DIR", "{cargo_target}"),
-                ("RUST_MIN_STACK", "8388608"),
-            ],
-        );
+        let common_env_matches = if p3 {
+            map_matches(
+                &self.common_env,
+                &[
+                    ("CARGO_BUILD_JOBS", "1"),
+                    ("CARGO_INCREMENTAL", "0"),
+                    ("CARGO_TARGET_DIR", "{cargo_target}"),
+                    ("INSTA_OUTPUT", "none"),
+                    ("INSTA_UPDATE", "no"),
+                    ("INSTA_WORKSPACE_ROOT", "{source}/codex-rs"),
+                    ("RUST_MIN_STACK", "8388608"),
+                ],
+            )
+        } else {
+            map_matches(
+                &self.common_env,
+                &[
+                    ("CARGO_INCREMENTAL", "0"),
+                    ("CARGO_TARGET_DIR", "{cargo_target}"),
+                    ("RUST_MIN_STACK", "8388608"),
+                ],
+            )
+        };
         let generation_matches = step_matches(
             &self.generation[0],
             "stable schema and embedded exports",
@@ -975,6 +998,72 @@ impl TestContract {
             ],
             &[],
         );
+        let p3_tests_match = !p3
+            || (step_matches(
+                &self.tests[0],
+                "workspace formatting",
+                &["cargo", "fmt", "--all", "--", "--check"],
+                &[],
+            ) && step_matches(
+                &self.tests[12],
+                "TUI live state and panel",
+                &[
+                    "cargo",
+                    "test",
+                    "-p",
+                    "codex-tui",
+                    "--lib",
+                    "subagent_live",
+                    "--",
+                    "--test-threads=1",
+                    "--format=terse",
+                ],
+                &[],
+            ) && step_matches(
+                &self.tests[13],
+                "complete TUI library",
+                &[
+                    "cargo",
+                    "test",
+                    "-p",
+                    "codex-tui",
+                    "--lib",
+                    "--",
+                    "--test-threads=1",
+                    "--format=terse",
+                ],
+                &[],
+            ) && step_matches(
+                &self.tests[14],
+                "TUI clippy",
+                &[
+                    "cargo",
+                    "clippy",
+                    "-p",
+                    "codex-tui",
+                    "--lib",
+                    "--tests",
+                    "--",
+                    "-D",
+                    "warnings",
+                ],
+                &[],
+            ));
+        let overlay_test_matches = !matches!(manifest.patch_set_version, 4 | 5)
+            || step_matches(
+                &self.tests[15],
+                "CSA official runtime overlay",
+                &[
+                    "cargo",
+                    "test",
+                    "-p",
+                    "codex-install-context",
+                    "csa_overlay_prefers_owned_files_and_falls_back_to_the_official_package",
+                    "--",
+                    "--nocapture",
+                ],
+                &[],
+            );
         let build_env_matches = match manifest.patch_set_version {
             1 => ["1", "4"].into_iter().any(|jobs| {
                 map_matches(
@@ -989,6 +1078,14 @@ impl TestContract {
             2 => map_matches(
                 &self.build.env,
                 &[
+                    ("CARGO_PROFILE_RELEASE_DEBUG", "0"),
+                    ("SOURCE_DATE_EPOCH", "1786063808"),
+                ],
+            ),
+            3..=5 => map_matches(
+                &self.build.env,
+                &[
+                    ("CARGO_BUILD_JOBS", "2"),
                     ("CARGO_PROFILE_RELEASE_DEBUG", "0"),
                     ("SOURCE_DATE_EPOCH", "1786063808"),
                 ],
@@ -1015,6 +1112,8 @@ impl TestContract {
             || !branding_matches
             || !batch_tests_match
             || !tests_match
+            || !p3_tests_match
+            || !overlay_test_matches
             || !build_matches
         {
             return Err(ManagerError::new(

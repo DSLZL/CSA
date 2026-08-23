@@ -24,6 +24,13 @@ const MAX_JSON_BYTES: u64 = 4 * 1024 * 1024;
 const MAX_RELEASE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES: u64 = 1024 * 1024 * 1024;
 
+fn compatibility_id_for_version(version: &str) -> Option<&'static str> {
+    match version {
+        "0.149.0" => Some("rust-v0.149.0-native-join-p3"),
+        _ => None,
+    }
+}
+
 pub struct OnlineBundle {
     prepare: PrepareOptions,
     _staging: StagingGuard,
@@ -72,7 +79,15 @@ pub fn resolve_online_install(
         ));
     }
 
-    let compat_id = format!("rust-v{upstream_version}-native-join-p2");
+    let compat_id = compatibility_id_for_version(&upstream_version).ok_or_else(|| {
+        ManagerError::new(
+            "latest_not_yet_supported",
+            format!(
+                "CSA has no reviewed compatibility mapping for {} ({})",
+                upstream_release.tag_name, upstream_commit
+            ),
+        )
+    })?;
     let release_tag = format!("compat-{compat_id}");
     let release_url = format!("{API_ROOT}/{CSA_REPOSITORY}/releases/tags/{release_tag}");
     let compatibility_release: GitHubRelease =
@@ -156,7 +171,7 @@ pub fn resolve_online_install(
         &descriptor,
         &release_tag,
         &csa_commit,
-        &compat_id,
+        compat_id,
         &upstream_version,
         &upstream_release.tag_name,
         &upstream_commit,
@@ -175,7 +190,7 @@ pub fn resolve_online_install(
         ));
     }
 
-    let payload_root = staging_path.join(&compat_id);
+    let payload_root = staging_path.join(compat_id);
     ensure_managed_directory(&paths.root, &payload_root)?;
     for file in &descriptor.payload {
         let asset = validate_declared_asset(file, &assets, &checksums)?;
@@ -797,8 +812,9 @@ mod tests {
     use super::{
         BUILD_TARGET, CSA_REPOSITORY, CompatibilityRelease, GitHubAsset, GitHubClient,
         GitHubRelease, MAX_ARTIFACT_BYTES, OPENAI_REPOSITORY, ReleaseFile, UpstreamRelease,
-        descriptor_assets, github_sha256, parse_checksums, release_assets, require_uri_host,
-        stable_release_version, validate_declared_asset, validate_descriptor,
+        compatibility_id_for_version, descriptor_assets, github_sha256, parse_checksums,
+        release_assets, require_uri_host, stable_release_version, validate_declared_asset,
+        validate_descriptor,
     };
     use std::collections::BTreeMap;
 
@@ -826,6 +842,15 @@ mod tests {
         ] {
             assert!(stable_release_version(&value).is_err());
         }
+    }
+
+    #[test]
+    fn compatibility_catalog_selects_only_the_reviewed_p3_release() {
+        assert_eq!(
+            compatibility_id_for_version("0.149.0"),
+            Some("rust-v0.149.0-native-join-p3")
+        );
+        assert_eq!(compatibility_id_for_version("0.150.0"), None);
     }
 
     #[test]

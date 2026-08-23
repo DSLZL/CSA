@@ -114,6 +114,20 @@ impl IsolationPlan {
             if let Some(native) = &official.native {
                 reject_overlap(left_name, left, "official native executable", &native.path)?;
             }
+            if let Some(runtime) = &official.runtime {
+                reject_overlap(
+                    left_name,
+                    left,
+                    "official platform package",
+                    &runtime.package_root,
+                )?;
+                reject_overlap(
+                    left_name,
+                    left,
+                    "official managed package",
+                    &runtime.managed_package_root,
+                )?;
+            }
             for (right_name, right) in isolated.iter().skip(index + 1) {
                 reject_overlap(left_name, left, right_name, right)?;
             }
