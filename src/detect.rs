@@ -1,8 +1,10 @@
+#[cfg(windows)]
 use crate::BUILD_TARGET;
 use crate::error::{ManagerError, Result};
 use crate::hash::sha256_file;
 use crate::process::{CommandSpec, ProcessRunner};
 use serde::{Deserialize, Serialize};
+#[cfg(windows)]
 use std::collections::BTreeSet;
 use std::ffi::{OsStr, OsString};
 use std::fs;
@@ -636,13 +638,17 @@ fn platform_executable(_: &Path, metadata: &fs::Metadata) -> bool {
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        PackageManager, detect_official, find_codex_launcher, find_executable, parse_codex_version,
-    };
+    #[cfg(windows)]
+    use super::{PackageManager, detect_official, find_codex_launcher};
+    use super::{find_executable, parse_codex_version};
+    #[cfg(windows)]
     use crate::BUILD_TARGET;
+    #[cfg(windows)]
     use crate::error::Result;
+    #[cfg(windows)]
     use crate::process::{CommandResult, CommandSpec, ProcessRunner};
     use std::fs;
+    #[cfg(windows)]
     use std::path::Path;
     use std::time::{SystemTime, UNIX_EPOCH};
 
