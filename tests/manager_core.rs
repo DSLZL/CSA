@@ -54,7 +54,9 @@ struct Fixture {
     manifest: PathBuf,
     official: PathBuf,
     native: PathBuf,
+    #[cfg(windows)]
     official_package: PathBuf,
+    #[cfg(windows)]
     managed_package: PathBuf,
     artifact: PathBuf,
     source: PathBuf,
@@ -171,23 +173,20 @@ impl Fixture {
             (official, native, official_package, managed_package)
         };
         #[cfg(not(windows))]
-        let (official, native, official_package, managed_package) = {
+        let (official, native) = {
             let official = temp.join("official");
             let native = temp.join("official-native");
             write_executable(&official, b"official-launcher");
             write_executable(&native, b"official-native");
-            (
-                official,
-                native,
-                temp.join("official-package"),
-                temp.join("managed-package"),
-            )
+            (official, native)
         };
         Self {
             manifest,
             official,
             native,
+            #[cfg(windows)]
             official_package,
+            #[cfg(windows)]
             managed_package,
             artifact,
             source,
@@ -206,30 +205,30 @@ impl Fixture {
         }
     }
 
-    fn set_official_package_version(&self, version: &str) {
+    fn set_official_package_version(&self, _version: &str) {
         #[cfg(windows)]
         {
             fs::write(
                 self.managed_package.join("package.json"),
-                format!(r#"{{"name":"@openai/codex","version":"{version}"}}"#),
+                format!(r#"{{"name":"@openai/codex","version":"{_version}"}}"#),
             )
             .unwrap();
             fs::write(
                 self.official_package.join("codex-package.json"),
                 format!(
-                    r#"{{"layoutVersion":1,"version":"{version}","target":"{BUILD_TARGET}","variant":"codex","entrypoint":"bin/codex.exe","resourcesDir":"codex-resources","pathDir":"codex-path"}}"#
+                    r#"{{"layoutVersion":1,"version":"{_version}","target":"{BUILD_TARGET}","variant":"codex","entrypoint":"bin/codex.exe","resourcesDir":"codex-resources","pathDir":"codex-path"}}"#
                 ),
             )
             .unwrap();
         }
     }
 
-    fn set_official_package_target(&self, target: &str) {
+    fn set_official_package_target(&self, _target: &str) {
         #[cfg(windows)]
         fs::write(
             self.official_package.join("codex-package.json"),
             format!(
-                r#"{{"layoutVersion":1,"version":"{VERSION}","target":"{target}","variant":"codex","entrypoint":"bin/codex.exe","resourcesDir":"codex-resources","pathDir":"codex-path"}}"#
+                r#"{{"layoutVersion":1,"version":"{VERSION}","target":"{_target}","variant":"codex","entrypoint":"bin/codex.exe","resourcesDir":"codex-resources","pathDir":"codex-path"}}"#
             ),
         )
         .unwrap();
