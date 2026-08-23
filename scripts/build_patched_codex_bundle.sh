@@ -95,6 +95,18 @@ if ! cargo xwin cache xwin >"$xwin_cache_log" 2>&1; then
   exit 1
 fi
 
+missing=()
+for executable in clang-cl lld-link llvm-lib ninja; do
+  command -v "$executable" >/dev/null || missing+=("$executable")
+done
+if (( ${#missing[@]} )); then
+  apt_log="$temp_root/apt.log"
+  if ! { sudo apt-get update && sudo apt-get install --yes clang lld llvm ninja-build; } >"$apt_log" 2>&1; then
+    tail -n 200 "$apt_log" >&2
+    exit 1
+  fi
+fi
+
 mapfile -t identity < <(python3 - "$manifest" "$repository" <<'PY'
 import sys
 from pathlib import Path
