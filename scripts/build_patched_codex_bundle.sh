@@ -128,11 +128,11 @@ binding_sha256="${identity[8]}"
 [[ "$rust_toolchain" == 1.95.0 ]]
 [[ "$rustc_commit" == 59807616e1fa2540724bfbac14d7976d7e4a3860 ]]
 [[ "$build_target" == x86_64-pc-windows-msvc && "$artifact_filename" == codex.exe ]]
-rustc -Vv | grep -Fq "commit-hash: $rustc_commit"
+[[ "$(rustc -Vv)" == *"commit-hash: $rustc_commit"* ]]
 [[ "$(cargo xwin --version)" == "cargo-xwin 0.23.0" ]]
 [[ "$(sccache --version)" == "sccache 0.16.0" ]]
-clang-cl --version | grep -Fq '21.1.8'
-lld-link --version | grep -Fq '21.1.8'
+[[ "$(clang-cl --version)" == *'21.1.8'* ]]
+[[ "$(lld-link --version)" == *'21.1.8'* ]]
 command -v llvm-lib >/dev/null
 command -v ninja >/dev/null
 
