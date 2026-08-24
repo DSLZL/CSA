@@ -10,7 +10,7 @@ import os
 import re
 import subprocess
 import sys
-import tempfile
+import threading
 from pathlib import Path
 from typing import Any
 
@@ -19,6 +19,7 @@ from verify_patch_payload import VerificationError, _load_payload, _payload_file
 
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 FLAKY_TUI_BACKGROUND_EXIT_STEP = "TUI background exit isolation"
+QUIET_STEP_HEARTBEAT_SECONDS = 60
 
 
 class ContractError(RuntimeError):
@@ -119,17 +120,32 @@ def run_step(
             "shell": False,
         }
         if output == "failure-only":
-            with tempfile.TemporaryFile() as captured:
+            heartbeat_stop = threading.Event()
+
+            def report_heartbeat() -> None:
+                elapsed = 0
+                while not heartbeat_stop.wait(QUIET_STEP_HEARTBEAT_SECONDS):
+                    elapsed += QUIET_STEP_HEARTBEAT_SECONDS
+                    print(
+                        f"{kind} step running: {step['name']} ({elapsed:g}s elapsed)",
+                        flush=True,
+                    )
+
+            heartbeat = threading.Thread(target=report_heartbeat, daemon=True)
+            heartbeat.start()
+            try:
                 result = subprocess.run(
                     expanded,
                     **options,
-                    stdout=captured,
+                    stdout=subprocess.PIPE,
                     stderr=subprocess.STDOUT,
                 )
-                if result.returncode and attempt == attempts:
-                    captured.seek(0)
-                    sys.stderr.write(captured.read().decode("utf-8", errors="replace"))
-                    sys.stderr.flush()
+            finally:
+                heartbeat_stop.set()
+                heartbeat.join()
+            if result.returncode and attempt == attempts:
+                sys.stderr.write((result.stdout or b"").decode("utf-8", errors="replace"))
+                sys.stderr.flush()
         else:
             result = subprocess.run(expanded, **options)
         if not result.returncode or attempt == attempts:

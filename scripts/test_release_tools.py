@@ -14,6 +14,7 @@ import subprocess
 import sys
 import tarfile
 import tempfile
+import time
 import tomllib
 from pathlib import Path
 from unittest.mock import patch
@@ -444,15 +445,21 @@ def test_contract_shape() -> None:
     assert execute.call_count == 2
     assert result["exit_code"] == 0
 
-    def noisy_result(argv: list[str], **options: object) -> subprocess.CompletedProcess:
-        output = options["stdout"]
-        assert hasattr(output, "write")
-        output.write(b"\x1b[2Jrendered TUI frame\n")
-        return subprocess.CompletedProcess(argv, 0)
-
     stdout = io.StringIO()
-    with patch("run_patch_contract.subprocess.run", side_effect=noisy_result), redirect_stdout(
-        stdout
+
+    def noisy_result(argv: list[str], **options: object) -> subprocess.CompletedProcess:
+        assert options["stdout"] == subprocess.PIPE
+        deadline = time.monotonic() + 1
+        while "test step running: quiet TUI" not in stdout.getvalue():
+            if time.monotonic() >= deadline:
+                raise AssertionError("quiet step heartbeat was not emitted")
+            time.sleep(0.001)
+        return subprocess.CompletedProcess(argv, 0, stdout=b"\x1b[2Jrendered TUI frame\n")
+
+    with (
+        patch("run_patch_contract.subprocess.run", side_effect=noisy_result),
+        patch("run_patch_contract.QUIET_STEP_HEARTBEAT_SECONDS", 0.01),
+        redirect_stdout(stdout),
     ):
         run_step(
             {"name": "quiet TUI", "argv": ["cargo", "test"], "output": "failure-only"},
@@ -462,15 +469,15 @@ def test_contract_shape() -> None:
             REPOSITORY,
             REPOSITORY / ".dev" / "unused-target",
         )
-    assert "rendered TUI frame" not in stdout.getvalue()
+    quiet_output = stdout.getvalue()
+    assert "test step running: quiet TUI" in quiet_output
+    assert "rendered TUI frame" not in quiet_output
 
     def failed_noisy_result(
         argv: list[str], **options: object
     ) -> subprocess.CompletedProcess:
-        output = options["stdout"]
-        assert hasattr(output, "write")
-        output.write(b"\x1b[2Jfailed TUI frame\n")
-        return subprocess.CompletedProcess(argv, 101)
+        assert options["stdout"] == subprocess.PIPE
+        return subprocess.CompletedProcess(argv, 101, stdout=b"\x1b[2Jfailed TUI frame\n")
 
     stderr = io.StringIO()
     try:
@@ -582,6 +589,9 @@ def test_release_stream_contracts() -> None:
     assert circleci.count("build_patched_codex_bundle.sh") == 1
     assert "runs-on: ubuntu-24.04" in patched_workflow
     assert "runs-on: ubuntu-26.04" not in patched_workflow
+    assert "timeout-minutes: 120" in patched_workflow
+    assert "timeout 50m bash scripts/build_patched_codex_bundle.sh" not in patched_workflow
+    assert "bash scripts/build_patched_codex_bundle.sh" in patched_workflow
     assert "llvm-toolchain-noble-21" in build_profile
     assert "6084F3CF814B57C1CF12EFD515CF4D18AF4F7421" in build_profile
     assert "/usr/lib/llvm-$LLVM_MAJOR/bin" in shared_build

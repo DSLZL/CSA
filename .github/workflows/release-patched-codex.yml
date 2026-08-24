@@ -191,7 +191,7 @@ jobs:
         shell: bash
         run: |
           set -euo pipefail
-          timeout 50m bash scripts/build_patched_codex_bundle.sh \
+          bash scripts/build_patched_codex_bundle.sh \
             "$RESOLUTION_JSON" \
             "$SOURCE_ROOT" \
             "$CARGO_TARGET_DIR" \
