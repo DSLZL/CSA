@@ -190,21 +190,23 @@ install_release_binary \
   rustup-init "$RUSTUP_URL" "$RUSTUP_SHA256"
 
 rustup_log="$temp_root/rustup.log"
+printf 'ci_stage=rustup status=started\n'
 if ! {
   rustup-init --no-modify-path --profile minimal --default-toolchain none -y &&
     rustup toolchain install "$RUST_TOOLCHAIN" --profile minimal &&
     rustup default "$RUST_TOOLCHAIN" &&
     rustup target add --toolchain "$RUST_TOOLCHAIN" "$BUILD_TARGET"
-} >"$rustup_log" 2>&1; then
-  tail -n 200 "$rustup_log" >&2
+} 2>&1 | tee "$rustup_log"; then
   exit 1
 fi
+printf 'ci_stage=rustup status=completed\n'
 
 xwin_cache_log="$temp_root/xwin-cache.log"
-if ! cargo xwin cache xwin >"$xwin_cache_log" 2>&1; then
-  tail -n 200 "$xwin_cache_log" >&2
+printf 'ci_stage=xwin_cache status=started\n'
+if ! cargo xwin cache xwin 2>&1 | tee "$xwin_cache_log"; then
   exit 1
 fi
+printf 'ci_stage=xwin_cache status=completed\n'
 
 llvm_matches() {
   local clang_version lld_version
@@ -218,6 +220,7 @@ llvm_matches() {
 }
 
 if ! llvm_matches; then
+  printf 'ci_stage=llvm_toolchain status=started\n'
   llvm_key="$temp_root/llvm-snapshot.gpg.key"
   llvm_key_info="$temp_root/llvm-key-info.txt"
   llvm_source="$temp_root/apt-llvm.list"
@@ -237,10 +240,12 @@ if ! llvm_matches; then
     sudo apt-get update &&
       sudo apt-get install --yes \
         "clang-$LLVM_MAJOR" "lld-$LLVM_MAJOR" "llvm-$LLVM_MAJOR" ninja-build
-  } >"$apt_log" 2>&1; then
-    tail -n 200 "$apt_log" >&2
+  } 2>&1 | tee "$apt_log"; then
     exit 1
   fi
+  printf 'ci_stage=llvm_toolchain status=completed\n'
+else
+  printf 'ci_stage=llvm_toolchain status=ready\n'
 fi
 llvm_matches || { echo "exact LLVM $LLVM_VERSION toolchain is unavailable" >&2; exit 1; }
 

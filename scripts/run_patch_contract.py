@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import sys
+import tempfile
 from pathlib import Path
 from typing import Any
 
@@ -93,10 +94,11 @@ def run_step(
     source: Path,
     cargo_target: Path,
 ) -> dict[str, Any]:
-    allowed = {"name", "argv", "env"}
+    allowed = {"name", "argv", "env", "output"}
     if not isinstance(step, dict) or set(step) - allowed or not {"name", "argv"} <= set(step):
         raise ContractError(f"invalid {kind} step")
     argv = step["argv"]
+    output = step.get("output", "live")
     if (
         not isinstance(step["name"], str)
         or not isinstance(argv, list)
@@ -105,15 +107,31 @@ def run_step(
         or any(not isinstance(value, str) or not value for value in argv)
     ):
         raise ContractError(f"{kind} step must be a named cargo argv array")
+    if not isinstance(output, str) or output not in {"live", "failure-only"}:
+        raise ContractError(f"invalid {kind} output policy")
     expanded = [expand(value, source, cargo_target) for value in argv]
     attempts = 2 if step["name"] == FLAKY_TUI_BACKGROUND_EXIT_STEP else 1
+    print(f"{kind} step started: {step['name']}", flush=True)
     for attempt in range(1, attempts + 1):
-        result = subprocess.run(
-            expanded,
-            cwd=cwd,
-            env=environment(common_env, step.get("env", {}), source, cargo_target),
-            shell=False,
-        )
+        options = {
+            "cwd": cwd,
+            "env": environment(common_env, step.get("env", {}), source, cargo_target),
+            "shell": False,
+        }
+        if output == "failure-only":
+            with tempfile.TemporaryFile() as captured:
+                result = subprocess.run(
+                    expanded,
+                    **options,
+                    stdout=captured,
+                    stderr=subprocess.STDOUT,
+                )
+                if result.returncode and attempt == attempts:
+                    captured.seek(0)
+                    sys.stderr.write(captured.read().decode("utf-8", errors="replace"))
+                    sys.stderr.flush()
+        else:
+            result = subprocess.run(expanded, **options)
         if not result.returncode or attempt == attempts:
             break
         print(
@@ -122,6 +140,7 @@ def run_step(
         )
     if result.returncode:
         raise ContractError(f"{kind} step failed ({result.returncode}): {step['name']}")
+    print(f"{kind} step passed: {step['name']}", flush=True)
     return {"kind": kind, "name": step["name"], "argv": expanded, "exit_code": 0}
 
 

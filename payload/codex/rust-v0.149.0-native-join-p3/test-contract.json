@@ -95,7 +95,8 @@
         "--",
         "--nocapture"
       ],
-      "name": "CSA startup version display"
+      "name": "CSA startup version display",
+      "output": "failure-only"
     },
     {
       "argv": [
@@ -234,7 +235,8 @@
         "--test-threads=1",
         "--format=terse"
       ],
-      "name": "TUI live state and panel"
+      "name": "TUI live state and panel",
+      "output": "failure-only"
     },
     {
       "argv": [
@@ -248,7 +250,8 @@
         "--test-threads=1",
         "--format=terse"
       ],
-      "name": "TUI background exit isolation"
+      "name": "TUI background exit isolation",
+      "output": "failure-only"
     },
     {
       "argv": [
@@ -262,7 +265,8 @@
         "app::tests::background_exit_tests::exit_interrupts_before_requesting_shutdown",
         "--format=terse"
       ],
-      "name": "complete TUI library"
+      "name": "complete TUI library",
+      "output": "failure-only"
     },
     {
       "argv": [

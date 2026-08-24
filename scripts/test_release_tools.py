@@ -3,6 +3,7 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import io
 import json
@@ -405,6 +406,18 @@ def test_contract_shape() -> None:
     assert "--test-threads=1" not in p3_contract["tests"][-3]["argv"]
     assert "--skip" in p3_contract["tests"][-3]["argv"]
     assert p3_contract["tests"][-4]["argv"][5] in p3_contract["tests"][-3]["argv"]
+    tui_tests = [
+        test
+        for test in p3_contract["tests"]
+        if test["argv"][:4] == ["cargo", "test", "-p", "codex-tui"]
+    ]
+    assert {test["name"] for test in tui_tests} == {
+        "CSA startup version display",
+        "TUI live state and panel",
+        "TUI background exit isolation",
+        "complete TUI library",
+    }
+    assert all(test.get("output") == "failure-only" for test in tui_tests)
     assert "unrelated asynchronous event" in p3_contract["known_upstream_errata"][-1]
     assert p3_contract["common_env"]["CARGO_BUILD_JOBS"] == "2"
     assert p3_contract["common_env"]["INSTA_WORKSPACE_ROOT"] == "{source}/codex-rs"
@@ -430,6 +443,57 @@ def test_contract_shape() -> None:
         )
     assert execute.call_count == 2
     assert result["exit_code"] == 0
+
+    def noisy_result(argv: list[str], **options: object) -> subprocess.CompletedProcess:
+        output = options["stdout"]
+        assert hasattr(output, "write")
+        output.write(b"\x1b[2Jrendered TUI frame\n")
+        return subprocess.CompletedProcess(argv, 0)
+
+    stdout = io.StringIO()
+    with patch("run_patch_contract.subprocess.run", side_effect=noisy_result), redirect_stdout(
+        stdout
+    ):
+        run_step(
+            {"name": "quiet TUI", "argv": ["cargo", "test"], "output": "failure-only"},
+            "test",
+            REPOSITORY,
+            {},
+            REPOSITORY,
+            REPOSITORY / ".dev" / "unused-target",
+        )
+    assert "rendered TUI frame" not in stdout.getvalue()
+
+    def failed_noisy_result(
+        argv: list[str], **options: object
+    ) -> subprocess.CompletedProcess:
+        output = options["stdout"]
+        assert hasattr(output, "write")
+        output.write(b"\x1b[2Jfailed TUI frame\n")
+        return subprocess.CompletedProcess(argv, 101)
+
+    stderr = io.StringIO()
+    try:
+        with patch(
+            "run_patch_contract.subprocess.run", side_effect=failed_noisy_result
+        ), redirect_stderr(stderr):
+            run_step(
+                {
+                    "name": "failed quiet TUI",
+                    "argv": ["cargo", "test"],
+                    "output": "failure-only",
+                },
+                "test",
+                REPOSITORY,
+                {},
+                REPOSITORY,
+                REPOSITORY / ".dev" / "unused-target",
+            )
+    except ContractError:
+        pass
+    else:
+        raise AssertionError("failed quiet step was accepted")
+    assert "failed TUI frame" in stderr.getvalue()
     try:
         cross_windows_build_argv(["cargo", "test"])
     except ContractError:
@@ -587,6 +651,9 @@ def test_release_stream_contracts() -> None:
     assert '"$(cargo-xwin --version)"' in shared_build
     assert '"$(cargo xwin --version)"' not in shared_build
     assert '"clang-$LLVM_MAJOR" "lld-$LLVM_MAJOR" "llvm-$LLVM_MAJOR" ninja-build' in shared_build
+    for log in ("rustup_log", "xwin_cache_log", "apt_log"):
+        assert f'tee "${log}"' in shared_build
+        assert f'>"${log}" 2>&1' not in shared_build
     assert "identity mismatch; expected output to contain" in shared_build
     assert "identity mismatch; expected exactly" in shared_build
     for acceptance_path in (REPOSITORY / "release" / "acceptance").rglob("*.json"):
