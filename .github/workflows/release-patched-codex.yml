@@ -33,7 +33,7 @@ env:
 jobs:
   build:
     name: Build exact patched Codex CLI
-    runs-on: ubuntu-26.04
+    runs-on: ubuntu-24.04
     timeout-minutes: 120
     outputs:
       compat_id: ${{ steps.manifest.outputs.compat_id }}
@@ -89,6 +89,28 @@ jobs:
       - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
+
+      - name: Install exact LLVM 21 toolchain
+        run: |
+          set -euo pipefail
+          key="$RUNNER_TEMP/llvm-snapshot.gpg.key"
+          key_info="$RUNNER_TEMP/llvm-key-info.txt"
+          source="$RUNNER_TEMP/apt-llvm-noble-21.list"
+
+          curl --proto '=https' --tlsv1.2 --fail --location --retry 3 \
+            --output "$key" https://apt.llvm.org/llvm-snapshot.gpg.key
+          gpg --show-keys --with-colons "$key" > "$key_info"
+          fingerprint="$(awk -F: '$1 == "fpr" { print $10; exit }' "$key_info")"
+          test "$fingerprint" = 6084F3CF814B57C1CF12EFD515CF4D18AF4F7421
+
+          printf '%s\n' \
+            'deb [signed-by=/usr/share/keyrings/apt.llvm.org.asc] https://apt.llvm.org/noble/ llvm-toolchain-noble-21 main' \
+            > "$source"
+          sudo install -m 0644 "$key" /usr/share/keyrings/apt.llvm.org.asc
+          sudo install -m 0644 "$source" /etc/apt/sources.list.d/apt-llvm-noble-21.list
+          sudo apt-get update
+          sudo apt-get install --yes clang-21 lld-21 llvm-21 ninja-build
+          echo /usr/lib/llvm-21/bin >> "$GITHUB_PATH"
 
       - id: manifest
         name: Resolve reviewed compatibility manifest

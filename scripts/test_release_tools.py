@@ -508,7 +508,11 @@ def test_release_stream_contracts() -> None:
     circleci = (REPOSITORY / ".circleci" / "config.yml").read_text(encoding="utf-8")
     assert patched_workflow.count("build_patched_codex_bundle.sh") == 1
     assert circleci.count("build_patched_codex_bundle.sh") == 1
-    assert "runs-on: ubuntu-26.04" in patched_workflow
+    assert "runs-on: ubuntu-24.04" in patched_workflow
+    assert "runs-on: ubuntu-26.04" not in patched_workflow
+    assert "llvm-toolchain-noble-21" in patched_workflow
+    assert "6084F3CF814B57C1CF12EFD515CF4D18AF4F7421" in patched_workflow
+    assert 'echo /usr/lib/llvm-21/bin >> "$GITHUB_PATH"' in patched_workflow
     assert "CARGO_HOME: ${{ runner.temp }}" not in patched_workflow
     assert '"CARGO_HOME=$(Join-Path $root \'cache/cargo-home\')"' in patched_workflow
     assert "build_patched_codex_bundle.sh" not in ci_workflow
