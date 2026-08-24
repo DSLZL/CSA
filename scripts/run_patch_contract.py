@@ -29,6 +29,15 @@ def cross_windows_build_argv(argv: list[str]) -> list[str]:
     return ["cargo", "xwin", *argv[1:]]
 
 
+def cross_windows_build_env(env: dict[str, Any]) -> dict[str, Any]:
+    if not isinstance(env, dict) or "RUSTFLAGS" in env:
+        raise ContractError("cross-Windows build flags must be runner-owned")
+    return {
+        **env,
+        "RUSTFLAGS": "-C link-arg=/debug:none -C link-arg=/build-id:no",
+    }
+
+
 def load_contract(path: Path, compat_id: str) -> dict[str, Any]:
     try:
         contract = json.loads(path.read_bytes())
@@ -192,7 +201,8 @@ def run_contract(
     build_argv = (
         cross_windows_build_argv(build["argv"]) if cross_windows_msvc else build["argv"]
     )
-    build_step = {"name": "release build", "argv": build_argv, "env": build["env"]}
+    build_env = cross_windows_build_env(build["env"]) if cross_windows_msvc else build["env"]
+    build_step = {"name": "release build", "argv": build_argv, "env": build_env}
     steps.append(run_step(build_step, "build", cwd, contract["common_env"], source, cargo_target))
     artifact_path = Path(expand(build["artifact"], source, cargo_target)).resolve(strict=True)
     artifact = manifest["artifacts"][manifest["build_target"]]

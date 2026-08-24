@@ -1145,10 +1145,6 @@ impl TestContract {
                 &[
                     ("CARGO_BUILD_JOBS", "4"),
                     ("CARGO_PROFILE_RELEASE_DEBUG", "0"),
-                    (
-                        "RUSTFLAGS",
-                        "-C link-arg=/debug:none -C link-arg=/build-id:no",
-                    ),
                     ("SOURCE_DATE_EPOCH", "1786063808"),
                 ],
             ),

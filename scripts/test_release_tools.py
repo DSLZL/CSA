@@ -39,6 +39,7 @@ from compat_release import (  # noqa: E402
 from run_patch_contract import (  # noqa: E402
     ContractError,
     cross_windows_build_argv,
+    cross_windows_build_env,
     execute_version,
     load_contract,
 )
@@ -406,7 +407,8 @@ def test_contract_shape() -> None:
     assert p3_contract["common_env"]["CARGO_BUILD_JOBS"] == "2"
     assert p3_contract["common_env"]["INSTA_WORKSPACE_ROOT"] == "{source}/codex-rs"
     assert p3_contract["build"]["env"]["CARGO_BUILD_JOBS"] == "4"
-    assert p3_contract["build"]["env"]["RUSTFLAGS"] == (
+    assert "RUSTFLAGS" not in p3_contract["build"]["env"]
+    assert cross_windows_build_env(p3_contract["build"]["env"])["RUSTFLAGS"] == (
         "-C link-arg=/debug:none -C link-arg=/build-id:no"
     )
     try:
