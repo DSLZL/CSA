@@ -75,10 +75,6 @@ values = {
     "RUSTC_COMMIT": data["rustc_commit"],
     "BUILD_TARGET": data["build_target"],
     "ARTIFACT_FILENAME": data["artifact_filename"],
-    "EXPECTED_ARTIFACT_SHA256": data["artifact_sha256"],
-    "EXPECTED_ARTIFACT_SIZE": data["artifact_size"],
-    "ACCEPTED_ARTIFACT_SHA256": data.get("accepted_artifact_sha256", ""),
-    "ACCEPTED_ARTIFACT_SIZE": data.get("accepted_artifact_size", ""),
     "CARGO_PACKAGE": profile["product"]["cargo_package"],
     "CARGO_BIN": profile["product"]["cargo_bin"],
     "CARGO_BUILD_JOBS_PROFILE": profile["build"]["cargo_build_jobs"],
@@ -342,46 +338,6 @@ artifact="$cargo_target/$BUILD_TARGET/release/$ARTIFACT_FILENAME"
 [[ -f "$artifact" ]] || { echo "expected CLI artifact is missing: $artifact" >&2; exit 1; }
 actual_artifact_sha256="$(sha256sum "$artifact" | cut -d ' ' -f 1)"
 actual_artifact_size="$(stat -c '%s' "$artifact")"
-manifest_has_final_artifact=true
-if [[ "$EXPECTED_ARTIFACT_SHA256" == "0000000000000000000000000000000000000000000000000000000000000000"       && "$EXPECTED_ARTIFACT_SIZE" == "1" ]]; then
-  manifest_has_final_artifact=false
-fi
-
-if [[ -n "$ACCEPTED_ARTIFACT_SHA256" || -n "$ACCEPTED_ARTIFACT_SIZE" ]]; then
-  [[ -n "$ACCEPTED_ARTIFACT_SHA256" && -n "$ACCEPTED_ARTIFACT_SIZE" ]] || {
-    echo "acceptance authority must contain both artifact SHA-256 and size" >&2
-    exit 1
-  }
-  [[ "$actual_artifact_sha256" == "$ACCEPTED_ARTIFACT_SHA256" ]] || {
-    echo "artifact SHA-256 differs from the committed acceptance authority" >&2
-    echo "expected=$ACCEPTED_ARTIFACT_SHA256 actual=$actual_artifact_sha256" >&2
-    exit 1
-  }
-  [[ "$actual_artifact_size" == "$ACCEPTED_ARTIFACT_SIZE" ]] || {
-    echo "artifact size differs from the committed acceptance authority" >&2
-    echo "expected=$ACCEPTED_ARTIFACT_SIZE actual=$actual_artifact_size" >&2
-    exit 1
-  }
-  [[ "$manifest_has_final_artifact" == true ]] || {
-    echo "an accepted compatibility cannot retain a placeholder artifact contract" >&2
-    exit 1
-  }
-fi
-
-if [[ "$manifest_has_final_artifact" == true ]]; then
-  [[ "$actual_artifact_sha256" == "$EXPECTED_ARTIFACT_SHA256" ]] || {
-    echo "artifact SHA-256 differs from the reviewed manifest" >&2
-    echo "expected=$EXPECTED_ARTIFACT_SHA256 actual=$actual_artifact_sha256" >&2
-    exit 1
-  }
-  [[ "$actual_artifact_size" == "$EXPECTED_ARTIFACT_SIZE" ]] || {
-    echo "artifact size differs from the reviewed manifest" >&2
-    echo "expected=$EXPECTED_ARTIFACT_SIZE actual=$actual_artifact_size" >&2
-    exit 1
-  }
-else
-  echo "candidate_or_legacy_placeholder_artifact=true"
-fi
 
 mkdir -p "$output/bin"
 cp "$artifact" "$output/bin/$ARTIFACT_FILENAME"

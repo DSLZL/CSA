@@ -18,6 +18,8 @@ RUSTC = "59807616e1fa2540724bfbac14d7976d7e4a3860"
 UPSTREAM = "1" * 40
 ARTIFACT_SHA = hashlib.sha256(b"accepted-codex").hexdigest()
 ARTIFACT_SIZE = len(b"accepted-codex")
+DEVELOPMENT_ARTIFACT = b"development-codex"
+DEVELOPMENT_ARTIFACT_SHA = hashlib.sha256(DEVELOPMENT_ARTIFACT).hexdigest()
 SRI = "sha512-" + base64.b64encode(b"x" * 64).decode("ascii")
 
 
@@ -159,8 +161,8 @@ url = "{url}"
                 "compat_id": COMPAT,
                 "target": TARGET,
                 "artifact_filename": "codex.exe",
-                "artifact_sha256": ARTIFACT_SHA,
-                "artifact_size": ARTIFACT_SIZE,
+                "artifact_sha256": DEVELOPMENT_ARTIFACT_SHA,
+                "artifact_size": len(DEVELOPMENT_ARTIFACT),
                 "manifest_sha256": sha(manifest),
                 "build_profile_sha256": sha(profile),
                 "runtime_lock_sha256": sha(runtime_current),
@@ -239,7 +241,27 @@ url = "{url}"
         data = json.loads(result.stdout)
         self.assertEqual(data["compat_id"], COMPAT)
         self.assertEqual(data["artifact_sha256"], ARTIFACT_SHA)
-        self.assertEqual(data["accepted_artifact_sha256"], ARTIFACT_SHA)
+        self.assertEqual(data["accepted_artifact_sha256"], DEVELOPMENT_ARTIFACT_SHA)
+
+    def test_formal_release_does_not_require_development_acceptance(self) -> None:
+        holder, root = self.fixture()
+        self.addCleanup(holder.cleanup)
+        index_path = root / "release/compatibility-index.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        target = index["compatibilities"][COMPAT]["targets"][TARGET]
+        target["acceptance"] = None
+        target["acceptance_sha256"] = None
+        dump(index_path, index)
+
+        released = self.run_catalog(
+            root, "resolve", "--selector", COMPAT, "--target", TARGET, "--require-release"
+        )
+        self.assertEqual(released.returncode, 0, released.stderr)
+        accepted = self.run_catalog(
+            root, "resolve", "--selector", COMPAT, "--target", TARGET, "--require-acceptance"
+        )
+        self.assertEqual(accepted.returncode, 2)
+        self.assertIn("acceptance verification requires a committed acceptance record", accepted.stderr)
 
     def test_complete_catalog_and_legacy_placeholder_validate(self) -> None:
         holder, root = self.fixture()
@@ -334,6 +356,82 @@ url = "{url}"
         record = json.loads(output.read_text(encoding="utf-8"))
         self.assertEqual(record["compat_id"], LEGACY)
         self.assertEqual(record["artifact"]["sha256"], hashlib.sha256(b"candidate").hexdigest())
+
+    def test_accept_records_development_artifact_without_manifest_hash_alignment(self) -> None:
+        holder, root = self.fixture()
+        self.addCleanup(holder.cleanup)
+        index_path = root / "release/compatibility-index.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        manifest = root / f"payload/codex/{LEGACY}/manifest.toml"
+        manifest.write_text(
+            manifest.read_text(encoding="utf-8").replace(
+                f"unpublished://csa/{LEGACY}/{TARGET}/codex.exe",
+                f"https://github.com/dslzl/CSA/releases/download/compat-{LEGACY}/{LEGACY}--codex.exe",
+            ),
+            encoding="utf-8",
+        )
+        index["compatibilities"][LEGACY]["manifest_sha256"] = sha(manifest)
+        index["compatibilities"][LEGACY]["lifecycle"] = "candidate"
+        dump(index_path, index)
+
+        resolution = root / "resolution.json"
+        resolved = self.run_catalog(
+            root, "resolve", "--selector", LEGACY, "--target", TARGET, "--output", str(resolution)
+        )
+        self.assertEqual(resolved.returncode, 0, resolved.stderr)
+        artifact = root / "codex.exe"
+        artifact.write_bytes(DEVELOPMENT_ARTIFACT)
+        candidate = root / "candidate.json"
+        recorded = self.run_catalog(
+            root,
+            "candidate",
+            "--resolution",
+            str(resolution),
+            "--artifact",
+            str(artifact),
+            "--output",
+            str(candidate),
+            "--provider",
+            "local",
+        )
+        self.assertEqual(recorded.returncode, 0, recorded.stderr)
+        evidence = root / "evidence.json"
+        dump(evidence, {"kind": "manual-windows-test"})
+        acceptance_rel = Path(f"release/acceptance/{LEGACY}/{TARGET}.json")
+        accepted = self.run_catalog(
+            root,
+            "accept",
+            "--selector",
+            LEGACY,
+            "--target",
+            TARGET,
+            "--candidate-record",
+            str(candidate),
+            "--artifact",
+            str(artifact),
+            "--acceptance",
+            str(acceptance_rel),
+            "--evidence",
+            str(evidence),
+        )
+        self.assertEqual(accepted.returncode, 0, accepted.stderr)
+        acceptance = json.loads((root / acceptance_rel).read_text(encoding="utf-8"))
+        self.assertEqual(acceptance["artifact_sha256"], DEVELOPMENT_ARTIFACT_SHA)
+        self.assertNotEqual(acceptance["artifact_sha256"], "0" * 64)
+        released = self.run_catalog(
+            root,
+            "resolve",
+            "--selector",
+            LEGACY,
+            "--target",
+            TARGET,
+            "--require-release",
+            "--require-acceptance",
+        )
+        self.assertEqual(released.returncode, 0, released.stderr)
+        release = json.loads(released.stdout)
+        self.assertEqual(release["artifact_sha256"], "0" * 64)
+        self.assertEqual(release["accepted_artifact_sha256"], DEVELOPMENT_ARTIFACT_SHA)
 
     def test_list_is_data_driven_and_does_not_expand_in_yaml(self) -> None:
         holder, root = self.fixture()

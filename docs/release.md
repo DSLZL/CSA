@@ -200,7 +200,7 @@ compat_selector=rust-v0.149.0-native-join-p3
 target=x86_64-pc-windows-msvc
 ```
 
-The workflow does not accept copied npm integrity or accepted SHA values. It resolves committed authority, performs an independent CLI-only rebuild, and requires exact equality with both the manifest and acceptance record.
+The workflow does not accept copied npm integrity, CircleCI artifacts, or accepted SHA values. It resolves committed source/runtime authority and performs an independent CLI-only production build.
 
 The formal build command remains limited to:
 
@@ -210,7 +210,7 @@ cargo xwin build --locked --release -p codex-cli --bin codex
 
 It does not publish Codex App, Desktop, app-server, exec-server, MCP server, or unrelated binaries.
 
-The workflow calls `scripts/compat_release.py pack` without `finalize`. Therefore the committed manifest is the release authority and is not rewritten in a temporary staging directory.
+The workflow finalizes a temporary manifest copy from its own executable, verifies that staged production authority, and then calls `scripts/compat_release.py pack`. The committed manifest and optional development acceptance record are not rewritten.
 
 ## Draft recovery and immutable publication
 

@@ -51,7 +51,7 @@
           "runtime_lock": "release/runtime-locks/rust-v0.149.0-native-join-p3.json",
           "runtime_lock_sha256": "38ee51e00fce99ef5cf91e2be80345262a52b8adf98608e2c4bcd32ffe7a5566",
           "acceptance": "release/acceptance/rust-v0.149.0-native-join-p3/x86_64-pc-windows-msvc.json",
-          "acceptance_sha256": "feb3cedfa25b5bbe26d5dc83d12fa486479149f4d3353a12268c6db27faf5a1f"
+          "acceptance_sha256": "08dcfbcb11098cfe382b85ffc6580f180266753b9aa7ea831ef6790e0246e059"
         }
       }
     }

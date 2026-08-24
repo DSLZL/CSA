@@ -442,8 +442,6 @@ def validate_acceptance(
     manifest_sha256: str,
     profile_sha256: str,
     runtime_sha256: str,
-    expected_artifact_sha256: str,
-    expected_artifact_size: int,
 ) -> dict[str, Any]:
     acceptance = load_json(path)
     require_exact_keys(
@@ -468,14 +466,13 @@ def validate_acceptance(
         "manifest_sha256": manifest_sha256,
         "build_profile_sha256": profile_sha256,
         "runtime_lock_sha256": runtime_sha256,
-        "artifact_sha256": expected_artifact_sha256,
     }
     for key, expected in checks.items():
         actual = require_string(acceptance.get(key), f"{path}.{key}")
         if actual != expected:
             fail(f"acceptance {key} differs from the reviewed build identity")
-    if require_int(acceptance.get("artifact_size"), f"{path}.artifact_size", minimum=1) != expected_artifact_size:
-        fail("acceptance artifact size differs from the manifest")
+    require_string(acceptance.get("artifact_sha256"), f"{path}.artifact_sha256", pattern=LOWER_SHA256)
+    require_int(acceptance.get("artifact_size"), f"{path}.artifact_size", minimum=1)
     if require_string(acceptance.get("status"), f"{path}.status") != "accepted":
         fail("acceptance record is not in accepted state")
     evidence = acceptance.get("evidence")
@@ -646,17 +643,12 @@ def resolve(
             manifest_sha256,
             profile_sha256,
             runtime_sha256,
-            artifact_sha256,
-            artifact_size,
         )
     else:
         if target_entry.get("acceptance_sha256") is not None:
             fail(f"acceptance_sha256 must be null when acceptance is absent: {compat_id}/{target}")
         if require_acceptance:
-            fail(f"formal release requires a committed acceptance record: {compat_id}/{target}")
-
-    if require_release and acceptance is None:
-        fail("formal release requires an acceptance record")
+            fail(f"acceptance verification requires a committed acceptance record: {compat_id}/{target}")
 
     result: dict[str, Any] = {
         "schema": 1,
@@ -1027,28 +1019,21 @@ def accept_candidate(
     )
     manifest, _, _ = load_manifest(repository, manifest_path)
     if manifest.get("compat_id") != selector or manifest.get("build_target") != target:
-        fail("finalized manifest identity differs from the candidate")
+        fail("manifest identity differs from the candidate")
     artifact_contract = manifest.get("artifacts", {}).get(target)
     if not isinstance(artifact_contract, dict):
-        fail("finalized manifest has no target artifact")
+        fail("manifest has no target artifact")
     artifact = artifact_value.resolve(strict=True)
     actual_artifact = {
         "filename": artifact.name,
         "sha256": sha256_file(artifact),
         "size": artifact.stat().st_size,
     }
-    expected_artifact = {
-        "filename": require_string(artifact_contract.get("filename"), "finalized artifact filename"),
-        "sha256": require_string(
-            artifact_contract.get("sha256"), "finalized artifact sha256", pattern=LOWER_SHA256
-        ),
-        "size": require_int(artifact_contract.get("size"), "finalized artifact size", minimum=1),
-    }
-    if actual_artifact != expected_artifact or candidate.get("artifact") != expected_artifact:
-        fail(
-            "accepted artifact differs from the candidate record or finalized manifest; "
-            "finalize the manifest with the exact locally accepted artifact first"
-        )
+    expected_filename = require_string(artifact_contract.get("filename"), "artifact filename")
+    if actual_artifact["filename"] != expected_filename:
+        fail("accepted artifact filename differs from the manifest")
+    if candidate.get("artifact") != actual_artifact:
+        fail("accepted artifact differs from the candidate record")
 
     evidence = load_json(evidence_path.resolve(strict=True))
     if not evidence:
@@ -1072,9 +1057,9 @@ def accept_candidate(
         "status": "accepted",
         "compat_id": selector,
         "target": target,
-        "artifact_filename": expected_artifact["filename"],
-        "artifact_sha256": expected_artifact["sha256"],
-        "artifact_size": expected_artifact["size"],
+        "artifact_filename": actual_artifact["filename"],
+        "artifact_sha256": actual_artifact["sha256"],
+        "artifact_size": actual_artifact["size"],
         "manifest_sha256": sha256_file(manifest_path),
         "build_profile_sha256": profile_sha,
         "runtime_lock_sha256": runtime_sha,

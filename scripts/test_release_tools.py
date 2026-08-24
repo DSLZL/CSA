@@ -14,7 +14,6 @@ import subprocess
 import sys
 import tarfile
 import tempfile
-import time
 import tomllib
 from pathlib import Path
 from unittest.mock import patch
@@ -446,20 +445,20 @@ def test_contract_shape() -> None:
     assert result["exit_code"] == 0
 
     stdout = io.StringIO()
+    stderr = io.StringIO()
 
     def noisy_result(argv: list[str], **options: object) -> subprocess.CompletedProcess:
-        assert options["stdout"] == subprocess.PIPE
-        deadline = time.monotonic() + 1
-        while "test step running: quiet TUI" not in stdout.getvalue():
-            if time.monotonic() >= deadline:
-                raise AssertionError("quiet step heartbeat was not emitted")
-            time.sleep(0.001)
-        return subprocess.CompletedProcess(argv, 0, stdout=b"\x1b[2Jrendered TUI frame\n")
+        captured_stdout = options["stdout"]
+        assert captured_stdout != subprocess.PIPE
+        assert "stderr" not in options
+        captured_stdout.write(b"\x1b[2Jrendered TUI frame\n")
+        print("cargo progress remains live", file=sys.stderr)
+        return subprocess.CompletedProcess(argv, 0)
 
     with (
         patch("run_patch_contract.subprocess.run", side_effect=noisy_result),
-        patch("run_patch_contract.QUIET_STEP_HEARTBEAT_SECONDS", 0.01),
         redirect_stdout(stdout),
+        redirect_stderr(stderr),
     ):
         run_step(
             {"name": "quiet TUI", "argv": ["cargo", "test"], "output": "failure-only"},
@@ -470,14 +469,18 @@ def test_contract_shape() -> None:
             REPOSITORY / ".dev" / "unused-target",
         )
     quiet_output = stdout.getvalue()
-    assert "test step running: quiet TUI" in quiet_output
     assert "rendered TUI frame" not in quiet_output
+    assert "rendered TUI frame" not in stderr.getvalue()
+    assert "cargo progress remains live" in stderr.getvalue()
 
     def failed_noisy_result(
         argv: list[str], **options: object
     ) -> subprocess.CompletedProcess:
-        assert options["stdout"] == subprocess.PIPE
-        return subprocess.CompletedProcess(argv, 101, stdout=b"\x1b[2Jfailed TUI frame\n")
+        captured_stdout = options["stdout"]
+        assert captured_stdout != subprocess.PIPE
+        assert "stderr" not in options
+        captured_stdout.write(b"\x1b[2Jfailed TUI frame\n")
+        return subprocess.CompletedProcess(argv, 101)
 
     stderr = io.StringIO()
     try:
@@ -565,10 +568,13 @@ def test_release_stream_contracts() -> None:
     assert patched_workflow.count("Codex source must not live inside the CSA repository") == 1
     assert "default: current" in patched_workflow
     assert "scripts/compat_catalog.py resolve" in patched_workflow
-    assert "--require-acceptance" in patched_workflow
+    assert "--require-acceptance" not in patched_workflow
     assert "--require-release" in patched_workflow
     assert "accepted_codex_sha256:" not in patched_workflow
-    assert "Match committed manifest and local acceptance authority" in patched_workflow
+    assert "Finalize production manifest from the GitHub-built CLI" in patched_workflow
+    assert patched_workflow.count("compat_release.py finalize") == 1
+    assert 'cp -a payload "$staged_root/"' in patched_workflow
+    assert '--manifest "$STAGED_MANIFEST"' in patched_workflow
     assert 'sha256sum "$ARTIFACT_PATH"' in patched_workflow
 
     ci_workflow = (REPOSITORY / ".github" / "workflows" / "ci.yml").read_text(
@@ -586,8 +592,10 @@ def test_release_stream_contracts() -> None:
         for path in sorted((REPOSITORY / "release" / "runtime-locks").glob("*.json"))
     )
     assert patched_workflow.count("build_patched_codex_bundle.sh") == 1
+    assert "output.circle-artifacts.com" not in patched_workflow
+    assert "accepted_artifact_url" not in patched_workflow
     assert circleci.count("build_patched_codex_bundle.sh") == 1
-    assert "runs-on: ubuntu-24.04" in patched_workflow
+    assert patched_workflow.count("runs-on: ubuntu-24.04") == 2
     assert "runs-on: ubuntu-26.04" not in patched_workflow
     assert "timeout-minutes: 120" in patched_workflow
     assert "timeout 50m bash scripts/build_patched_codex_bundle.sh" not in patched_workflow
@@ -669,6 +677,9 @@ def test_release_stream_contracts() -> None:
     for acceptance_path in (REPOSITORY / "release" / "acceptance").rglob("*.json"):
         accepted_sha256 = json.loads(acceptance_path.read_text(encoding="utf-8"))["artifact_sha256"]
         assert accepted_sha256 not in shared_build
+    assert "EXPECTED_ARTIFACT_SHA256" not in shared_build
+    assert "ACCEPTED_ARTIFACT_SHA256" not in shared_build
+    assert "artifact SHA-256 differs from" not in shared_build
     for path in (
         "build-environment.txt",
         "contract-result.json",
@@ -687,7 +698,15 @@ def test_release_stream_contracts() -> None:
         assert path in runtime_locks
         assert path not in shared_build
         assert f'cp "$official_root/{path}"' not in shared_build
-    assert "actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7" in patched_workflow
+    assert patched_workflow.count(
+        "actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7"
+    ) == 6
+    assert patched_workflow.count(
+        "actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7"
+    ) == 6
+    assert patched_workflow.index("Save exact compiler cache") < patched_workflow.index(
+        "Finalize production manifest"
+    )
     assert "csa-sccache-v5-linux-X64-rustc-" in patched_workflow
     assert "SCCACHE_DIR" in patched_workflow
     assert "csa-sccache-v3-" not in patched_workflow
@@ -718,6 +737,11 @@ def test_release_stream_contracts() -> None:
         REPOSITORY / ".github" / "actions" / "setup-codex-rust-cache" / "action.yml"
     ).read_text(encoding="utf-8")
     assert "CARGO_BUILD_JOBS=$([Environment]::ProcessorCount)" in cache_action
+    assert "csa-sccache-local-v1-" in cache_action
+    assert "csa-cargo-home-v5-" in cache_action
+    assert "${{ github.sha }}" in cache_action
+    assert "SCCACHE_CACHE_SIZE=1G" in cache_action
+    assert "SCCACHE_GHA_ENABLED" not in cache_action
     assert "steps.cargo-home.outputs.day" not in cache_action
     assert "inputs.target" not in cache_action
     assert "inputs.profile" not in cache_action

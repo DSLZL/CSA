@@ -12,12 +12,12 @@
   "recorded_at": "2026-08-23",
   "accepted_by": null,
   "evidence": {
-    "kind": "reviewed-circleci-canonical-import",
+    "kind": "reviewed-development-build",
     "source_commit": "b6826649c3dc46ae99699fa92f8e4dcac6357700",
     "source_fields": [
-      "CircleCI canonical SHA256SUMS from repeated exact builds",
+      "CircleCI development SHA256SUMS from repeated exact builds",
       "local Windows absolute-path version execution"
     ],
-    "statement": "Repeated exact CircleCI builds produced the same executable identity, and the downloaded artifact executed locally as codex-cli 0.149.0. The formal hosted rebuild must reproduce this SHA-256 exactly."
+    "statement": "This CircleCI artifact executed locally as codex-cli 0.149.0 and records development evidence only. It does not constrain the independently built GitHub production artifact."
   }
 }

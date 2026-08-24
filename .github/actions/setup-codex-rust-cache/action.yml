@@ -1,5 +1,5 @@
 name: Setup Codex-style Rust cache
-description: Restore Cargo downloads and enable a pinned sccache compiler cache without restoring target artifacts.
+description: Restore Cargo downloads and a bounded local sccache archive without restoring target artifacts.
 
 inputs:
   cache-scope:
@@ -18,9 +18,12 @@ runs:
       shell: pwsh
       run: |
         $cargoHome = Join-Path $env:RUNNER_TEMP "csa-cargo-home"
-        New-Item -ItemType Directory -Force $cargoHome | Out-Null
+        $sccacheDir = Join-Path $env:RUNNER_TEMP "csa-sccache"
+        New-Item -ItemType Directory -Force $cargoHome, $sccacheDir | Out-Null
         "CARGO_HOME=$cargoHome" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+        "SCCACHE_DIR=$sccacheDir" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
         "path=$cargoHome" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
+        "sccache-path=$sccacheDir" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
 
     - name: Restore Cargo registry and git downloads
       uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
@@ -29,19 +32,28 @@ runs:
           ${{ steps.cargo-home.outputs.path }}/registry/index
           ${{ steps.cargo-home.outputs.path }}/registry/cache
           ${{ steps.cargo-home.outputs.path }}/git/db
-        key: csa-cargo-home-v4-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.cache-scope }}
+        key: csa-cargo-home-v5-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.cache-scope }}-${{ github.sha }}
         restore-keys: |
-          csa-cargo-home-v4-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-
+          csa-cargo-home-v5-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.cache-scope }}-
+          csa-cargo-home-v5-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-
+
+    - name: Restore updateable local compiler cache
+      uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+      with:
+        path: ${{ steps.cargo-home.outputs.sccache-path }}
+        key: csa-sccache-local-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.cache-scope }}-${{ github.sha }}
+        restore-keys: |
+          csa-sccache-local-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.cache-scope }}-
 
     - name: Install pinned sccache
       uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
       with:
         version: "v0.16.0"
 
-    - name: Enable GitHub Actions compiler cache
+    - name: Enable local compiler cache
       shell: pwsh
       run: |
         "CARGO_BUILD_JOBS=$([Environment]::ProcessorCount)" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
         "RUSTC_WRAPPER=sccache" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
-        "SCCACHE_GHA_ENABLED=true" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
+        "SCCACHE_CACHE_SIZE=1G" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
         "CARGO_INCREMENTAL=0" | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
