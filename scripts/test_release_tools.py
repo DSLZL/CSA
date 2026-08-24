@@ -533,7 +533,10 @@ def test_release_stream_contracts() -> None:
     assert "full_payload" not in ci_workflow
     assert "warm_cache_acceptance" not in ci_workflow
     assert "default: false" in circleci
+    assert circleci.count("image: ubuntu-2604:current") == 2
+    assert "image: ubuntu-2604:2026.05.1" not in circleci
     assert "resource_class: large.gen3" in circleci
+    assert "resource_class: large.gen2" not in circleci
     assert "no_output_timeout: 20m" in circleci
     assert "scripts/compat_catalog.py resolve" in circleci
     assert "csa-cargo-home-v6-linux-amd64-" in circleci

@@ -36,7 +36,7 @@ parameters:
 jobs:
   reject-invalid-request:
     machine:
-      image: ubuntu-2604:2026.05.1
+      image: ubuntu-2604:current
     resource_class: medium
     steps:
       - run:
@@ -71,7 +71,7 @@ jobs:
         type: boolean
         default: false
     machine:
-      image: ubuntu-2604:2026.05.1
+      image: ubuntu-2604:current
     resource_class: large.gen3
     retention:
       caches: 7d
