@@ -13,7 +13,7 @@
     ],
     "artifact": "{cargo_target}/x86_64-pc-windows-msvc/release/codex.exe",
     "env": {
-      "CARGO_BUILD_JOBS": "2",
+      "CARGO_BUILD_JOBS": "4",
       "CARGO_PROFILE_RELEASE_DEBUG": "0",
       "SOURCE_DATE_EPOCH": "1786063808"
     }

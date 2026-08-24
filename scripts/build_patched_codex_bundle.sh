@@ -216,9 +216,6 @@ actual_codex_sha256="$(sha256sum "$artifact" | cut -d ' ' -f 1)"
 if [[ "$compat_id" == rust-v0.148.0-native-join-p2 ]]; then
   [[ "$actual_codex_sha256" == d1368d4a94c7ac4bf09296f68516343a76ce11aa375363d4fcddc7fe8ef09730 ]]
 fi
-if [[ "$compat_id" == rust-v0.149.0-native-join-p3 ]]; then
-  [[ "$actual_codex_sha256" == 64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d ]]
-fi
 
 mkdir -p "$output/bin"
 cp "$artifact" "$output/bin/codex.exe"

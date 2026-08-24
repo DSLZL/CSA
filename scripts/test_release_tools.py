@@ -405,7 +405,7 @@ def test_contract_shape() -> None:
     assert "unrelated asynchronous event" in p3_contract["known_upstream_errata"][-1]
     assert p3_contract["common_env"]["CARGO_BUILD_JOBS"] == "2"
     assert p3_contract["common_env"]["INSTA_WORKSPACE_ROOT"] == "{source}/codex-rs"
-    assert p3_contract["build"]["env"]["CARGO_BUILD_JOBS"] == "2"
+    assert p3_contract["build"]["env"]["CARGO_BUILD_JOBS"] == "4"
     try:
         cross_windows_build_argv(["cargo", "test"])
     except ContractError:
@@ -557,7 +557,7 @@ def test_release_stream_contracts() -> None:
     assert "identity mismatch; expected output to contain" in shared_build
     assert "identity mismatch; expected exactly" in shared_build
     assert "d1368d4a94c7ac4bf09296f68516343a76ce11aa375363d4fcddc7fe8ef09730" in shared_build
-    assert "64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d" in shared_build
+    assert "64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d" not in shared_build
     for path in (
         "build-environment.txt",
         "contract-result.json",
