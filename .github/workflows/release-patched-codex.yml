@@ -15,7 +15,7 @@ on:
         type: string
 
 concurrency:
-  group: csa-patched-codex-release-${{ inputs.compat_selector }}-${{ inputs.target }}
+  group: csa-patched-codex-release-${{ inputs.target }}
   cancel-in-progress: false
 
 permissions:
@@ -32,6 +32,9 @@ jobs:
     name: Build production patched Codex CLI
     runs-on: ubuntu-24.04
     timeout-minutes: 120
+    permissions:
+      actions: write
+      contents: read
     outputs:
       compat_id: ${{ steps.resolve.outputs.compat_id }}
       release_tag: ${{ steps.resolve.outputs.release_tag }}
@@ -61,6 +64,8 @@ jobs:
             echo "HOME=$root/home"
             echo "CODEX_HOME=$root/codex-home"
             echo "RESOLUTION_JSON=$root/resolution.json"
+            echo "BUNDLE_ROOT=$root/bundle"
+            echo "SCCACHE_STATS=$root/sccache-stats.json"
             echo "ARTIFACT_PATH=$root/bundle/bin/codex.exe"
           } >> "$GITHUB_ENV"
           mkdir -p "$root/home" "$root/codex-home" "$root/tmp"
@@ -97,21 +102,20 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
           python scripts/compat_catalog.py validate --repository .
 
-      - name: Restore Cargo downloads
+      - name: Restore rolling Cargo downloads
         id: cargo-cache
+        continue-on-error: true
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: |
             ${{ env.CARGO_HOME }}/registry/index
             ${{ env.CARGO_HOME }}/registry/cache
             ${{ env.CARGO_HOME }}/git/db
-          key: csa-cargo-home-v6-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}-${{ steps.resolve.outputs.upstream_commit }}
-          restore-keys: |
-            csa-cargo-home-v6-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}-
-            csa-cargo-home-v5-linux-X64-1.95.0-codex-
+          key: csa-patched-codex-cargo-v8-linux-X64
 
       - name: Restore exact Rust toolchain
         id: rustup-cache
+        continue-on-error: true
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.RUSTUP_HOME }}
@@ -120,6 +124,7 @@ jobs:
 
       - name: Restore exact xwin SDK
         id: xwin-cache
+        continue-on-error: true
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.XWIN_CACHE_DIR }}
@@ -128,6 +133,7 @@ jobs:
 
       - name: Restore exact build tools
         id: tools-cache
+        continue-on-error: true
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.CSA_TOOL_CACHE }}
@@ -135,20 +141,19 @@ jobs:
 
       - name: Restore official runtime archive
         id: runtime-cache
+        continue-on-error: true
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.CSA_RUNTIME_CACHE }}
           key: csa-official-runtime-v1-${{ steps.resolve.outputs.runtime_lock_sha256 }}
 
-      - name: Restore exact compiler cache
+      - name: Restore rolling compiler cache
         id: compiler-cache
+        continue-on-error: true
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.SCCACHE_DIR }}
-          key: csa-sccache-v6-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}-${{ steps.resolve.outputs.manifest_sha256 }}-${{ steps.resolve.outputs.upstream_commit }}
-          restore-keys: |
-            csa-sccache-v6-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}-
-            csa-sccache-v5-linux-X64-rustc-${{ steps.resolve.outputs.rustc_commit }}-xwin-${{ steps.resolve.outputs.cargo_xwin_version }}-msvc${{ steps.resolve.outputs.xwin_version }}-llvm${{ steps.resolve.outputs.llvm_version }}-${{ steps.resolve.outputs.build_target }}-
+          key: csa-patched-codex-sccache-v8-linux-X64
 
       - name: Clone exact reviewed upstream source
         shell: bash
@@ -191,61 +196,165 @@ jobs:
           test "$(git -C "$SOURCE_ROOT" rev-parse 'refs/tags/${{ steps.resolve.outputs.upstream_tag }}^{commit}')" = '${{ steps.resolve.outputs.upstream_commit }}'
           test "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = '${{ steps.resolve.outputs.upstream_commit }}'
 
-      - name: Build canonical patched Codex CLI bundle
+      - name: Prepare pinned build tools
         shell: bash
         run: |
           set -euo pipefail
-          bash scripts/build_patched_codex_bundle.sh \
+          bash scripts/build_patched_codex_bundle.sh tools \
             "$RESOLUTION_JSON" \
             "$SOURCE_ROOT" \
             "$CARGO_TARGET_DIR" \
-            "$PATCHED_CODEX_ROOT/bundle" \
-            "$PATCHED_CODEX_ROOT/sccache-stats.json"
+            "$BUNDLE_ROOT" \
+            "$SCCACHE_STATS"
 
-      - name: Save Cargo downloads
-        if: steps.cargo-cache.outputs.cache-hit != 'true'
+      - name: Save exact build tools
+        if: steps.tools-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.CSA_TOOL_CACHE }}
+          key: csa-build-tools-v1-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}
+
+      - name: Prepare exact Rust toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build_patched_codex_bundle.sh rust \
+            "$RESOLUTION_JSON" \
+            "$SOURCE_ROOT" \
+            "$CARGO_TARGET_DIR" \
+            "$BUNDLE_ROOT" \
+            "$SCCACHE_STATS"
+
+      - name: Save exact Rust toolchain
+        if: steps.rustup-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.RUSTUP_HOME }}
+          key: csa-rustup-v3-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}
+
+      - name: Prepare exact xwin SDK and LLVM toolchain
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build_patched_codex_bundle.sh xwin \
+            "$RESOLUTION_JSON" \
+            "$SOURCE_ROOT" \
+            "$CARGO_TARGET_DIR" \
+            "$BUNDLE_ROOT" \
+            "$SCCACHE_STATS"
+
+      - name: Save exact xwin SDK
+        if: steps.xwin-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.XWIN_CACHE_DIR }}
+          key: csa-xwin-v3-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}
+
+      - name: Prepare official runtime archive
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build_patched_codex_bundle.sh runtime \
+            "$RESOLUTION_JSON" \
+            "$SOURCE_ROOT" \
+            "$CARGO_TARGET_DIR" \
+            "$BUNDLE_ROOT" \
+            "$SCCACHE_STATS"
+
+      - name: Save official runtime archive
+        if: steps.runtime-cache.outputs.cache-hit != 'true'
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.CSA_RUNTIME_CACHE }}
+          key: csa-official-runtime-v1-${{ steps.resolve.outputs.runtime_lock_sha256 }}
+
+      - name: Run patch generation and contract tests
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build_patched_codex_bundle.sh tests \
+            "$RESOLUTION_JSON" \
+            "$SOURCE_ROOT" \
+            "$CARGO_TARGET_DIR" \
+            "$BUNDLE_ROOT" \
+            "$SCCACHE_STATS"
+
+      - name: Replace rolling caches after tests
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for key in \
+            csa-patched-codex-cargo-v8-linux-X64 \
+            csa-patched-codex-sccache-v8-linux-X64; do
+            gh cache delete "$key" \
+              --repo "$GITHUB_REPOSITORY" \
+              --ref "$GITHUB_REF" || true
+          done
+
+      - name: Save test Cargo downloads
+        continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: |
             ${{ env.CARGO_HOME }}/registry/index
             ${{ env.CARGO_HOME }}/registry/cache
             ${{ env.CARGO_HOME }}/git/db
-          key: csa-cargo-home-v6-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}-${{ steps.resolve.outputs.upstream_commit }}
+          key: csa-patched-codex-cargo-v8-linux-X64
 
-      - name: Save exact Rust toolchain
-        if: steps.rustup-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.RUSTUP_HOME }}
-          key: csa-rustup-v3-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}
-
-      - name: Save exact xwin SDK
-        if: steps.xwin-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.XWIN_CACHE_DIR }}
-          key: csa-xwin-v3-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}
-
-      - name: Save exact build tools
-        if: steps.tools-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.CSA_TOOL_CACHE }}
-          key: csa-build-tools-v1-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}
-
-      - name: Save official runtime archive
-        if: steps.runtime-cache.outputs.cache-hit != 'true'
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.CSA_RUNTIME_CACHE }}
-          key: csa-official-runtime-v1-${{ steps.resolve.outputs.runtime_lock_sha256 }}
-
-      - name: Save exact compiler cache
-        if: steps.compiler-cache.outputs.cache-hit != 'true'
+      - name: Save test compiler cache
+        continue-on-error: true
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.SCCACHE_DIR }}
-          key: csa-sccache-v6-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}-${{ steps.resolve.outputs.manifest_sha256 }}-${{ steps.resolve.outputs.upstream_commit }}
+          key: csa-patched-codex-sccache-v8-linux-X64
+
+      - name: Build canonical patched Codex CLI bundle
+        shell: bash
+        run: |
+          set -euo pipefail
+          bash scripts/build_patched_codex_bundle.sh build \
+            "$RESOLUTION_JSON" \
+            "$SOURCE_ROOT" \
+            "$CARGO_TARGET_DIR" \
+            "$BUNDLE_ROOT" \
+            "$SCCACHE_STATS"
+
+      - name: Replace rolling caches after build
+        continue-on-error: true
+        shell: bash
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          for key in \
+            csa-patched-codex-cargo-v8-linux-X64 \
+            csa-patched-codex-sccache-v8-linux-X64; do
+            gh cache delete "$key" \
+              --repo "$GITHUB_REPOSITORY" \
+              --ref "$GITHUB_REF" || true
+          done
+
+      - name: Save final Cargo downloads
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: |
+            ${{ env.CARGO_HOME }}/registry/index
+            ${{ env.CARGO_HOME }}/registry/cache
+            ${{ env.CARGO_HOME }}/git/db
+          key: csa-patched-codex-cargo-v8-linux-X64
+
+      - name: Save final compiler cache
+        continue-on-error: true
+        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+        with:
+          path: ${{ env.SCCACHE_DIR }}
+          key: csa-patched-codex-sccache-v8-linux-X64
 
       - id: finalize
         name: Finalize production manifest from the GitHub-built CLI
@@ -309,7 +418,7 @@ jobs:
           name: patched-codex-cli-bundle-${{ steps.resolve.outputs.compat_id }}
           path: |
             ${{ runner.temp }}/csa-patched-codex/bundle
-            ${{ runner.temp }}/csa-patched-codex/sccache-stats.json
+            ${{ runner.temp }}/csa-patched-codex/sccache-stats*.json
             ${{ runner.temp }}/csa-patched-codex/resolution.json
           if-no-files-found: error
           compression-level: 0

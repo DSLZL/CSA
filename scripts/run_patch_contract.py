@@ -151,6 +151,52 @@ def digest(path: Path) -> str:
     return hasher.hexdigest()
 
 
+def write_report(output: Path, report: dict[str, Any]) -> None:
+    with output.open("xb") as destination:
+        destination.write((json.dumps(report, indent=2, sort_keys=True) + "\n").encode())
+
+
+def load_test_report(
+    path: Path,
+    compat_id: str,
+    known_upstream_errata: object,
+    expected_steps: list[tuple[str, str]],
+) -> dict[str, Any]:
+    try:
+        report = json.loads(path.read_bytes())
+    except (OSError, json.JSONDecodeError) as error:
+        raise ContractError(f"cannot read test phase report: {error}") from error
+    expected = {
+        "schema",
+        "result",
+        "phase",
+        "compat_id",
+        "source_verification",
+        "steps",
+        "known_upstream_errata",
+    }
+    if (
+        not isinstance(report, dict)
+        or set(report) != expected
+        or report.get("schema") != 1
+        or report.get("result") != "pass"
+        or report.get("phase") != "tests"
+        or report.get("compat_id") != compat_id
+        or not isinstance(report.get("source_verification"), dict)
+        or not isinstance(report.get("steps"), list)
+        or report.get("known_upstream_errata") != known_upstream_errata
+    ):
+        raise ContractError("test phase report does not match the selected contract")
+    actual_steps = [
+        (step.get("kind"), step.get("name"))
+        for step in report["steps"]
+        if isinstance(step, dict) and step.get("exit_code") == 0
+    ]
+    if actual_steps != expected_steps or len(actual_steps) != len(report["steps"]):
+        raise ContractError("test phase report contains an incomplete step")
+    return report
+
+
 def execute_version(executable: Path, expected: str) -> dict[str, Any]:
     result = subprocess.run(
         [str(executable), "--version"],
@@ -179,6 +225,8 @@ def run_contract(
     output: Path,
     cross_windows_msvc: bool = False,
     portable_evidence: bool = False,
+    phase: str = "all",
+    resume: Path | None = None,
 ) -> dict[str, Any]:
     for path, label in (
         (manifest_path, "manifest"),
@@ -188,13 +236,24 @@ def run_contract(
     ):
         if not path.is_absolute():
             raise ContractError(f"{label} path must be absolute")
+    if phase not in {"all", "tests", "build"}:
+        raise ContractError(f"unsupported contract phase: {phase}")
+    if resume is not None and not resume.is_absolute():
+        raise ContractError("resume path must be absolute")
+    if phase == "build" and resume is None:
+        raise ContractError("build phase requires a test phase report")
+    if phase != "build" and resume is not None:
+        raise ContractError("resume is valid only for the build phase")
     manifest_path = manifest_path.resolve(strict=True)
     source = source.resolve(strict=True)
     if output.exists() or not output.parent.is_dir():
         raise ContractError("output must be a new file under an existing directory")
-    if cargo_target.exists():
+    if phase in {"all", "tests"} and cargo_target.exists():
         raise ContractError("cargo target must not already exist")
-    cargo_target.parent.mkdir(parents=True, exist_ok=True)
+    if phase == "build" and not cargo_target.is_dir():
+        raise ContractError("build phase requires the existing test cargo target")
+    if phase != "build":
+        cargo_target.parent.mkdir(parents=True, exist_ok=True)
     payload = _load_payload(manifest_path)
     manifest = payload.manifest
     if cross_windows_msvc:
@@ -207,21 +266,56 @@ def run_contract(
     cwd = (source / "codex-rs").resolve(strict=True)
     if Path(expected_cwd).resolve(strict=True) != cwd:
         raise ContractError("contract cwd must be the candidate codex-rs directory")
-
-    verification = verify(manifest_path, source, True, None)
-    if portable_evidence:
-        verification.update(
-            {
-                "manifest": "manifest.toml",
-                "source": "{source}",
-                "patches": [patch["path"] for patch in manifest["patches"]],
-            }
+    expected_test_steps = [
+        (kind, step.get("name"))
+        for kind, contract_steps in (
+            ("generation", contract["generation"]),
+            ("test", contract["tests"]),
         )
-    steps = []
-    for step in contract["generation"]:
-        steps.append(run_step(step, "generation", cwd, contract["common_env"], source, cargo_target))
-    for step in contract["tests"]:
-        steps.append(run_step(step, "test", cwd, contract["common_env"], source, cargo_target))
+        for step in contract_steps
+        if isinstance(step, dict) and isinstance(step.get("name"), str)
+    ]
+    if len(expected_test_steps) != len(contract["generation"]) + len(contract["tests"]):
+        raise ContractError("test contract contains an unnamed step")
+
+    if phase == "build":
+        test_report = load_test_report(
+            resume.resolve(strict=True),
+            manifest["compat_id"],
+            contract["known_upstream_errata"],
+            expected_test_steps,
+        )
+        verification = test_report["source_verification"]
+        steps = test_report["steps"]
+    else:
+        verification = verify(manifest_path, source, True, None)
+        if portable_evidence:
+            verification.update(
+                {
+                    "manifest": "manifest.toml",
+                    "source": "{source}",
+                    "patches": [patch["path"] for patch in manifest["patches"]],
+                }
+            )
+        steps = []
+        for step in contract["generation"]:
+            steps.append(
+                run_step(step, "generation", cwd, contract["common_env"], source, cargo_target)
+            )
+        for step in contract["tests"]:
+            steps.append(run_step(step, "test", cwd, contract["common_env"], source, cargo_target))
+        if phase == "tests":
+            report = {
+                "schema": 1,
+                "result": "pass",
+                "phase": "tests",
+                "compat_id": manifest["compat_id"],
+                "source_verification": verification,
+                "steps": steps,
+                "known_upstream_errata": contract["known_upstream_errata"],
+            }
+            write_report(output, report)
+            return report
     build = contract["build"]
     if not isinstance(build, dict) or set(build) != {"env", "argv", "artifact"}:
         raise ContractError("invalid build contract")
@@ -263,8 +357,7 @@ def run_contract(
         },
         "known_upstream_errata": contract["known_upstream_errata"],
     }
-    with output.open("xb") as destination:
-        destination.write((json.dumps(report, indent=2, sort_keys=True) + "\n").encode())
+    write_report(output, report)
     return report
 
 
@@ -276,6 +369,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cross-windows-msvc", action="store_true")
     parser.add_argument("--portable-evidence", action="store_true")
+    parser.add_argument("--phase", choices=("all", "tests", "build"), default="all")
+    parser.add_argument("--resume", type=Path)
     return parser.parse_args()
 
 
@@ -289,6 +384,8 @@ def main() -> int:
             args.output,
             args.cross_windows_msvc,
             args.portable_evidence,
+            args.phase,
+            args.resume,
         )
     except (ContractError, OSError, VerificationError) as error:
         print(json.dumps({"schema": 1, "error": str(error)}, indent=2), file=sys.stderr)

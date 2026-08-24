@@ -26,7 +26,8 @@ sys.path.insert(0, str(SCRIPTS))
 from assemble_release_candidate import ReleaseError, assemble, digest, load_matrix  # noqa: E402
 from ci_release import build_input, platform_artifact  # noqa: E402
 from compatibility_audit import AuditError, check_immutability  # noqa: E402
-from check_sccache_stats import StatsError, validate as validate_sccache_stats  # noqa: E402
+from check_sccache_stats import main as sccache_stats_main  # noqa: E402
+from check_sccache_stats import summarize as summarize_sccache_stats  # noqa: E402
 from compat_release import (  # noqa: E402
     CompatibilityReleaseError,
     blocker_body,
@@ -44,6 +45,7 @@ from run_patch_contract import (  # noqa: E402
     cross_windows_build_env,
     execute_version,
     load_contract,
+    load_test_report,
     run_step,
 )
 from verify_patch_payload import VerificationError, _load_payload, _payload_file  # noqa: E402
@@ -426,6 +428,37 @@ def test_contract_shape() -> None:
     assert cross_windows_build_env(p3_contract["build"]["env"])["RUSTFLAGS"] == (
         "-C link-arg=/debug:none -C link-arg=/build-id:no"
     )
+    report = {
+        "schema": 1,
+        "result": "pass",
+        "phase": "tests",
+        "compat_id": p3.name,
+        "source_verification": {},
+        "steps": [{"kind": "test", "name": "fixture", "exit_code": 0}],
+        "known_upstream_errata": p3_contract["known_upstream_errata"],
+    }
+    with tempfile.TemporaryDirectory(prefix="csa-test-phase-") as directory:
+        report_path = Path(directory) / "tests.json"
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        assert load_test_report(
+            report_path,
+            p3.name,
+            p3_contract["known_upstream_errata"],
+            [("test", "fixture")],
+        )["result"] == "pass"
+        report["steps"][0]["exit_code"] = 1
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        try:
+            load_test_report(
+                report_path,
+                p3.name,
+                p3_contract["known_upstream_errata"],
+                [("test", "fixture")],
+            )
+        except ContractError:
+            pass
+        else:
+            raise AssertionError("failed test phase report was accepted")
     with patch(
         "run_patch_contract.subprocess.run",
         side_effect=[
@@ -535,20 +568,27 @@ def test_sccache_statistics() -> None:
             "cache_write_errors": 0,
         }
     }
-    assert validate_sccache_stats(document, 95)["rust_hit_rate"] == 97.0
-    for changed, message in (
-        ({"compile_requests": 0}, "zero requests"),
-        ({"cache_hits": metric(90), "cache_misses": metric(10)}, "low warm hit rate"),
-        ({"cache_write_errors": 1}, "cache write error"),
+    summary = summarize_sccache_stats(document, 95)
+    assert summary["rust_hit_rate"] == 97.0 and summary["warnings"] == []
+    for changed in (
+        {"compile_requests": 0},
+        {"cache_hits": metric(90), "cache_misses": metric(10)},
+        {"cache_write_errors": 1},
     ):
         candidate = json.loads(json.dumps(document))
         candidate["stats"].update(changed)
-        try:
-            validate_sccache_stats(candidate, 95)
-        except StatsError:
-            pass
-        else:
-            raise AssertionError(f"sccache accepted {message}")
+        assert summarize_sccache_stats(candidate, 95)["warnings"]
+
+    with tempfile.TemporaryDirectory(prefix="csa-sccache-stats-") as directory:
+        malformed = Path(directory) / "stats.json"
+        malformed.write_text("not json", encoding="utf-8")
+        stdout = io.StringIO()
+        with (
+            patch.object(sys, "argv", ["check_sccache_stats.py", "--stats", str(malformed)]),
+            redirect_stdout(stdout),
+        ):
+            assert sccache_stats_main() == 0
+        assert json.loads(stdout.getvalue())["result"] == "unavailable"
 
 
 def test_release_stream_contracts() -> None:
@@ -591,7 +631,9 @@ def test_release_stream_contracts() -> None:
         path.read_text(encoding="utf-8")
         for path in sorted((REPOSITORY / "release" / "runtime-locks").glob("*.json"))
     )
-    assert patched_workflow.count("build_patched_codex_bundle.sh") == 1
+    assert patched_workflow.count("build_patched_codex_bundle.sh") == 6
+    for phase in ("tools", "rust", "xwin", "runtime", "tests", "build"):
+        assert f"build_patched_codex_bundle.sh {phase}" in patched_workflow
     assert "output.circle-artifacts.com" not in patched_workflow
     assert "accepted_artifact_url" not in patched_workflow
     assert circleci.count("build_patched_codex_bundle.sh") == 1
@@ -664,6 +706,10 @@ def test_release_stream_contracts() -> None:
     assert "--portable-evidence" in shared_build
     assert "--stats-format json" in shared_build
     assert "CSA_MINIMUM_RUST_HIT_RATE" in shared_build
+    assert "SCCACHE_IDLE_TIMEOUT=0" in shared_build
+    assert 'check_sccache_stats.py" "${stats_args[@]}" || true' in shared_build
+    assert 'report_sccache "$test_stats_output" || true' in shared_build
+    assert 'report_sccache "$stats_output" || true' in shared_build
     assert "| grep -Fq" not in shared_build
     assert 'require_identity_contains rustc "commit-hash: $RUSTC_COMMIT"' in shared_build
     assert '"$(cargo-xwin --version)"' in shared_build
@@ -703,12 +749,39 @@ def test_release_stream_contracts() -> None:
     ) == 6
     assert patched_workflow.count(
         "actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7"
-    ) == 6
-    assert patched_workflow.index("Save exact compiler cache") < patched_workflow.index(
-        "Finalize production manifest"
+    ) == 8
+    assert patched_workflow.count("gh cache delete") == 2
+    assert patched_workflow.count("continue-on-error: true") == 16
+    assert "actions: write" in patched_workflow
+    assert "group: csa-patched-codex-release-${{ inputs.target }}" in patched_workflow
+    assert "github.run_id" not in patched_workflow
+    for key in (
+        "csa-patched-codex-cargo-v8-linux-X64",
+        "csa-patched-codex-sccache-v8-linux-X64",
+    ):
+        assert patched_workflow.count(key) == 5
+        assert f"{key}-" not in patched_workflow
+    assert "sccache-stats*.json" in patched_workflow
+    ordered_steps = (
+        "Prepare pinned build tools",
+        "Save exact build tools",
+        "Prepare exact Rust toolchain",
+        "Save exact Rust toolchain",
+        "Prepare exact xwin SDK and LLVM toolchain",
+        "Save exact xwin SDK",
+        "Prepare official runtime archive",
+        "Save official runtime archive",
+        "Run patch generation and contract tests",
+        "Save test compiler cache",
+        "Build canonical patched Codex CLI bundle",
+        "Save final compiler cache",
+        "Finalize production manifest",
     )
-    assert "csa-sccache-v5-linux-X64-rustc-" in patched_workflow
+    assert list(map(patched_workflow.index, ordered_steps)) == sorted(
+        map(patched_workflow.index, ordered_steps)
+    )
     assert "SCCACHE_DIR" in patched_workflow
+    assert "csa-sccache-v5-linux-X64-rustc-" not in patched_workflow
     assert "csa-sccache-v3-" not in patched_workflow
     for workflow in (ci_workflow, watcher):
         assert "csa-sccache-v5-linux-X64-rustc-" not in workflow
