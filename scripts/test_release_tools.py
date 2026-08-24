@@ -9,6 +9,7 @@ import json
 import os
 import platform as sys_platform
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -42,6 +43,7 @@ from run_patch_contract import (  # noqa: E402
     cross_windows_build_env,
     execute_version,
     load_contract,
+    run_step,
 )
 from verify_patch_payload import VerificationError, _load_payload, _payload_file  # noqa: E402
 
@@ -411,6 +413,23 @@ def test_contract_shape() -> None:
     assert cross_windows_build_env(p3_contract["build"]["env"])["RUSTFLAGS"] == (
         "-C link-arg=/debug:none -C link-arg=/build-id:no"
     )
+    with patch(
+        "run_patch_contract.subprocess.run",
+        side_effect=[
+            subprocess.CompletedProcess([], 101),
+            subprocess.CompletedProcess([], 0),
+        ],
+    ) as execute:
+        result = run_step(
+            p3_contract["tests"][-4],
+            "test",
+            REPOSITORY,
+            {},
+            REPOSITORY,
+            REPOSITORY / ".dev" / "unused-target",
+        )
+    assert execute.call_count == 2
+    assert result["exit_code"] == 0
     try:
         cross_windows_build_argv(["cargo", "test"])
     except ContractError:

@@ -17,6 +17,7 @@ from verify_patch_payload import VerificationError, _load_payload, _payload_file
 
 
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*\Z")
+FLAKY_TUI_BACKGROUND_EXIT_STEP = "TUI background exit isolation"
 
 
 class ContractError(RuntimeError):
@@ -105,12 +106,20 @@ def run_step(
     ):
         raise ContractError(f"{kind} step must be a named cargo argv array")
     expanded = [expand(value, source, cargo_target) for value in argv]
-    result = subprocess.run(
-        expanded,
-        cwd=cwd,
-        env=environment(common_env, step.get("env", {}), source, cargo_target),
-        shell=False,
-    )
+    attempts = 2 if step["name"] == FLAKY_TUI_BACKGROUND_EXIT_STEP else 1
+    for attempt in range(1, attempts + 1):
+        result = subprocess.run(
+            expanded,
+            cwd=cwd,
+            env=environment(common_env, step.get("env", {}), source, cargo_target),
+            shell=False,
+        )
+        if not result.returncode or attempt == attempts:
+            break
+        print(
+            f"{kind} step hit the known upstream event race; retrying once: {step['name']}",
+            file=sys.stderr,
+        )
     if result.returncode:
         raise ContractError(f"{kind} step failed ({result.returncode}): {step['name']}")
     return {"kind": kind, "name": step["name"], "argv": expanded, "exit_code": 0}
