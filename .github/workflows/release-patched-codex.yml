@@ -493,6 +493,16 @@ jobs:
           root="$RUNNER_TEMP/patched-codex-release-assets"
           notes="$RUNNER_TEMP/release-notes.md"
           remote="$RUNNER_TEMP/release.json"
+          load_release() {
+            local release_id
+            if ! release_id="$(gh release view "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json databaseId \
+              --jq .databaseId 2>/dev/null)"; then
+              return 1
+            fi
+            gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" > "$remote"
+          }
           cat > "$notes" <<EOF
           Patched Codex CLI ${CODEX_VERSION}
 
@@ -506,7 +516,7 @@ jobs:
           The remaining assets are the fail-closed compatibility payload, provenance descriptor, and checksums required by CSA Manager.
           EOF
 
-          if gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$remote" 2>/dev/null; then
+          if load_release; then
             existing_draft="$(python -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["draft"]).lower())' "$remote")"
             existing_prerelease="$(python -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["prerelease"]).lower())' "$remote")"
             [[ "$existing_prerelease" == false ]] || { echo "Existing release is a prerelease." >&2; exit 2; }
@@ -542,7 +552,7 @@ jobs:
           for asset in "${assets[@]}"; do
             expected["$(basename "$asset")"]=1
           done
-          gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$remote"
+          load_release
           mapfile -t remote_names < <(python - "$remote" <<'PY'
           import json
           import sys
@@ -567,7 +577,7 @@ jobs:
 
           verified=false
           for attempt in {1..12}; do
-            gh api "repos/$GITHUB_REPOSITORY/releases/tags/$TAG" > "$remote"
+            load_release
             if python scripts/verify_release_asset_set.py remote \
               --root "$root" \
               --expected-executable "$EXPECTED_EXECUTABLE" \

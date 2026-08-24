@@ -616,6 +616,10 @@ def test_release_stream_contracts() -> None:
     assert 'cp -a payload "$staged_root/"' in patched_workflow
     assert '--manifest "$STAGED_MANIFEST"' in patched_workflow
     assert 'sha256sum "$ARTIFACT_PATH"' in patched_workflow
+    assert 'gh release view "$TAG"' in patched_workflow
+    assert '--json databaseId' in patched_workflow
+    assert 'releases/$release_id' in patched_workflow
+    assert 'releases/tags/$TAG' not in patched_workflow
 
     ci_workflow = (REPOSITORY / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
