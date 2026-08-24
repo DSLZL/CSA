@@ -863,6 +863,23 @@ def test_compatibility_release_tools(root: Path) -> None:
     }
     assert detect(REPOSITORY.resolve(), fake)["action"] == "released"
 
+    class MatchingApi(FakeApi):
+        def get(self, path: str, *, optional: bool = False):
+            if path.endswith("/releases/latest"):
+                return {"tag_name": "rust-v0.149.0", "draft": False, "prerelease": False}
+            return super().get(path, optional=optional)
+
+        def peel_tag(self, repository: str, tag: str) -> str:
+            if repository == "openai/codex":
+                assert tag == "rust-v0.149.0"
+                return "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0"
+            return super().peel_tag(repository, tag)
+
+    matching = MatchingApi()
+    current = detect(REPOSITORY.resolve(), matching)
+    assert current["compat_id"] == "rust-v0.149.0-native-join-p3"
+    assert current["action"] == "publish"
+
 
 def main() -> int:
     with tempfile.TemporaryDirectory(prefix="csa-release-tools-") as directory:

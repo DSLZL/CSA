@@ -11,10 +11,10 @@ The current local compatibility candidate is:
 | upstream commit | `758ef40f50c1a458425c7cfbf1eb12cbc07af0b0` |
 | Rust toolchain | `1.95.0` |
 | target | `x86_64-pc-windows-msvc` |
-| patch-set version/count | `4` / `12` |
+| patch-set version/count | `6` / `14` |
 | patched artifact size | `299,645,952` bytes |
 | patched artifact SHA-256 | `64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d` |
-| repository manifest SHA-256 | `42d9692f042bed157bdd7a439d8a2117e4dc82fe2a3a9b603f8626c4f720c92e` |
+| repository manifest SHA-256 | `b964d5b08aeb3049c4a52f3efc9eae52ce14a6a029250c14e1d1b7599192cde4` |
 
 Do not retarget this payload in place. A new Codex tag or changed preimage requires a new compatibility ID, updated expected hashes, a new ordered patch set, and the full gate matrix.
 
@@ -39,7 +39,7 @@ python scripts/run_patch_contract.py --manifest <absolute-manifest> --source <ab
 python scripts/verify_patch_payload.py --manifest <absolute-manifest> --source <absolute-clean-source> [--artifact <absolute-binary>]
 ```
 
-The repository manifest binds the locally accepted executable exactly. A formal hosted run must rebuild from a reviewed clean default-branch commit and reproduce that size/SHA-256 before packing or publication. The canonical production bundle contains only four CSA-owned files: `build-environment.txt`, `contract-result.json`, `SHA256SUMS`, and `bin/codex.exe`. The official package is an exact validation input; its metadata, code-mode host, command runner, sandbox setup helper, and bundled `rg` never enter CSA output.
+The repository manifest binds the locally accepted native Windows executable exactly. CircleCI records its cross-compiled executable as portable evidence with `release_eligible=false`; it is not required to match that native artifact byte-for-byte. After the CircleCI executable passes local Windows acceptance, the formal workflow must rebuild the same cross-compiled SHA-256 and finalizes only its disposable manifest copy before packing. The canonical production bundle contains only four CSA-owned files: `build-environment.txt`, `contract-result.json`, `SHA256SUMS`, and `bin/codex.exe`. The official package is an exact validation input; its metadata, code-mode host, command runner, sandbox setup helper, and bundled `rg` never enter CSA output.
 
 ## Hourly upstream watcher
 
@@ -50,14 +50,14 @@ The state machine is:
 ```text
 formal compat Release exists -> no-op
 open upstream-patch-blocked Issue -> update that same Issue to the newest target; run no patch
-reviewed compatibility entry is on the default branch -> rebuild and publish formal compat Release
+reviewed compatibility entry is on the default branch -> emit the manual Release inputs
 open automation candidate PR exists -> no-op
-otherwise -> port/test/build on windows-2025 and open one review candidate PR
+otherwise -> port and open one review candidate PR
 ```
 
-The workflow reuses `scripts/compat_release.py`, `run_patch_contract.py`, and `verify_patch_payload.py`. Both build paths clone only the detected tag into `RUNNER_TEMP` and reject any source path inside `GITHUB_WORKSPACE`; upstream Codex source is never copied into the CSA repository. It never performs a fuzzy or three-way repair. A failed patch hunk, generation step, test, build, artifact binding, or candidate step creates or updates the single open Issue labeled `upstream-patch-blocked`, including the latest upstream tag/commit, failed stage, run URL, captured failure, and reproduction direction. While that Issue remains open, later upstream versions do not start another automatic patch. The human repair PR must target the then-current latest stable release and contain `Fixes #<blocker>`.
+The workflow reuses `scripts/compat_release.py` for exact detection and porting. It clones only the detected tag into `RUNNER_TEMP` and rejects any source path inside `GITHUB_WORKSPACE`; upstream Codex source is never copied into the CSA repository. It never performs a fuzzy or three-way repair. A failed clone, patch preflight, or candidate-PR step creates or updates the single open Issue labeled `upstream-patch-blocked`, including the latest upstream tag/commit, failed stage, run URL, captured failure, and reproduction direction. While that Issue remains open, later upstream versions do not start another automatic patch. The human repair PR must target the then-current latest stable release and contain `Fixes #<blocker>`.
 
-Passing automation creates a PR and review artifact only. No formal compatibility Release is published from the candidate branch. After review and merge, a later hourly run rebuilds the exact default-branch entry and may publish it.
+Passing automation creates a PR and review artifact only. No formal compatibility Release is published from the candidate branch or watcher. After review and merge, a later hourly run prints the separately authorized CircleCI, local Windows acceptance, and formal workflow inputs.
 
 The helper commands used by the workflow are also runnable manually:
 
@@ -94,7 +94,7 @@ Each platform package must contain only its manifest, manager binary, README, li
 
 ## CI and candidate assembly
 
-The ordinary `.github/workflows/ci.yml` has read-only repository permissions, SHA-pinned actions, Node 22/24/26 checks, and five native manager/npm lanes. The separate upstream watcher grants write permissions only to the candidate PR, blocker Issue, and merged-default-branch compatibility publication jobs that need them. Hosted results must be downloaded and inspected before a manager/npm release; a configured matrix is not evidence that a lane passed.
+The ordinary `.github/workflows/ci.yml` has read-only repository permissions, SHA-pinned actions, Node 22/24/26 checks, and five native manager/npm lanes. The separate upstream watcher grants write permissions only to the candidate-PR and blocker-Issue jobs that need them. Hosted results must be downloaded and inspected before a manager/npm release; a configured matrix is not evidence that a lane passed.
 
 After all lane artifacts are present:
 

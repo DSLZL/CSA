@@ -216,7 +216,11 @@ def detect(repository: Path, api: GitHubApi) -> dict[str, Any]:
     commit = api.peel_tag(OPENAI_REPOSITORY, tag)
     base_manifest = latest_payload_manifest(repository)
     base = _load_manifest(base_manifest)
-    compat_id = compatibility_id(version, base["patch_set_version"])
+    compat_id = (
+        base["compat_id"]
+        if base["upstream_tag"] == tag and base["upstream_commit"] == commit
+        else compatibility_id(version, base["patch_set_version"])
+    )
     release_tag = f"compat-{compat_id}"
     release = api.get(f"/repos/{CSA_REPOSITORY}/releases/tags/{release_tag}", optional=True)
     if release is not None:
