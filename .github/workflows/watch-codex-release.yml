@@ -169,20 +169,43 @@ jobs:
           $code = $LASTEXITCODE
           Get-Content "$env:WATCH_ROOT/port.log"
           exit $code
+      - id: register
+        name: Register data-driven compatibility candidate
+        if: steps.port.outcome == 'success'
+        continue-on-error: true
+        shell: pwsh
+        run: |
+          & python scripts/compat_catalog.py stage-candidate `
+            --repository "$env:GITHUB_WORKSPACE" `
+            --manifest "$env:GITHUB_WORKSPACE/payload/codex/$env:COMPAT_ID/manifest.toml" `
+            --target "x86_64-pc-windows-msvc" `
+            --runtime-lock "$env:GITHUB_WORKSPACE/release/runtime-locks/$env:COMPAT_ID.json" `
+            --npm-integrity registry *> "$env:WATCH_ROOT/register.log"
+          $code = $LASTEXITCODE
+          Get-Content "$env:WATCH_ROOT/register.log"
+          exit $code
       - id: candidate
         name: Create review candidate PR
-        if: steps.port.outcome == 'success'
+        if: steps.register.outcome == 'success'
         continue-on-error: true
         shell: pwsh
         run: |
           $branch = "automation/compat-$env:COMPAT_ID"
           & git switch -c $branch *> "$env:WATCH_ROOT/candidate.log"
           if ($LASTEXITCODE -ne 0) { Get-Content "$env:WATCH_ROOT/candidate.log"; exit $LASTEXITCODE }
-          & git add -- "payload/codex/$env:COMPAT_ID" *>> "$env:WATCH_ROOT/candidate.log"
+          & git add -- `
+            "payload/codex/$env:COMPAT_ID" `
+            "release/runtime-locks/$env:COMPAT_ID.json" `
+            "release/compatibility-index.json" *>> "$env:WATCH_ROOT/candidate.log"
           if ($LASTEXITCODE -ne 0) { Get-Content "$env:WATCH_ROOT/candidate.log"; exit $LASTEXITCODE }
           $changed = @(& git diff --cached --name-only)
-          $prefix = "payload/codex/$env:COMPAT_ID/"
-          if ($changed.Count -eq 0 -or @($changed | Where-Object { -not $_.StartsWith($prefix) }).Count -ne 0) {
+          $payloadPrefix = "payload/codex/$env:COMPAT_ID/"
+          $runtimeLock = "release/runtime-locks/$env:COMPAT_ID.json"
+          $index = "release/compatibility-index.json"
+          $outOfScope = @($changed | Where-Object {
+            -not $_.StartsWith($payloadPrefix) -and $_ -ne $runtimeLock -and $_ -ne $index
+          })
+          if ($changed.Count -eq 0 -or $outOfScope.Count -ne 0) {
             "Candidate contains an empty or out-of-scope diff: $changed" | Add-Content "$env:WATCH_ROOT/candidate.log"
             Get-Content "$env:WATCH_ROOT/candidate.log"
             exit 2
@@ -194,7 +217,7 @@ jobs:
           @"
           Ports the reviewed Native Join patch set to ``$env:UPSTREAM_TAG`` at ``$env:UPSTREAM_COMMIT``.
 
-          The exact tag/commit, source preimages, cumulative patch preflight, and payload contracts passed. CircleCI compilation and local Windows acceptance from ``.dev`` are required before merge. This watcher does not build binaries or publish a GitHub Release.
+          The exact tag/commit, source preimages, cumulative patch preflight, runtime lock, compatibility-index registration, and payload contracts passed. CircleCI compilation and local Windows acceptance from ``.dev`` are required before the candidate can become ``accepted``. This watcher does not build binaries or publish a GitHub Release.
           "@ | Set-Content -Encoding utf8 "$env:WATCH_ROOT/pr-body.md"
           & gh pr create --repo "$env:GITHUB_REPOSITORY" --base "$env:GITHUB_REF_NAME" --head $branch --title "feat(compat): support $env:UPSTREAM_TAG" --body-file "$env:WATCH_ROOT/pr-body.md" *>> "$env:WATCH_ROOT/candidate.log"
           $code = $LASTEXITCODE
@@ -208,6 +231,7 @@ jobs:
           $stages = @(
             @{ Name = "clone_upstream"; Outcome = "${{ steps.clone.outcome }}"; Log = "clone.log" },
             @{ Name = "patch_preflight"; Outcome = "${{ steps.port.outcome }}"; Log = "port.log" },
+            @{ Name = "candidate_registration"; Outcome = "${{ steps.register.outcome }}"; Log = "register.log" },
             @{ Name = "candidate_pr"; Outcome = "${{ steps.candidate.outcome }}"; Log = "candidate.log" }
           )
           $failed = $stages | Where-Object { $_.Outcome -eq "failure" } | Select-Object -First 1
@@ -230,36 +254,60 @@ jobs:
         if: steps.outcome.outputs.success == 'false'
         run: exit 1
   ready-for-manual-release:
-    name: Compatibility ready for manual Release
+    name: Compatibility acceptance / Release instructions
     needs: detect
     if: needs.detect.outputs.action == 'publish' && github.ref_name == github.event.repository.default_branch
     runs-on: ubuntu-24.04
     permissions:
       contents: read
     steps:
-      - name: Record manual publication command
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+      - name: Record the next authoritative action
         env:
           COMPAT_ID: ${{ needs.detect.outputs.compat_id }}
           COMPAT_TAG: ${{ needs.detect.outputs.compat_release_tag }}
           UPSTREAM_TAG: ${{ needs.detect.outputs.upstream_tag }}
           UPSTREAM_COMMIT: ${{ needs.detect.outputs.upstream_commit }}
         run: |
+          set -euo pipefail
+          python scripts/compat_catalog.py resolve \
+            --repository "$GITHUB_WORKSPACE" \
+            --selector "$COMPAT_ID" \
+            --target x86_64-pc-windows-msvc \
+            --output "$RUNNER_TEMP/compatibility.json"
+          lifecycle="$(python -c 'import json,sys; print(json.load(open(sys.argv[1]))["lifecycle"])' "$RUNNER_TEMP/compatibility.json")"
           {
-            echo "## Reviewed patched Codex CLI is ready"
+            echo "## Patched Codex compatibility state"
             echo
             echo "- Compatibility ID: \`$COMPAT_ID\`"
+            echo "- Lifecycle: \`$lifecycle\`"
             echo "- Release tag: \`$COMPAT_TAG\`"
             echo "- Upstream: \`$UPSTREAM_TAG\` / \`$UPSTREAM_COMMIT\`"
             echo
-            echo "Before formal publication, build this reviewed commit in CircleCI, download the canonical bundle into .dev, and complete local Windows acceptance."
-            echo "The formal GitHub build must receive the SHA-256 of the locally accepted CircleCI codex.exe."
-            echo
-            echo '```text'
-            echo "Actions -> Release patched Codex CLI -> Run workflow"
-            echo "compat_id: $COMPAT_ID"
-            echo "official_windows_npm_integrity: <sha512 integrity from the official Windows npm package>"
-            echo "accepted_codex_sha256: <SHA-256 from .dev>"
-            echo '```'
+            if [[ "$lifecycle" == candidate ]]; then
+              echo "Build exactly this compatibility in CircleCI with:"
+              echo
+              echo '```text'
+              echo "build_patched_codex: true"
+              echo "compat_selector: $COMPAT_ID"
+              echo "target: x86_64-pc-windows-msvc"
+              echo "store_artifact: true"
+              echo '```'
+              echo
+              echo "After local Windows acceptance, finalize the reviewed manifest, then commit an acceptance record with \`scripts/compat_catalog.py accept\`. No artifact hash or npm integrity is copied into a workflow input."
+            else
+              echo "The committed acceptance authority is ready. Dispatch \`Release patched Codex CLI\` with:"
+              echo
+              echo '```text'
+              echo "compat_selector: $COMPAT_ID"
+              echo "target: x86_64-pc-windows-msvc"
+              echo '```'
+            fi
           } >> "$GITHUB_STEP_SUMMARY"
 
   track-failure:

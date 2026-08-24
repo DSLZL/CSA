@@ -492,12 +492,13 @@ def test_release_stream_contracts() -> None:
         REPOSITORY / ".github" / "workflows" / "release-patched-codex.yml"
     ).read_text(encoding="utf-8")
     assert patched_workflow.count("Codex source must not live inside the CSA repository") == 1
-    assert 'default: "rust-v0.149.0-native-join-p3"' in patched_workflow
-    assert 'Path("payload") / "codex" / compat_id / "manifest.toml"' in patched_workflow
-    assert 'manifest.get("patch_set_version") != 6' in patched_workflow
-    assert "accepted_codex_sha256:" in patched_workflow
-    assert "Match locally accepted CircleCI executable" in patched_workflow
-    assert "Get-FileHash -LiteralPath $env:ARTIFACT_PATH" in patched_workflow
+    assert "default: current" in patched_workflow
+    assert "scripts/compat_catalog.py resolve" in patched_workflow
+    assert "--require-acceptance" in patched_workflow
+    assert "--require-release" in patched_workflow
+    assert "accepted_codex_sha256:" not in patched_workflow
+    assert "Match committed manifest and local acceptance authority" in patched_workflow
+    assert 'sha256sum "$ARTIFACT_PATH"' in patched_workflow
 
     ci_workflow = (REPOSITORY / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
@@ -506,53 +507,63 @@ def test_release_stream_contracts() -> None:
         encoding="utf-8"
     )
     circleci = (REPOSITORY / ".circleci" / "config.yml").read_text(encoding="utf-8")
+    build_profile = (
+        REPOSITORY / "release" / "build-profiles" / "windows-msvc-x64.json"
+    ).read_text(encoding="utf-8")
+    runtime_locks = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((REPOSITORY / "release" / "runtime-locks").glob("*.json"))
+    )
     assert patched_workflow.count("build_patched_codex_bundle.sh") == 1
     assert circleci.count("build_patched_codex_bundle.sh") == 1
     assert "runs-on: ubuntu-24.04" in patched_workflow
     assert "runs-on: ubuntu-26.04" not in patched_workflow
-    assert "llvm-toolchain-noble-21" in patched_workflow
-    assert "6084F3CF814B57C1CF12EFD515CF4D18AF4F7421" in patched_workflow
-    assert 'echo /usr/lib/llvm-21/bin >> "$GITHUB_PATH"' in patched_workflow
+    assert "llvm-toolchain-noble-21" in build_profile
+    assert "6084F3CF814B57C1CF12EFD515CF4D18AF4F7421" in build_profile
+    assert "/usr/lib/llvm-$LLVM_MAJOR/bin" in shared_build
     assert "CARGO_HOME: ${{ runner.temp }}" not in patched_workflow
-    assert '"CARGO_HOME=$(Join-Path $root \'cache/cargo-home\')"' in patched_workflow
+    assert 'echo "CARGO_HOME=$root/cache/cargo-home"' in patched_workflow
     assert "build_patched_codex_bundle.sh" not in ci_workflow
+    assert "compat_catalog.py guard-workflows" in ci_workflow
     assert "build_patched_codex_bundle.sh" not in watcher
     assert "compat_release.py finalize" not in watcher
     assert "compat_release.py pack" not in watcher
     assert "CircleCI compilation and local Windows acceptance" in watcher
-    assert "official_windows_npm_integrity:" in watcher
+    assert "No artifact hash or npm integrity is copied into a workflow input" in watcher
     assert "full_payload" not in ci_workflow
     assert "warm_cache_acceptance" not in ci_workflow
     assert "default: false" in circleci
     assert "resource_class: large.gen3" in circleci
     assert "no_output_timeout: 20m" in circleci
-    assert 'CARGO_BUILD_JOBS: "4"' in circleci
-    assert "csa-cargo-home-v5-linux-amd64-1.95.0-codex-" in circleci
-    assert "csa-rustup-v2-linux-amd64-rustup-1.29.0-rustc-" in circleci
-    assert "csa-xwin-v2-linux-amd64-cargo-xwin-0.23.0-msvc17-x86_64-pc-windows-msvc" in circleci
-    assert "csa-sccache-v5-linux-amd64-rustc-" in circleci
+    assert "scripts/compat_catalog.py resolve" in circleci
+    assert "csa-cargo-home-v6-linux-amd64-" in circleci
+    assert "csa-rustup-v3-linux-amd64-" in circleci
+    assert "csa-xwin-v3-linux-amd64-" in circleci
+    assert "csa-sccache-v6-linux-amd64-" in circleci
     assert "csa-sccache-v3-linux-amd64-1.95.0-xwin-0.23.0-codex-" in circleci
     assert "csa-sccache-v2-" not in circleci
     for cargo_download in ("registry/index", "registry/cache", "git/db"):
         assert f"/cargo-home/{cargo_download}" in circleci
-    assert "RUSTC_WRAPPER: /home/circleci/.local/bin/sccache" in circleci
+    assert 'export RUSTC_WRAPPER="$CSA_TOOL_BIN/sccache"' in shared_build
     assert "SCCACHE_CACHE_SIZE: 4G" in circleci
     assert "SCCACHE_CACHE_SIZE: 450M" not in circleci
     assert "caches: 7d" in circleci
     assert "sccache --max-cache-size" not in circleci
-    assert 'root="$HOME/csa-patched-codex/$compat_id"' in circleci
-    assert 'root="/tmp/csa-patched-codex/$compat_id"' not in circleci
+    assert 'root="$HOME/csa-patched-codex/$CSA_COMPAT_ID"' in circleci
+    assert 'root="/tmp/csa-patched-codex/$CSA_COMPAT_ID"' not in circleci
     assert "TMPDIR: /home/circleci/csa-tmp" in circleci
     assert "umask 077" in circleci
     assert 'chmod 0700 "$TMPDIR"' in circleci
-    assert circleci.count("rust-v0.147.0-native-join-p2") == 1
-    assert circleci.count("rust-v0.148.0-native-join-p2") == 1
-    assert circleci.count("rust-v0.149.0-native-join-p3") == 2
-    assert circleci.count("b964d5b08aeb3049c4a52f3efc9eae52ce14a6a029250c14e1d1b7599192cde4") == 2
+    assert "rust-v0." not in circleci
+    assert "sha512-" not in circleci
     assert "build_latest_patched_codex:" in circleci
+    assert "build_patched_codex:" in circleci
+    assert "compat_selector:" in circleci
+    assert "build_all_compat is intentionally rejected" in circleci
+    assert "<<'EOF'" not in circleci
     assert "store_latest_patched_artifact:" in circleci
-    assert circleci.count("require_warm_cache:") == 3
-    assert "if << parameters.require_warm_cache >>; then" in circleci
+    assert circleci.count("require_warm_cache:") == 4
+    assert 'if [[ "$CSA_REQUIRE_WARM_CACHE_PARAM" == true ]]; then' in circleci
     assert "export CSA_MINIMUM_RUST_HIT_RATE=95" in circleci
     assert "build=(timeout 50m bash)" in circleci
     assert "build=(timeout 30m bash)" in circleci
@@ -562,44 +573,39 @@ def test_release_stream_contracts() -> None:
     assert "git clone +" not in circleci
     assert "condition: << parameters.store_artifact >>" in circleci
     assert "store_artifact: << pipeline.parameters.store_latest_patched_artifact >>" in circleci
-    assert "sha512-oT7Ss5fAPf2fiWE9QNURqZcQGAAawSVxmIUdgPzckq4K" in circleci
-    assert "sha512-/Jg8eYw0BqTGNUpnrzzWlK2kbu29NWg7t6pnUDEfxqp" in circleci
-    assert "sha512-qKbwSOOO/fdhQ5MlXE2fts6taPxRPZ/zqeC+eqHD72hLRymV9" in circleci
     assert "OPENAI_API_KEY" not in circleci
-    family_index = tomllib.loads(
-        (REPOSITORY / "payload" / "codex" / "native-join-p2" / "family.toml").read_text(
-            encoding="utf-8"
-        )
-    )
-    for binding in family_index["bindings"]:
-        assert f"binding_sha256: {binding['sha256']}" in circleci
+    assert "binding_sha256:" not in circleci
 
     assert "--portable-evidence" in shared_build
     assert "--stats-format json" in shared_build
     assert "CSA_MINIMUM_RUST_HIT_RATE" in shared_build
     assert "| grep -Fq" not in shared_build
-    assert 'require_identity_contains rustc "commit-hash: $rustc_commit"' in shared_build
+    assert 'require_identity_contains rustc "commit-hash: $RUSTC_COMMIT"' in shared_build
     assert '"$(cargo-xwin --version)"' in shared_build
     assert '"$(cargo xwin --version)"' not in shared_build
-    assert "sudo apt-get install --yes clang lld llvm ninja-build" in shared_build
+    assert '"clang-$LLVM_MAJOR" "lld-$LLVM_MAJOR" "llvm-$LLVM_MAJOR" ninja-build' in shared_build
     assert "identity mismatch; expected output to contain" in shared_build
     assert "identity mismatch; expected exactly" in shared_build
-    assert "d1368d4a94c7ac4bf09296f68516343a76ce11aa375363d4fcddc7fe8ef09730" in shared_build
-    assert "64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d" not in shared_build
+    for acceptance_path in (REPOSITORY / "release" / "acceptance").rglob("*.json"):
+        accepted_sha256 = json.loads(acceptance_path.read_text(encoding="utf-8"))["artifact_sha256"]
+        assert accepted_sha256 not in shared_build
     for path in (
         "build-environment.txt",
         "contract-result.json",
         "SHA256SUMS",
-        "bin/codex.exe",
     ):
         assert path in shared_build
+    assert '"$output/bin/$ARTIFACT_FILENAME"' in shared_build
+    assert 'f"bin/{artifact}"' in shared_build
+    assert 'data["runtime"]["required_files"]' in shared_build
     for path in (
         "bin/codex-code-mode-host.exe",
         "codex-resources/codex-command-runner.exe",
         "codex-resources/codex-windows-sandbox-setup.exe",
         "codex-path/rg.exe",
     ):
-        assert path in shared_build
+        assert path in runtime_locks
+        assert path not in shared_build
         assert f'cp "$official_root/{path}"' not in shared_build
     assert "actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7" in patched_workflow
     assert "csa-sccache-v5-linux-X64-rustc-" in patched_workflow

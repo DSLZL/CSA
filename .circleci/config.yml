@@ -4,28 +4,65 @@ parameters:
   build_patched_codex:
     type: boolean
     default: false
+  compat_selector:
+    description: "current or one exact compatibility ID from release/compatibility-index.json"
+    type: string
+    default: current
+  target:
+    type: string
+    default: x86_64-pc-windows-msvc
+  store_artifact:
+    type: boolean
+    default: true
+  require_warm_cache:
+    type: boolean
+    default: false
+
+  # Backward-compatible entry point. It resolves through the same data-driven
+  # current pointer and contains no version identity in this YAML.
   build_latest_patched_codex:
     type: boolean
     default: false
   store_latest_patched_artifact:
     type: boolean
     default: false
-  require_warm_cache:
+
+  # The former boolean silently expanded every historical version in static
+  # YAML. It is retained only to fail closed with an actionable message.
+  build_all_compat:
     type: boolean
     default: false
 
 jobs:
+  reject-invalid-request:
+    machine:
+      image: ubuntu-2604:2026.05.1
+    resource_class: medium
+    steps:
+      - run:
+          name: Reject ambiguous or deprecated patched build request
+          command: |
+            printf '%s\n' \
+              'Invalid patched Codex build request.' \
+              '' \
+              'Supported modes:' \
+              '  build_patched_codex=true' \
+              '  compat_selector=current|<exact-compat-id>' \
+              '  target=x86_64-pc-windows-msvc' \
+              '' \
+              'Backward-compatible current build:' \
+              '  build_latest_patched_codex=true' \
+              '' \
+              'build_all_compat is intentionally rejected. Enumerate reviewed IDs with:' \
+              '  python scripts/compat_catalog.py list --target x86_64-pc-windows-msvc' \
+              'and trigger one pipeline per exact ID. This preserves one request -> one heavy build.' >&2
+            exit 64
+
   build-patched-codex:
     parameters:
-      compat_id:
+      compat_selector:
         type: string
-      upstream_tag:
-        type: string
-      upstream_commit:
-        type: string
-      binding_sha256:
-        type: string
-      official_windows_npm_integrity:
+      target:
         type: string
       store_artifact:
         type: boolean
@@ -34,117 +71,202 @@ jobs:
         type: boolean
         default: false
     machine:
-      image: ubuntu-2604:current
+      image: ubuntu-2604:2026.05.1
     resource_class: large.gen3
     retention:
       caches: 7d
     environment:
-      CARGO_BUILD_JOBS: "4"
+      # Bind string/boolean parameters as environment data. Never interpolate
+      # caller-controlled selector text into shell source.
+      CSA_COMPAT_SELECTOR_PARAM: "<< parameters.compat_selector >>"
+      CSA_TARGET_PARAM: "<< parameters.target >>"
+      CSA_REQUIRE_WARM_CACHE_PARAM: "<< parameters.require_warm_cache >>"
       CARGO_HOME: /home/circleci/.cache/csa/cargo-home
       CARGO_INCREMENTAL: "0"
       CARGO_TERM_COLOR: always
+      CSA_RUNTIME_CACHE: /home/circleci/.cache/csa/official-runtime
       CSA_TOOL_BIN: /home/circleci/.local/bin
+      CSA_TOOL_CACHE: /home/circleci/.cache/csa/tools
       GIT_CONFIG_COUNT: "1"
       GIT_CONFIG_KEY_0: core.autocrlf
       GIT_CONFIG_VALUE_0: "false"
-      RUSTC_WRAPPER: /home/circleci/.local/bin/sccache
       RUSTUP_HOME: /home/circleci/.cache/csa/rustup
       SCCACHE_CACHE_SIZE: 4G
       SCCACHE_DIR: /home/circleci/.cache/csa/sccache
       TMPDIR: /home/circleci/csa-tmp
       XWIN_ACCEPT_LICENSE: "1"
-      XWIN_ARCH: x86_64
       XWIN_CACHE_DIR: /home/circleci/.cache/csa/xwin
-      XWIN_VARIANT: desktop
-      XWIN_VERSION: "17"
     steps:
       - checkout
 
-      - restore_cache:
-          keys:
-            - csa-cargo-home-v5-linux-amd64-1.95.0-codex-<< parameters.upstream_commit >>
-            - csa-cargo-home-v5-linux-amd64-1.95.0-codex-
-
-      - restore_cache:
-          keys:
-            - csa-rustup-v2-linux-amd64-rustup-1.29.0-rustc-59807616e1fa2540724bfbac14d7976d7e4a3860-host-x86_64-unknown-linux-gnu-target-x86_64-pc-windows-msvc
-
-      - restore_cache:
-          keys:
-            - csa-xwin-v2-linux-amd64-cargo-xwin-0.23.0-msvc17-x86_64-pc-windows-msvc
-
-      - restore_cache:
-          keys:
-            - csa-sccache-v5-linux-amd64-rustc-59807616e1fa2540724bfbac14d7976d7e4a3860-xwin-0.23.0-msvc17-llvm21.1.8-x86_64-pc-windows-msvc-<< parameters.binding_sha256 >>-<< parameters.upstream_commit >>
-            - csa-sccache-v3-linux-amd64-1.95.0-xwin-0.23.0-codex-<< parameters.upstream_commit >>
-            - csa-sccache-v3-linux-amd64-1.95.0-xwin-0.23.0-codex-
-
       - run:
-          name: Build canonical patched Codex bundle
-          no_output_timeout: 20m
+          name: Resolve one exact reviewed compatibility
           command: |
             set -euo pipefail
             umask 077
-            compat_id="<< parameters.compat_id >>"
-            upstream_tag="<< parameters.upstream_tag >>"
-            upstream_commit="<< parameters.upstream_commit >>"
-            manifest="$PWD/payload/codex/$compat_id/manifest.toml"
-            if [[ ! -f "$manifest" ]]; then
-              manifest="$PWD/payload/codex/native-join-p2/bindings/$compat_id/manifest.toml"
-            fi
-            test -f "$manifest"
-            root="$HOME/csa-patched-codex/$compat_id"
-            source="$root/source"
-            cargo_target="$root/cargo-target"
-            output="$PWD/.artifacts/$compat_id"
-            stats="$root/sccache-stats.json"
+            mkdir -p .artifacts/resolution
+            python3 scripts/compat_catalog.py resolve \
+              --repository . \
+              --selector "$CSA_COMPAT_SELECTOR_PARAM" \
+              --target "$CSA_TARGET_PARAM" \
+              --output .artifacts/resolution/compatibility.json \
+              --bash-env "$BASH_ENV"
+            source "$BASH_ENV"
+            cp "$CSA_BUILD_PROFILE" .artifacts/resolution/build-profile.json
+            cp "$CSA_RUNTIME_LOCK" .artifacts/resolution/runtime-lock.json
+            cp "$CSA_MANIFEST" .artifacts/resolution/manifest.toml
+            printf '%s\n' "$CSA_UPSTREAM_COMMIT" > .artifacts/resolution/upstream-commit.txt
+            {
+              echo "compat_id=$CSA_COMPAT_ID"
+              echo "upstream_tag=$CSA_UPSTREAM_TAG"
+              echo "upstream_commit=$CSA_UPSTREAM_COMMIT"
+              echo "manifest_sha256=$CSA_MANIFEST_SHA256"
+              echo "build_profile_sha256=$CSA_BUILD_PROFILE_SHA256"
+              echo "runtime_lock_sha256=$CSA_RUNTIME_LOCK_SHA256"
+            }
 
-            mkdir -p "$root" "$TMPDIR" "$CSA_TOOL_BIN" "$CARGO_HOME" "$RUSTUP_HOME" "$SCCACHE_DIR" "$XWIN_CACHE_DIR"
+      # Cargo registry/git data is safe to share across reviewed compatibility
+      # versions. Keep the previous v5 prefix as a migration fallback.
+      - restore_cache:
+          keys:
+            - csa-cargo-home-v6-linux-amd64-{{ checksum ".artifacts/resolution/build-profile.json" }}
+            - csa-cargo-home-v5-linux-amd64-1.95.0-codex-
+
+      # Rustup, xwin, exact tool downloads, and official runtime archives are
+      # independently versioned by reviewed lock files.
+      - restore_cache:
+          keys:
+            - csa-rustup-v3-linux-amd64-{{ checksum ".artifacts/resolution/build-profile.json" }}
+            - csa-rustup-v2-linux-amd64-rustup-1.29.0-rustc-59807616e1fa2540724bfbac14d7976d7e4a3860-host-x86_64-unknown-linux-gnu-target-x86_64-pc-windows-msvc
+      - restore_cache:
+          keys:
+            - csa-xwin-v3-linux-amd64-{{ checksum ".artifacts/resolution/build-profile.json" }}
+            - csa-xwin-v2-linux-amd64-cargo-xwin-0.23.0-msvc17-x86_64-pc-windows-msvc
+      - restore_cache:
+          keys:
+            - csa-build-tools-v1-linux-amd64-{{ checksum ".artifacts/resolution/build-profile.json" }}
+      - restore_cache:
+          keys:
+            - csa-official-runtime-v1-{{ checksum ".artifacts/resolution/runtime-lock.json" }}
+            - csa-official-runtime-v1-
+
+      # sccache remains the compiler object cache. The reviewed profile and
+      # compatibility index create a new generation; old v5/v3 caches remain
+      # available as safe migration fallbacks.
+      - restore_cache:
+          keys:
+            - csa-sccache-v6-linux-amd64-{{ checksum ".artifacts/resolution/build-profile.json" }}-{{ checksum ".artifacts/resolution/manifest.toml" }}-{{ checksum ".artifacts/resolution/upstream-commit.txt" }}
+            - csa-sccache-v5-linux-amd64-rustc-59807616e1fa2540724bfbac14d7976d7e4a3860-xwin-0.23.0-msvc17-llvm21.1.8-x86_64-pc-windows-msvc-
+            - csa-sccache-v3-linux-amd64-1.95.0-xwin-0.23.0-codex-
+
+      - run:
+          name: Clone exact reviewed upstream Codex source
+          no_output_timeout: 10m
+          command: |
+            set -euo pipefail
+            source "$BASH_ENV"
+            root="$HOME/csa-patched-codex/$CSA_COMPAT_ID"
+            source_root="$root/source"
+            rm -rf "$root"
+            mkdir -p "$root" "$TMPDIR" "$CSA_TOOL_BIN" "$CSA_TOOL_CACHE" \
+              "$CSA_RUNTIME_CACHE" "$CARGO_HOME" "$RUSTUP_HOME" \
+              "$SCCACHE_DIR" "$XWIN_CACHE_DIR"
             chmod 0700 "$TMPDIR"
-            git clone \
-              --filter=blob:none \
-              --no-checkout \
-              --branch "$upstream_tag" \
-              --single-branch \
-              https://github.com/openai/codex.git \
-              "$source"
-            git -C "$source" checkout --detach "$upstream_commit"
-            test "$(git -C "$source" rev-parse "refs/tags/$upstream_tag^{commit}")" = "$upstream_commit"
 
-            build_args=(
-              "$manifest"
-              "$source"
-              "$cargo_target"
-              "$output"
-              "<< parameters.official_windows_npm_integrity >>"
-              "$stats"
-            )
+            for attempt in 1 2 3; do
+              rm -rf "$source_root"
+              if git clone \
+                --filter=blob:none \
+                --no-checkout \
+                --branch "$CSA_UPSTREAM_TAG" \
+                --single-branch \
+                https://github.com/openai/codex.git \
+                "$source_root"; then
+                break
+              fi
+              if [[ "$attempt" == 3 ]]; then
+                echo "Pinned upstream clone failed after $attempt attempts." >&2
+                exit 1
+              fi
+              sleep $((attempt * 5))
+            done
+            git -C "$source_root" checkout --detach "$CSA_UPSTREAM_COMMIT"
+            test "$(git -C "$source_root" rev-parse "refs/tags/$CSA_UPSTREAM_TAG^{commit}")" = "$CSA_UPSTREAM_COMMIT"
+            test "$(git -C "$source_root" rev-parse HEAD)" = "$CSA_UPSTREAM_COMMIT"
+
+            mkdir -p "$PWD/.artifacts/bundle" "$PWD/.artifacts/diagnostics"
+            {
+              printf 'export CSA_BUILD_ROOT=%q\n' "$root"
+              printf 'export CSA_SOURCE=%q\n' "$source_root"
+              printf 'export CSA_CARGO_TARGET=%q\n' "$root/cargo-target"
+              printf 'export CSA_OUTPUT=%q\n' "$PWD/.artifacts/bundle/$CSA_COMPAT_ID"
+              printf 'export CSA_SCCACHE_STATS=%q\n' "$PWD/.artifacts/diagnostics/$CSA_COMPAT_ID-sccache.json"
+            } >> "$BASH_ENV"
+
+      - run:
+          name: Build canonical patched Codex CLI bundle
+          no_output_timeout: 20m
+          command: |
+            set -euo pipefail
+            source "$BASH_ENV"
             build=(timeout 50m bash)
-            if << parameters.require_warm_cache >>; then
+            if [[ "$CSA_REQUIRE_WARM_CACHE_PARAM" == true ]]; then
               export CSA_MINIMUM_RUST_HIT_RATE=95
               build=(timeout 30m bash)
+            elif [[ "$CSA_REQUIRE_WARM_CACHE_PARAM" != false ]]; then
+              echo "require_warm_cache must be true or false" >&2
+              exit 2
             fi
-            "${build[@]}" scripts/build_patched_codex_bundle.sh "${build_args[@]}"
+            started_at="$(date +%s)"
+            "${build[@]}" scripts/build_patched_codex_bundle.sh \
+              "$PWD/.artifacts/resolution/compatibility.json" \
+              "$CSA_SOURCE" \
+              "$CSA_CARGO_TARGET" \
+              "$CSA_OUTPUT" \
+              "$CSA_SCCACHE_STATS"
+            finished_at="$(date +%s)"
+            echo "canonical_bundle_seconds=$((finished_at - started_at))"
+
+      - run:
+          name: Record exact candidate provenance
+          command: |
+            set -euo pipefail
+            source "$BASH_ENV"
+            mkdir -p .artifacts/candidates
+            python3 scripts/compat_catalog.py candidate \
+              --repository . \
+              --resolution "$PWD/.artifacts/resolution/compatibility.json" \
+              --artifact "$CSA_OUTPUT/bin/$CSA_ARTIFACT_FILENAME" \
+              --output "$PWD/.artifacts/candidates/$CSA_COMPAT_ID-$CSA_BUILD_TARGET.json" \
+              --provider circleci \
+              --pipeline "$CIRCLE_PIPELINE_ID" \
+              --job "$CIRCLE_WORKFLOW_JOB_ID" \
+              --source-commit "$CIRCLE_SHA1"
 
       - save_cache:
-          key: csa-cargo-home-v5-linux-amd64-1.95.0-codex-<< parameters.upstream_commit >>
+          key: csa-cargo-home-v6-linux-amd64-{{ checksum ".artifacts/resolution/build-profile.json" }}
           paths:
             - /home/circleci/.cache/csa/cargo-home/registry/index
             - /home/circleci/.cache/csa/cargo-home/registry/cache
             - /home/circleci/.cache/csa/cargo-home/git/db
-
       - save_cache:
-          key: csa-rustup-v2-linux-amd64-rustup-1.29.0-rustc-59807616e1fa2540724bfbac14d7976d7e4a3860-host-x86_64-unknown-linux-gnu-target-x86_64-pc-windows-msvc
+          key: csa-rustup-v3-linux-amd64-{{ checksum ".artifacts/resolution/build-profile.json" }}
           paths:
             - /home/circleci/.cache/csa/rustup
-
       - save_cache:
-          key: csa-xwin-v2-linux-amd64-cargo-xwin-0.23.0-msvc17-x86_64-pc-windows-msvc
+          key: csa-xwin-v3-linux-amd64-{{ checksum ".artifacts/resolution/build-profile.json" }}
           paths:
             - /home/circleci/.cache/csa/xwin
-
       - save_cache:
-          key: csa-sccache-v5-linux-amd64-rustc-59807616e1fa2540724bfbac14d7976d7e4a3860-xwin-0.23.0-msvc17-llvm21.1.8-x86_64-pc-windows-msvc-<< parameters.binding_sha256 >>-<< parameters.upstream_commit >>
+          key: csa-build-tools-v1-linux-amd64-{{ checksum ".artifacts/resolution/build-profile.json" }}
+          paths:
+            - /home/circleci/.cache/csa/tools
+      - save_cache:
+          key: csa-official-runtime-v1-{{ checksum ".artifacts/resolution/runtime-lock.json" }}
+          paths:
+            - /home/circleci/.cache/csa/official-runtime
+      - save_cache:
+          key: csa-sccache-v6-linux-amd64-{{ checksum ".artifacts/resolution/build-profile.json" }}-{{ checksum ".artifacts/resolution/manifest.toml" }}-{{ checksum ".artifacts/resolution/upstream-commit.txt" }}
           paths:
             - /home/circleci/.cache/csa/sccache
 
@@ -152,46 +274,44 @@ jobs:
           condition: << parameters.store_artifact >>
           steps:
             - store_artifacts:
-                path: .artifacts/<< parameters.compat_id >>
-                destination: << parameters.compat_id >>
+                path: .artifacts
+                destination: patched-codex
 
 workflows:
+  csa-patched-selected:
+    when:
+      and:
+        - << pipeline.parameters.build_patched_codex >>
+        - not: << pipeline.parameters.build_latest_patched_codex >>
+        - not: << pipeline.parameters.build_all_compat >>
+    jobs:
+      - build-patched-codex:
+          name: patched-codex-selected
+          compat_selector: << pipeline.parameters.compat_selector >>
+          target: << pipeline.parameters.target >>
+          store_artifact: << pipeline.parameters.store_artifact >>
+          require_warm_cache: << pipeline.parameters.require_warm_cache >>
+
   csa-patched-latest:
     when:
       and:
         - << pipeline.parameters.build_latest_patched_codex >>
         - not: << pipeline.parameters.build_patched_codex >>
+        - not: << pipeline.parameters.build_all_compat >>
     jobs:
       - build-patched-codex:
-          name: codex-0.149.0-cross-windows-msvc-latest
-          compat_id: rust-v0.149.0-native-join-p3
-          upstream_tag: rust-v0.149.0
-          upstream_commit: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
-          binding_sha256: b964d5b08aeb3049c4a52f3efc9eae52ce14a6a029250c14e1d1b7599192cde4
-          official_windows_npm_integrity: "sha512-qKbwSOOO/fdhQ5MlXE2fts6taPxRPZ/zqeC+eqHD72hLRymV9rFCUbUxOCquognUPRPvS/2/kRCV0UVhoDd3yQ=="
+          name: patched-codex-current
+          compat_selector: current
+          target: << pipeline.parameters.target >>
           store_artifact: << pipeline.parameters.store_latest_patched_artifact >>
           require_warm_cache: << pipeline.parameters.require_warm_cache >>
-  csa-patched-build:
-    when: << pipeline.parameters.build_patched_codex >>
+
+  csa-patched-invalid-request:
+    when:
+      or:
+        - << pipeline.parameters.build_all_compat >>
+        - and:
+            - << pipeline.parameters.build_patched_codex >>
+            - << pipeline.parameters.build_latest_patched_codex >>
     jobs:
-      - build-patched-codex:
-          name: codex-0.147.0-cross-windows-msvc
-          compat_id: rust-v0.147.0-native-join-p2
-          upstream_tag: rust-v0.147.0
-          upstream_commit: be6e8eac029b183056b7e4402879f15d2c85f61b
-          binding_sha256: 1d5f895313051195f2f06f3b6400912b0906e5f97ebce181e2816d2db289bc78
-          official_windows_npm_integrity: "sha512-oT7Ss5fAPf2fiWE9QNURqZcQGAAawSVxmIUdgPzckq4KFZAM+pRz9JbM4Rr498CjtbNgTOjWvDJ+DXvIBSfOPA=="
-      - build-patched-codex:
-          name: codex-0.148.0-cross-windows-msvc
-          compat_id: rust-v0.148.0-native-join-p2
-          upstream_tag: rust-v0.148.0
-          upstream_commit: 3ba0f711642a888aec92a611a3f3b2211157ff89
-          binding_sha256: 8b0acfc159187b25bab0baac40efa470a60d1f220fc91d6fb7b8703e70184a99
-          official_windows_npm_integrity: "sha512-/Jg8eYw0BqTGNUpnrzzWlK2kbu29NWg7t6pnUDEfxqpTUf+mK8r3okXQn60Zjbk9InYZ4d8SwSjrtOa+i5hSPw=="
-      - build-patched-codex:
-          name: codex-0.149.0-cross-windows-msvc
-          compat_id: rust-v0.149.0-native-join-p3
-          upstream_tag: rust-v0.149.0
-          upstream_commit: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
-          binding_sha256: b964d5b08aeb3049c4a52f3efc9eae52ce14a6a029250c14e1d1b7599192cde4
-          official_windows_npm_integrity: "sha512-qKbwSOOO/fdhQ5MlXE2fts6taPxRPZ/zqeC+eqHD72hLRymV9rFCUbUxOCquognUPRPvS/2/kRCV0UVhoDd3yQ=="
+      - reject-invalid-request

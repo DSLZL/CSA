@@ -33,7 +33,7 @@ GitHub Releases use two separate streams: `vX.Y.Z` contains CSA manager/npm arti
 | macOS x64 | CI configured, not verified | none |
 | macOS arm64 | CI configured, not verified | none |
 
-The current compatibility authority binds upstream tag `rust-v0.149.0`, commit `758ef40f50c1a458425c7cfbf1eb12cbc07af0b0`, Rust `1.95.0`, and target `x86_64-pc-windows-msvc`. The locally accepted executable is 299,645,952 bytes with SHA-256 `64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d`. Any upstream, official-runtime, or artifact drift fails closed.
+The current compatibility authority binds upstream tag `rust-v0.149.0`, commit `758ef40f50c1a458425c7cfbf1eb12cbc07af0b0`, Rust `1.95.0`, and target `x86_64-pc-windows-msvc`. The locally accepted executable is 298,215,424 bytes with SHA-256 `e3302a04e8bc6062c5d092692e7d38239986453c599dcdf128fd1d9598f596fd`. Any upstream, official-runtime, or artifact drift fails closed.
 
 ## Prerequisites
 

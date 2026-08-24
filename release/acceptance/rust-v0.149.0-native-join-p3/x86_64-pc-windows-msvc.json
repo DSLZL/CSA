@@ -1,0 +1,23 @@
+{
+  "schema": 1,
+  "status": "accepted",
+  "compat_id": "rust-v0.149.0-native-join-p3",
+  "target": "x86_64-pc-windows-msvc",
+  "artifact_filename": "codex.exe",
+  "artifact_sha256": "e3302a04e8bc6062c5d092692e7d38239986453c599dcdf128fd1d9598f596fd",
+  "artifact_size": 298215424,
+  "manifest_sha256": "6627d066d6098613d8b67ec478c66453a175808a5d06e441ac8a51ac3ae0ba2c",
+  "build_profile_sha256": "be3194ff9dab2c69914ef0751f700d8d4114a0bd53528bd5b566c61fdf05df13",
+  "runtime_lock_sha256": "38ee51e00fce99ef5cf91e2be80345262a52b8adf98608e2c4bcd32ffe7a5566",
+  "recorded_at": "2026-08-23",
+  "accepted_by": null,
+  "evidence": {
+    "kind": "reviewed-circleci-canonical-import",
+    "source_commit": "b6826649c3dc46ae99699fa92f8e4dcac6357700",
+    "source_fields": [
+      "CircleCI canonical SHA256SUMS from repeated exact builds",
+      "local Windows absolute-path version execution"
+    ],
+    "statement": "Repeated exact CircleCI builds produced the same executable identity, and the downloaded artifact executed locally as codex-cli 0.149.0. The formal hosted rebuild must reproduce this SHA-256 exactly."
+  }
+}
