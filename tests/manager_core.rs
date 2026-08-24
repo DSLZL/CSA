@@ -1212,6 +1212,10 @@ fn bundled_p3_contract_requires_full_tui_gates() {
             .map(String::as_str),
         Some("4")
     );
+    assert_eq!(
+        contract.build.env.get("RUSTFLAGS").map(String::as_str),
+        Some("-C link-arg=/debug:none -C link-arg=/build-id:no")
+    );
 }
 
 #[test]

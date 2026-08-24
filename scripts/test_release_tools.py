@@ -406,6 +406,9 @@ def test_contract_shape() -> None:
     assert p3_contract["common_env"]["CARGO_BUILD_JOBS"] == "2"
     assert p3_contract["common_env"]["INSTA_WORKSPACE_ROOT"] == "{source}/codex-rs"
     assert p3_contract["build"]["env"]["CARGO_BUILD_JOBS"] == "4"
+    assert p3_contract["build"]["env"]["RUSTFLAGS"] == (
+        "-C link-arg=/debug:none -C link-arg=/build-id:no"
+    )
     try:
         cross_windows_build_argv(["cargo", "test"])
     except ContractError:
@@ -502,7 +505,7 @@ def test_release_stream_contracts() -> None:
     assert "csa-cargo-home-v5-linux-amd64-1.95.0-codex-" in circleci
     assert "csa-rustup-v2-linux-amd64-rustup-1.29.0-rustc-" in circleci
     assert "csa-xwin-v2-linux-amd64-cargo-xwin-0.23.0-msvc17-x86_64-pc-windows-msvc" in circleci
-    assert "csa-sccache-v4-linux-amd64-rustc-" in circleci
+    assert "csa-sccache-v5-linux-amd64-rustc-" in circleci
     assert "csa-sccache-v3-linux-amd64-1.95.0-xwin-0.23.0-codex-" in circleci
     assert "csa-sccache-v2-" not in circleci
     for cargo_download in ("registry/index", "registry/cache", "git/db"):
@@ -574,11 +577,11 @@ def test_release_stream_contracts() -> None:
         assert path in shared_build
         assert f'cp "$official_root/{path}"' not in shared_build
     assert "actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7" in patched_workflow
-    assert "csa-sccache-v4-linux-X64-rustc-" in patched_workflow
+    assert "csa-sccache-v5-linux-X64-rustc-" in patched_workflow
     assert "SCCACHE_DIR" in patched_workflow
     assert "csa-sccache-v3-" not in patched_workflow
     for workflow in (ci_workflow, watcher):
-        assert "csa-sccache-v4-linux-X64-rustc-" not in workflow
+        assert "csa-sccache-v5-linux-X64-rustc-" not in workflow
 
     online = (REPOSITORY / "src" / "online.rs").read_text(encoding="utf-8")
     assert '"0.149.0" => Some("rust-v0.149.0-native-join-p3")' in online

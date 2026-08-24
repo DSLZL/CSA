@@ -197,7 +197,7 @@ jobs:
         uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.SCCACHE_DIR }}
-          key: csa-sccache-v4-linux-X64-rustc-59807616e1fa2540724bfbac14d7976d7e4a3860-xwin-0.23.0-msvc17-llvm21.1.8-x86_64-pc-windows-msvc-${{ steps.manifest.outputs.binding_sha256 }}-${{ steps.manifest.outputs.upstream_commit }}
+          key: csa-sccache-v5-linux-X64-rustc-59807616e1fa2540724bfbac14d7976d7e4a3860-xwin-0.23.0-msvc17-llvm21.1.8-x86_64-pc-windows-msvc-${{ steps.manifest.outputs.binding_sha256 }}-${{ steps.manifest.outputs.upstream_commit }}
 
       - name: Clone exact reviewed upstream source
         shell: pwsh

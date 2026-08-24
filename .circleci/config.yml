@@ -75,7 +75,7 @@ jobs:
 
       - restore_cache:
           keys:
-            - csa-sccache-v4-linux-amd64-rustc-59807616e1fa2540724bfbac14d7976d7e4a3860-xwin-0.23.0-msvc17-llvm21.1.8-x86_64-pc-windows-msvc-<< parameters.binding_sha256 >>-<< parameters.upstream_commit >>
+            - csa-sccache-v5-linux-amd64-rustc-59807616e1fa2540724bfbac14d7976d7e4a3860-xwin-0.23.0-msvc17-llvm21.1.8-x86_64-pc-windows-msvc-<< parameters.binding_sha256 >>-<< parameters.upstream_commit >>
             - csa-sccache-v3-linux-amd64-1.95.0-xwin-0.23.0-codex-<< parameters.upstream_commit >>
             - csa-sccache-v3-linux-amd64-1.95.0-xwin-0.23.0-codex-
 
@@ -144,7 +144,7 @@ jobs:
             - /home/circleci/.cache/csa/xwin
 
       - save_cache:
-          key: csa-sccache-v4-linux-amd64-rustc-59807616e1fa2540724bfbac14d7976d7e4a3860-xwin-0.23.0-msvc17-llvm21.1.8-x86_64-pc-windows-msvc-<< parameters.binding_sha256 >>-<< parameters.upstream_commit >>
+          key: csa-sccache-v5-linux-amd64-rustc-59807616e1fa2540724bfbac14d7976d7e4a3860-xwin-0.23.0-msvc17-llvm21.1.8-x86_64-pc-windows-msvc-<< parameters.binding_sha256 >>-<< parameters.upstream_commit >>
           paths:
             - /home/circleci/.cache/csa/sccache
 
