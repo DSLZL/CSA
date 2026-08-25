@@ -1130,6 +1130,22 @@ fn manifest_types_are_strict() {
         .test_contract()
         .unwrap();
 
+    let mut invalid_output = contract.clone();
+    invalid_output["generation"][0]["output"] = Value::String("verbose".to_owned());
+    fs::write(
+        &contract_path,
+        serde_json::to_vec_pretty(&invalid_output).unwrap(),
+    )
+    .unwrap();
+    assert_eq!(
+        LoadedCompatibility::load(&fixture.manifest)
+            .unwrap()
+            .test_contract()
+            .unwrap_err()
+            .code,
+        "invalid_test_contract"
+    );
+
     let mut changed_env = contract.clone();
     changed_env["build"]["env"]["CARGO_BUILD_JOBS"] = Value::String("2".to_owned());
     fs::write(

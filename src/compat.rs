@@ -715,6 +715,8 @@ pub struct ContractStep {
     #[serde(default)]
     pub env: BTreeMap<String, String>,
     pub argv: Vec<String>,
+    #[serde(default)]
+    pub output: Option<String>,
 }
 
 #[derive(Clone, Debug, Deserialize)]
@@ -766,6 +768,17 @@ impl TestContract {
             return Err(ManagerError::new(
                 "invalid_test_contract",
                 "test contract shape does not match patch API 1",
+            ));
+        }
+        if self.generation.iter().chain(&self.tests).any(|step| {
+            !matches!(
+                step.output.as_deref(),
+                None | Some("live") | Some("failure-only")
+            )
+        }) {
+            return Err(ManagerError::new(
+                "invalid_test_contract",
+                "test contract uses an unsupported output policy",
             ));
         }
 
