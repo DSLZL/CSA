@@ -459,20 +459,40 @@ jobs:
           RELEASE_SHA: ${{ github.sha }}
         run: |
           set -euo pipefail
-          git fetch --force --tags origin
-          if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
-            existing="$(git rev-parse "$TAG^{commit}")"
-            if [[ "$existing" != "$RELEASE_SHA" ]]; then
-              echo "Tag $TAG already points to $existing, not $RELEASE_SHA." >&2
-              exit 2
-            fi
-          else
-            tag_sha="$(gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" \
+          create_tag_object() {
+            gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" \
               -f tag="$TAG" \
               -f message="$TAG" \
               -f object="$RELEASE_SHA" \
               -f type=commit \
-              --jq .sha)"
+              --jq .sha
+          }
+          git fetch --force --tags origin
+          if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
+            existing="$(git rev-parse "$TAG^{commit}")"
+            if [[ "$existing" != "$RELEASE_SHA" ]]; then
+              release_draft="$(gh api --paginate \
+                "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+                --jq ".[] | select(.tag_name == \"$TAG\") | .draft")"
+              case "$release_draft" in
+                false)
+                  echo "Published release $TAG remains anchored at $existing; verifying its assets."
+                  ;;
+                true|"")
+                  tag_sha="$(create_tag_object)"
+                  gh api --method PATCH \
+                    "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
+                    -f sha="$tag_sha" \
+                    -F force=true >/dev/null
+                  ;;
+                *)
+                  echo "Release lookup returned an invalid draft state for $TAG: $release_draft" >&2
+                  exit 2
+                  ;;
+              esac
+            fi
+          else
+            tag_sha="$(create_tag_object)"
             gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
               -f ref="refs/tags/$TAG" \
               -f sha="$tag_sha" >/dev/null

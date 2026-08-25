@@ -620,6 +620,19 @@ def test_release_stream_contracts() -> None:
     assert '--json databaseId' in patched_workflow
     assert 'releases/$release_id' in patched_workflow
     assert 'releases/tags/$TAG' not in patched_workflow
+    assert 'create_tag_object()' in patched_workflow
+    assert patched_workflow.count('tag_sha="$(create_tag_object)"') == 2
+    assert 'releases?per_page=100' in patched_workflow
+    assert 'Published release $TAG remains anchored' in patched_workflow
+    assert 'git/refs/tags/$TAG' in patched_workflow
+    assert '-F force=true' in patched_workflow
+    tag_step = patched_workflow.split(
+        "- name: Create or validate annotated compatibility tag", 1
+    )[1].split("- name: Create or resume draft", 1)[0]
+    published_case = tag_step.split("false)", 1)[1].split('true|"")', 1)[0]
+    mutable_case = tag_step.split('true|"")', 1)[1].split("*)", 1)[0]
+    assert "--method PATCH" not in published_case
+    assert "--method PATCH" in mutable_case
 
     ci_workflow = (REPOSITORY / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
