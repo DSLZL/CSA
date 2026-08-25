@@ -1166,6 +1166,7 @@ fn run_test_contract(
         name: "release build".to_owned(),
         env: contract.build.env.clone(),
         argv: contract.build.argv.clone(),
+        output: None,
     };
     run_contract_step(
         &contract,
