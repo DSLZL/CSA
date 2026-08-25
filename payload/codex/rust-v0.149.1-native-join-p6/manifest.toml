@@ -71,7 +71,7 @@ sha256 = "b63e1a940ed2d903da87fc8079653b4f36ca47c2e468140c5284020681e8402b"
 
 [[patches]]
 path = "patches/0013-subagent-live-polish.patch"
-sha256 = "5e435189cc44bbe61ad4fa62fb8d54b55764527a1eae2531e9f30248918c0784"
+sha256 = "5a6f8544b5aa6e7782709cdfe0d2c1b7eb4f74ccca87fa0a2a1f00c608e2d89d"
 
 [[patches]]
 path = "patches/0014-csa-version-snapshots.patch"

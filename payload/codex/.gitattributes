@@ -1,0 +1,3 @@
+# Compatibility manifests hash payload bytes; never let Windows checkout
+# policy rewrite them behind the verifier's back.
+** text eol=lf

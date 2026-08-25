@@ -598,7 +598,7 @@ index 04b876aa2910500f8d2fe522cd6d313f62bb0be2..34548063ed0884a1efd9418121c200cc
  
      fn terminal_title_uses_activity(&self) -> bool {
 diff --git a/codex-rs/tui/src/motion.rs b/codex-rs/tui/src/motion.rs
-index 9a4332e5bf8f8fc75d114189f6a581f39b6c9f2d..fb08de3c58e5b431747388dd33d4de0af5436194 100644
+index 9a4332e5bf8f8fc75d114189f6a581f39b6c9f2d..278b39d2ff95402e260ea29f5bcd3e3f0e15d9af 100644
 --- a/codex-rs/tui/src/motion.rs
 +++ b/codex-rs/tui/src/motion.rs
 @@ -3,6 +3,7 @@
@@ -613,8 +613,8 @@ index 9a4332e5bf8f8fc75d114189f6a581f39b6c9f2d..fb08de3c58e5b431747388dd33d4de0a
  
  use shimmer::shimmer_spans;
  
-+pub(crate) const ORBIT_FRAME_INTERVAL: Duration = Duration::from_millis(100);
-+const ORBIT_FRAMES: [&str; 10] = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
++pub(crate) const ORBIT_FRAME_INTERVAL: Duration = Duration::from_millis(110);
++const ORBIT_FRAMES: [&str; 8] = ["⠁", "⠈", "⠐", "⠠", "⢀", "⡀", "⠄", "⠂"];
 +
  #[derive(Clone, Copy, Debug, PartialEq, Eq)]
  pub(crate) enum MotionMode {
@@ -644,7 +644,7 @@ index 9a4332e5bf8f8fc75d114189f6a581f39b6c9f2d..fb08de3c58e5b431747388dd33d4de0a
  fn animated_activity_indicator(start_time: Option<Instant>) -> Span<'static> {
      let elapsed = start_time.map(|st| st.elapsed()).unwrap_or_default();
      if supports_color::on_cached(supports_color::Stream::Stdout)
-@@ -115,4 +137,15 @@ mod tests {
+@@ -115,4 +137,26 @@ mod tests {
              Vec::<Span<'static>>::new()
          );
      }
@@ -652,8 +652,19 @@ index 9a4332e5bf8f8fc75d114189f6a581f39b6c9f2d..fb08de3c58e5b431747388dd33d4de0a
 +    #[test]
 +    fn orbit_follows_the_perimeter_and_has_a_static_reduced_motion_fallback() {
 +        let start = Instant::now();
-+        assert_eq!(orbit_frame_at(start, start), "⠋");
-+        assert_eq!(orbit_frame_at(start, start + ORBIT_FRAME_INTERVAL), "⠙");
++        for (index, frame) in ORBIT_FRAMES.into_iter().enumerate() {
++            assert_eq!(
++                orbit_frame_at(start, start + ORBIT_FRAME_INTERVAL * index as u32),
++                frame
++            );
++        }
++        assert_eq!(
++            orbit_frame_at(
++                start,
++                start + ORBIT_FRAME_INTERVAL * ORBIT_FRAMES.len() as u32
++            ),
++            ORBIT_FRAMES[0]
++        );
 +        assert_eq!(
 +            orbit_indicator(start, start, MotionMode::Reduced).content,
 +            "◌"
@@ -661,7 +672,7 @@ index 9a4332e5bf8f8fc75d114189f6a581f39b6c9f2d..fb08de3c58e5b431747388dd33d4de0a
 +    }
  }
 diff --git a/codex-rs/tui/src/subagent_live_panel.rs b/codex-rs/tui/src/subagent_live_panel.rs
-index b874c79aae5b8b96308fbafc8fb3a87079b12924..29ddc1abd9770f8029312ce8d84310e491cd72ac 100644
+index b874c79aae5b8b96308fbafc8fb3a87079b12924..b445fcee2e9f71dc32e396dd77b8c53648e3e737 100644
 --- a/codex-rs/tui/src/subagent_live_panel.rs
 +++ b/codex-rs/tui/src/subagent_live_panel.rs
 @@ -5,6 +5,8 @@ use crate::app::LiveAgentState;
@@ -861,7 +872,7 @@ index b874c79aae5b8b96308fbafc8fb3a87079b12924..29ddc1abd9770f8029312ce8d84310e4
 +    if color_enabled {
 +        symbol = match lifecycle {
 +            LiveAgentStatus::Starting | LiveAgentStatus::Running | LiveAgentStatus::Completed => {
-+                symbol.green()
++                symbol
 +            }
 +            LiveAgentStatus::WaitingApproval => symbol.bold(),
 +            LiveAgentStatus::Waiting => symbol.dim(),

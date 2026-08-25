@@ -419,7 +419,43 @@ def test_contract_shape() -> None:
         "TUI background exit isolation",
         "complete TUI library",
     }
-    assert all(test.get("output") == "failure-only" for test in tui_tests)
+    for payload in sorted((REPOSITORY / "payload" / "codex").glob("rust-v0.149.*-native-join-p*")):
+        contract = load_contract(payload / "test-contract.json", payload.name)
+        payload_tui_tests = [
+            test
+            for test in contract["tests"]
+            if test["argv"][:4] == ["cargo", "test", "-p", "codex-tui"]
+        ]
+        assert payload_tui_tests
+        assert all(test.get("output") == "failure-only" for test in payload_tui_tests)
+
+    p6_patch = (
+        REPOSITORY
+        / "payload"
+        / "codex"
+        / "rust-v0.149.1-native-join-p6"
+        / "patches"
+        / "0013-subagent-live-polish.patch"
+    ).read_text(encoding="utf-8")
+    expected_orbit = (
+        'const ORBIT_FRAMES: [&str; 8] = '
+        '["⠁", "⠈", "⠐", "⠠", "⢀", "⡀", "⠄", "⠂"];'
+    )
+    assert expected_orbit in p6_patch
+    assert "Duration::from_millis(110)" in p6_patch
+    assert "ORBIT_FRAMES.into_iter().enumerate()" in p6_patch
+    default_codex_foreground = (
+        "+            LiveAgentStatus::Starting | LiveAgentStatus::Running | "
+        "LiveAgentStatus::Completed => {\n+                symbol\n+            }"
+    )
+    assert default_codex_foreground in p6_patch
+    assert "+                symbol.white()" not in p6_patch
+    assert "+                symbol.green()" not in p6_patch
+    for attributes in (
+        REPOSITORY / "payload" / "codex" / ".gitattributes",
+        REPOSITORY / "release" / ".gitattributes",
+    ):
+        assert "** text eol=lf" in attributes.read_text(encoding="utf-8")
     assert "unrelated asynchronous event" in p3_contract["known_upstream_errata"][-1]
     assert p3_contract["common_env"]["CARGO_BUILD_JOBS"] == "2"
     assert p3_contract["common_env"]["INSTA_WORKSPACE_ROOT"] == "{source}/codex-rs"
@@ -610,6 +646,8 @@ def test_release_stream_contracts() -> None:
     assert "scripts/compat_catalog.py resolve" in patched_workflow
     assert "--require-acceptance" not in patched_workflow
     assert "--require-release" in patched_workflow
+    assert 'if [[ "$PUBLISH_REQUESTED" == "true" ]]' in patched_workflow
+    assert "if: inputs.publish && needs.build.outputs.release_enabled == 'true'" in patched_workflow
     assert "accepted_codex_sha256:" not in patched_workflow
     assert "Finalize production manifest from the GitHub-built CLI" in patched_workflow
     assert patched_workflow.count("compat_release.py finalize") == 1
@@ -1094,18 +1132,18 @@ def test_compatibility_release_tools(root: Path) -> None:
     class MatchingApi(FakeApi):
         def get(self, path: str, *, optional: bool = False):
             if path.endswith("/releases/latest"):
-                return {"tag_name": "rust-v0.149.0", "draft": False, "prerelease": False}
+                return {"tag_name": "rust-v0.149.1", "draft": False, "prerelease": False}
             return super().get(path, optional=optional)
 
         def peel_tag(self, repository: str, tag: str) -> str:
             if repository == "openai/codex":
-                assert tag == "rust-v0.149.0"
-                return "758ef40f50c1a458425c7cfbf1eb12cbc07af0b0"
+                assert tag == "rust-v0.149.1"
+                return "ff29a44391deccde0aba0f8390337d7f3c319ea4"
             return super().peel_tag(repository, tag)
 
     matching = MatchingApi()
     current = detect(REPOSITORY.resolve(), matching)
-    assert current["compat_id"] == "rust-v0.149.0-native-join-p3"
+    assert current["compat_id"] == "rust-v0.149.1-native-join-p6"
     assert current["action"] == "publish"
 
 
