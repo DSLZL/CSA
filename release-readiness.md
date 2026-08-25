@@ -1,85 +1,145 @@
-# Release Readiness
+# CSA release readiness
 
-Checked: 2026-08-23
+Baseline reviewed for this replacement:
 
-Overall status: **LOCAL WINDOWS P3 HYBRID CANDIDATE PASS; FORMAL PUBLICATION NOT READY OR EXECUTED**
+```text
+CSA commit: b6826649c3dc46ae99699fa92f8e4dcac6357700
+Current compatibility: rust-v0.149.0-native-join-p3
+Codex version: 0.149.0
+Upstream tag: rust-v0.149.0
+Upstream commit: 758ef40f50c1a458425c7cfbf1eb12cbc07af0b0
+Patch-set version: 6
+Patch count: 14
+Patched target: x86_64-pc-windows-msvc
+Patched product: codex-cli / codex only
+```
 
-The exact `rust-v0.149.0-native-join-p3` payload now contains 13 ordered patches. The complete TUI/Join base and hybrid install-context contracts remain passed; the added resident-panel polish and Windows mouse-initialization guard then passed exact clean-source replay, focused live-panel and mouse tests, Clippy, release build, strict artifact verification, manager regression tests, release-tool checks, and a user-run interactive PowerShell ConPTY startup. The local CSA `0.1.1` manager/npm candidate also passed the disposable Windows lifecycle. The current patched executable remains installed only in the disposable manager root. No npm package, GitHub Release, tag, signature, production activation, profile, persistent PATH, global npm prefix, official file, or user Codex configuration was created or changed.
+## Current artifact authority
 
-## Scope and artifacts
+```text
+Manifest SHA-256:
+6627d066d6098613d8b67ec478c66453a175808a5d06e441ac8a51ac3ae0ba2c
 
-| Artifact | Result |
-| --- | --- |
-| manager | `csa 0.1.1`, 3,771,392 bytes, SHA-256 `988544a184547fa09276656d3cd6820e7cafa294a450035e90991a7616c2a835` |
-| reviewed payload | `payload/codex/rust-v0.149.0-native-join-p3`; patch-set version `5`; 13 ordered patches, 72 present preimages, 8 absence assertions |
-| payload manifest | 12,206 bytes, SHA-256 `b964d5b08aeb3049c4a52f3efc9eae52ce14a6a029250c14e1d1b7599192cde4` |
-| source hashes | 9,195 bytes, SHA-256 `5d4c89c237a5a726f9db3b8c1046dd1521d586bed2e3d0150d2b690c6f71ba33` |
-| test contract | 16 tests, 5,974 bytes, SHA-256 `f40304989ae83356946ab3c1d0419777f96d0ce2662f2ccb38ab782fb8c405bb` |
-| patched Codex | `codex-cli 0.149.0`, 299,645,952 bytes, SHA-256 `64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d` |
-| CSA-owned runtime | manager overlay `runtime/bin/codex.exe` only; no official companion copies or links |
-| compatibility identity | upstream `rust-v0.149.0` / `758ef40f50c1a458425c7cfbf1eb12cbc07af0b0`; Rust `1.95.0`; `x86_64-pc-windows-msvc` |
+Accepted codex.exe SHA-256:
+e3302a04e8bc6062c5d092692e7d38239986453c599dcdf128fd1d9598f596fd
 
-The repository manifest binds this local executable exactly. A formal hosted run must reproduce it from a reviewed clean default-branch commit and independently assemble a checksum-complete compatibility Release before publishing.
+Accepted codex.exe size:
+298215424 bytes
 
-## Verification matrix
+Build-profile SHA-256:
+be3194ff9dab2c69914ef0751f700d8d4114a0bd53528bd5b566c61fdf05df13
 
-| Lane | Result | Evidence boundary |
-| --- | --- | --- |
-| exact upstream/source/preimage/absence/14-patch verification | PASS | clean detached v0.149 source at the exact tag/commit |
-| complete TUI/Join base contract | PASS | pre-overlay 11-patch authority: 2 generation + 15 test + 1 release-build steps, all exit 0 |
-| complete TUI library | PASS | 3,743 passed, 0 failed, 6 ignored; one test thread; snapshots not updated |
-| TUI Clippy | PASS | library/tests with `-D warnings` |
-| Native Join integration | PASS | 7 passed, 1 ignored in the deterministic integration target |
-| hybrid install-context and TUI polish | PASS | all 14 patches replayed exactly; focused TUI 22 passed; release build exit 0 |
-| Windows mouse-mode initialization | PASS | 5 automated mouse tests plus user-run startup in a real PowerShell ConPTY; no initial-console-mode error was reported |
-| release artifact absolute execution and strict payload verify | PASS | `codex-cli 0.149.0`; manifest size/SHA-256 independently matched |
-| manager format/tests/release build | PASS | 13 unit and 16 manager integration tests; release executable rebuilt |
-| Windows npm `0.1.1` candidate | PASS | offline temporary-prefix install/version/doctor/cold install/isolated exec/cold uninstall/npm uninstall; official hashes and parent environment unchanged |
-| bare official-runtime discovery | PASS | current Bun launcher auto-bound native, meta package, platform package, marker, host, runner, sandbox helper, and `rg` without explicit official paths |
-| install/reinstall/default-config launch/doctor | PASS | disposable manager root; second install unchanged; `features list` and doctor exit 0 with expected runtime/install/helper data; current patched TUI started interactively with the default config |
-| overlay ownership | PASS | recursive manager scan found zero copied official companions; patched executable is under manager-owned `runtime/bin` |
-| uninstall/fallback/idempotency | PASS | first uninstall removed shim/state/overlay; second changed nothing; official CLI still reports `0.149.0` |
-| official runtime immutability | PASS | all eight bound official input hashes matched after install/reinstall/launch/uninstall |
-| unsupported p6 | PASS (rejected) | verifier accepts only reviewed patch-set versions `1` through `5` |
-| v0.148 source drift | PASS (rejected) | verifier rejected exact commit mismatch |
-| Native Join request counts | PASS | `main_model_requests[J,T)=0`, Join result `1`, resume `1`, status polling `0` |
-| read-only panel/click/Left/`/subagents` paths | PASS | each emitted `0` Main model operations |
-| 8-agent event storm | PASS | 800 routed events retained 24 rows (`8 × Recent 3`), with bounded reducer/app timing |
-| frame/input fairness | PASS | 800 frame requests coalesced to 2 draws; queued key and mouse each serviced within 2 polls |
-| p1/p2 byte immutability | PASS | aggregate SHA-256 values remain `2c1b077b…`, `04ad7a9b…`, and `75a4a0bf…` |
-| root `Cargo.lock` | PASS, unchanged | worktree and HEAD Git blob `85add89356d8b73f56a58dc271359e572150204d` |
-| reviewed clean CSA source commit/tag containing p3 | **NOT VERIFIED** | local source is ready for commit/push; no release tag created |
-| hosted compatibility Release workflow | **NOT VERIFIED** | configured for exact p3; not dispatched from this worktree |
-| hosted manager/Node matrix and current npm tarballs | **NOT VERIFIED** | no hosted jobs or npm candidate assembly in this p3 run |
-| Linux x64/arm64 and macOS x64/arm64 manager lanes | **NOT VERIFIED** | CI configuration is not execution evidence |
-| POSIX process-group signal behavior | **NOT VERIFIED** | local host is Windows |
-| authenticated external-provider p3 lane | **NOT VERIFIED** | request-count E2E used a loopback fake Responses provider |
-| 65-second/five-minute authenticated child, approval, and Ctrl+C lanes | **NOT VERIFIED** | not executed for p3 |
-| persistent production PATH and interactive TUI rollback | **NOT VERIFIED** | only disposable manager activation and noninteractive default-config commands ran |
-| signing | **NOT VERIFIED** | no signing identity supplied |
-| npm/GitHub publication | **NOT EXECUTED** | source push and build authorization does not publish packages, Releases, or tags |
+Runtime-lock SHA-256:
+38ee51e00fce99ef5cf91e2be80345262a52b8adf98608e2c4bcd32ffe7a5566
+```
 
-## Development isolation
+The acceptance record at:
 
-The clean upstream checkout, independent Cargo target, patched binary, manager root, isolated `CODEX_HOME`, cwd, logs, state, npm prefix, and child-only PATH all live in distinct disposable paths under `.dev`. The normal-shim check reused the default Codex configuration by inheritance; no configuration or authentication file was copied or modified.
+```text
+release/acceptance/rust-v0.149.0-native-join-p3/x86_64-pc-windows-msvc.json
+```
 
-Official fingerprints remained unchanged:
+is a reviewed-baseline migration of the artifact identity already present in the p3 manifest and the previous readiness record. It does **not** claim that the replacement workflow has already reproduced or published that artifact in hosted CI.
 
-- launcher: `C:/Users/Long/.bun/bin/codex.exe`, 15,872 bytes, SHA-256 `59b379b53354da72d2c5262119fe70c44b4e473826ebbaa94d47a2d58a359b1a`;
-- native executable: `C:/Users/Long/.bun/install/global/node_modules/@openai/codex-win32-x64/vendor/x86_64-pc-windows-msvc/bin/codex.exe`, 297,362,224 bytes, SHA-256 `14b7e6b2356e82d1d9275579eaa588757b4e0a501b65dcc19fccdf77bd83dc00`.
+## Replacement validation status
 
-Frozen payload aggregates also remained unchanged:
+### Passed locally
 
-- `payload/codex/rust-v0.148.0-native-join-p1`: `2c1b077b3880e66904bec82c3e09c7e1669636da5759c779d0839dd3f546324d`;
-- `payload/codex/rust-v0.148.0-native-join-p2`: `04ad7a9b78b3dd8e1721d53f187001f1acac9ee3e6b1a3510d96b0f4186c2e44`;
-- `payload/codex/native-join-p2`: `75a4a0bf13c2a5afc8a4a97d8f49b4e9fcf6e7ec729ac4f7fa19f595b93c9c3a`.
+Machine-readable totals:
 
-## Remaining release conditions
+```text
+package-only validation: 50 / 50 passed
+real-manifest repository overlay: 52 / 52 passed
+```
 
-1. Commit and push the exact p3 payload, manager/catalog selection, workflows, release hash guard, tests, and documentation as one clean authority change, then require hosted build gates to pass.
-2. Rebuild from that clean default-branch commit and require the Windows executable to reproduce SHA-256 `64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d`.
-3. Run the hosted compatibility workflow with the exact official Windows npm integrity and locally accepted executable hash; inspect the staged manifest, descriptor, and all Release assets before any publication job.
-4. Run the hosted manager/Node/platform matrix and assemble a separate manager candidate before advertising or publishing manager/npm artifacts.
-5. Keep non-Windows, POSIX signal, authenticated external-provider, long-duration, signing, and production activation lanes `NOT VERIFIED` until each is actually run.
 
-The compatibility update, publication, production plug, and rollback commands are in [docs/release.md](docs/release.md). Operations and uninstall recovery are in [docs/operations.md](docs/operations.md).
+- compatibility catalog unit tests;
+- release-asset guard unit tests;
+- Python syntax compilation;
+- JSON parsing and hash/link validation;
+- GitHub/CircleCI YAML parsing with the available parser;
+- Bash syntax validation for `build_patched_codex_bundle.sh`;
+- workflow static guard: no compatibility ID, upstream commit, or npm SRI authority in CircleCI/formal patched release YAML;
+- CircleCI uses the dated `ubuntu-2604:2026.05.1` machine image rather than a moving `current` tag;
+- workflow-dispatch and CircleCI selector/target values are passed as environment data rather than interpolated into shell source;
+- Manager platform CI discovers `npm pack --json` output paths instead of assuming version `0.1.1`;
+- resolver validation against the real p1/p2/p3 manifests from the fixed baseline;
+- current p3 resolution with acceptance and release authority required.
+
+### Not verified by this replacement-generation session
+
+- hosted GitHub Actions execution;
+- `actionlint` in the repository toolchain;
+- CircleCI CLI validation;
+- hosted CircleCI candidate compilation;
+- cold/warm/near-warm build timings and CircleCI credits;
+- full independent p3 binary rebuild;
+- exact reproduction of the accepted `codex.exe` SHA-256;
+- draft reconciliation against a real GitHub Release;
+- formal publication;
+- authenticated local Windows acceptance replay.
+
+Do not mark the replacement production-ready until the hosted and build validations above have passed.
+
+## Data-driven release gates
+
+The following gates are mandatory:
+
+- [x] CircleCI YAML contains no static compatibility version matrix.
+- [x] One ordinary pipeline request resolves one exact compatibility and target.
+- [x] `build_all_compat=true` fails closed instead of compiling all historical versions.
+- [x] Historical payloads remain present and immutable.
+- [x] Workflow inputs no longer copy official npm integrity or accepted artifact SHA-256.
+- [x] Build infrastructure is committed in a reviewed build profile.
+- [x] Official runtime identity is committed in a target-specific runtime lock.
+- [x] Acceptance identity is committed in a machine-readable record.
+- [x] Formal release rebuilds only `codex-cli` / `codex`.
+- [x] Formal release does not call manifest `finalize` in temporary staging.
+- [x] Draft publication is recoverable and exact-asset guarded.
+- [x] Published compatibility Releases are immutable.
+- [ ] Hosted CircleCI current build succeeds.
+- [ ] Hosted GitHub formal rebuild reproduces the accepted artifact exactly.
+- [ ] Draft upload/recovery canary succeeds.
+- [ ] Final published asset set passes remote digest verification.
+
+## Cache decision
+
+```text
+Cargo download cache: KEEP
+Rustup cache: KEEP
+cargo-xwin SDK cache: KEEP
+Pinned build-tool cache: KEEP
+Official runtime archive cache: KEEP
+sccache: KEEP
+Uncontrolled target/ cache: DO NOT ADD
+```
+
+The replacement changes cache key authority, not cache purpose. Keys include reviewed profile/runtime/manifest identities while retaining migration restore prefixes. Cold builds remain valid without any cache.
+
+## Current platform boundary
+
+Only this patched target is currently accepted:
+
+```text
+x86_64-pc-windows-msvc
+```
+
+CSA Manager remains a separate five-platform product. This document does not claim that patched Codex Linux or macOS targets are built, accepted, or published. Future patched targets must be represented as separate manifest artifacts and separate downloadable executables; they must not be bundled into a single five-platform archive.
+
+## Manager discovery boundary
+
+The new compatibility index is authoritative for CI/release routing. It is not yet a remotely consumed Manager protocol. The current Manager compatibility mapping remains unchanged by this package. A dynamic Manager discovery migration requires a separately reviewed Rust implementation and Manager release.
+
+## Production rollout decision
+
+Status at package generation:
+
+```text
+STATIC REPLACEMENT VALIDATION: PASS
+HOSTED CI VALIDATION: NOT VERIFIED
+FULL PATCHED CODEX REBUILD: NOT VERIFIED
+FORMAL RELEASE: NOT VERIFIED
+PRODUCTION MERGE: CANARY REQUIRED
+```
+
+Use `APPLY_AND_ROLLBACK.md` and run the repository validation before the first canary PR.

@@ -1,0 +1,59 @@
+{
+  "schema": 1,
+  "current": {
+    "x86_64-pc-windows-msvc": "rust-v0.149.0-native-join-p3"
+  },
+  "compatibilities": {
+    "rust-v0.147.0-native-join-p2": {
+      "lifecycle": "legacy",
+      "build_enabled": true,
+      "release_enabled": false,
+      "manifest": "payload/codex/native-join-p2/bindings/rust-v0.147.0-native-join-p2/manifest.toml",
+      "manifest_sha256": "1d5f895313051195f2f06f3b6400912b0906e5f97ebce181e2816d2db289bc78",
+      "targets": {
+        "x86_64-pc-windows-msvc": {
+          "build_profile": "release/build-profiles/windows-msvc-x64.json",
+          "build_profile_sha256": "be3194ff9dab2c69914ef0751f700d8d4114a0bd53528bd5b566c61fdf05df13",
+          "runtime_lock": "release/runtime-locks/rust-v0.147.0-native-join-p2.json",
+          "runtime_lock_sha256": "0c5d5ab590208557c7283a56ee36f90724228881e290543e97a07b03257305b3",
+          "acceptance": null,
+          "acceptance_sha256": null
+        }
+      }
+    },
+    "rust-v0.148.0-native-join-p2": {
+      "lifecycle": "legacy",
+      "build_enabled": true,
+      "release_enabled": false,
+      "manifest": "payload/codex/native-join-p2/bindings/rust-v0.148.0-native-join-p2/manifest.toml",
+      "manifest_sha256": "8b0acfc159187b25bab0baac40efa470a60d1f220fc91d6fb7b8703e70184a99",
+      "targets": {
+        "x86_64-pc-windows-msvc": {
+          "build_profile": "release/build-profiles/windows-msvc-x64.json",
+          "build_profile_sha256": "be3194ff9dab2c69914ef0751f700d8d4114a0bd53528bd5b566c61fdf05df13",
+          "runtime_lock": "release/runtime-locks/rust-v0.148.0-native-join-p2.json",
+          "runtime_lock_sha256": "2c737a05ee48607bdb953e6e997d7194cd4b064f310d1fb27944727b34e06a93",
+          "acceptance": null,
+          "acceptance_sha256": null
+        }
+      }
+    },
+    "rust-v0.149.0-native-join-p3": {
+      "lifecycle": "accepted",
+      "build_enabled": true,
+      "release_enabled": true,
+      "manifest": "payload/codex/rust-v0.149.0-native-join-p3/manifest.toml",
+      "manifest_sha256": "6627d066d6098613d8b67ec478c66453a175808a5d06e441ac8a51ac3ae0ba2c",
+      "targets": {
+        "x86_64-pc-windows-msvc": {
+          "build_profile": "release/build-profiles/windows-msvc-x64.json",
+          "build_profile_sha256": "be3194ff9dab2c69914ef0751f700d8d4114a0bd53528bd5b566c61fdf05df13",
+          "runtime_lock": "release/runtime-locks/rust-v0.149.0-native-join-p3.json",
+          "runtime_lock_sha256": "38ee51e00fce99ef5cf91e2be80345262a52b8adf98608e2c4bcd32ffe7a5566",
+          "acceptance": "release/acceptance/rust-v0.149.0-native-join-p3/x86_64-pc-windows-msvc.json",
+          "acceptance_sha256": "08dcfbcb11098cfe382b85ffc6580f180266753b9aa7ea831ef6790e0246e059"
+        }
+      }
+    }
+  }
+}

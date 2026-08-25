@@ -33,7 +33,7 @@ GitHub Release 分成两条独立流：`vX.Y.Z` 只放 CSA manager/npm 产物，
 | macOS x64 | CI 已配置，未验证 | 无 |
 | macOS arm64 | CI 已配置，未验证 | 无 |
 
-当前兼容 authority 固定到上游 tag `rust-v0.149.0`、commit `758ef40f50c1a458425c7cfbf1eb12cbc07af0b0`、Rust `1.95.0` 和 `x86_64-pc-windows-msvc`。本地接受的 executable 为 299,645,952 bytes，SHA-256 为 `64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d`。上游、官方 runtime 或 artifact 发生漂移时会 fail closed。
+当前兼容 authority 固定到上游 tag `rust-v0.149.0`、commit `758ef40f50c1a458425c7cfbf1eb12cbc07af0b0`、Rust `1.95.0` 和 `x86_64-pc-windows-msvc`。本地接受的 executable 为 298,215,424 bytes，SHA-256 为 `e3302a04e8bc6062c5d092692e7d38239986453c599dcdf128fd1d9598f596fd`。上游、官方 runtime 或 artifact 发生漂移时会 fail closed。
 
 ## 前置条件
 

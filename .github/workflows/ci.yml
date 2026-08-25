@@ -20,47 +20,281 @@ env:
   GIT_CONFIG_VALUE_0: "false"
 
 jobs:
-  quality:
-    name: Quality
+  changes:
+    name: Detect changed areas
+    runs-on: ubuntu-24.04
+    outputs:
+      manager: ${{ steps.detect.outputs.manager }}
+      launcher: ${{ steps.detect.outputs.launcher }}
+      packaged_docs: ${{ steps.detect.outputs.packaged_docs }}
+      payload: ${{ steps.detect.outputs.payload }}
+      tooling: ${{ steps.detect.outputs.tooling }}
+      platform_support: ${{ steps.detect.outputs.platform_support }}
+      workflows: ${{ steps.detect.outputs.workflows }}
+      quality: ${{ steps.detect.outputs.quality }}
+      node_compat: ${{ steps.detect.outputs.node_compat }}
+      platform: ${{ steps.detect.outputs.platform }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - name: Classify changed paths
+        id: detect
+        shell: bash
+        env:
+          EVENT_NAME: ${{ github.event_name }}
+          PR_BASE_SHA: ${{ github.event.pull_request.base.sha }}
+          PR_HEAD_SHA: ${{ github.event.pull_request.head.sha }}
+          PUSH_BASE_SHA: ${{ github.event.before }}
+          PUSH_HEAD_SHA: ${{ github.sha }}
+          REF_NAME: ${{ github.ref_name }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          set -euo pipefail
+
+          manager=false
+          launcher=false
+          packaged_docs=false
+          payload=false
+          tooling=false
+          platform_support=false
+          workflows=false
+
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            manager=true
+            launcher=true
+            packaged_docs=true
+            payload=true
+            tooling=true
+            platform_support=true
+            workflows=true
+            files=("<workflow-dispatch:full>")
+          else
+            if [[ "$EVENT_NAME" == "pull_request" ]]; then
+              base_sha="$PR_BASE_SHA"
+              head_sha="$PR_HEAD_SHA"
+            else
+              base_sha="$PUSH_BASE_SHA"
+              head_sha="$PUSH_HEAD_SHA"
+            fi
+
+            if [[ -z "$base_sha" || "$base_sha" =~ ^0+$ ]] || ! git cat-file -e "${base_sha}^{commit}" 2>/dev/null; then
+              if git rev-parse "${head_sha}^" >/dev/null 2>&1; then
+                base_sha="$(git rev-parse "${head_sha}^")"
+              else
+                base_sha="$(git hash-object -t tree /dev/null)"
+              fi
+            fi
+
+            echo "Diff base: $base_sha"
+            echo "Diff head: $head_sha"
+            mapfile -t files < <(git diff --name-only --no-renames "$base_sha" "$head_sha")
+
+            for file in "${files[@]}"; do
+              classified=false
+
+              case "$file" in
+                Cargo.toml|Cargo.lock|rust-toolchain.toml|build.rs|src/*|tests/*)
+                  manager=true
+                  classified=true
+                  ;;
+              esac
+
+              case "$file" in
+                npm/*|release/support-matrix.json|scripts/*.mjs)
+                  launcher=true
+                  classified=true
+                  ;;
+              esac
+
+              case "$file" in
+                LICENSE|README.md|README_ZH.md|THIRD_PARTY_NOTICES.md)
+                  packaged_docs=true
+                  classified=true
+                  ;;
+              esac
+
+              case "$file" in
+                docs/*|.trellis/*|AGENTS.md|CONTRIBUTING.md|SECURITY.md|CHANGELOG.md|.gitignore|.gitattributes)
+                  classified=true
+                  ;;
+              esac
+
+              case "$file" in
+                payload/codex/*|scripts/*.sh|scripts/run_patch_contract.py|scripts/verify_patch_payload.py|scripts/test_verify_patch_payload.py|scripts/compatibility_audit.py|scripts/check_sccache_stats.py)
+                  payload=true
+                  classified=true
+                  ;;
+              esac
+
+              case "$file" in
+                release/*|release-readiness.md|scripts/*.py)
+                  tooling=true
+                  classified=true
+                  ;;
+              esac
+
+              case "$file" in
+                scripts/ci_release.py)
+                  platform_support=true
+                  classified=true
+                  ;;
+              esac
+
+              case "$file" in
+                .github/*|.circleci/*)
+                  workflows=true
+                  classified=true
+                  ;;
+              esac
+
+              # Unknown paths fail closed into the cheap tooling lane rather than
+              # silently bypassing all checks. They still do not trigger the
+              # five-platform build unless they are later classified as manager,
+              # launcher, or workflow changes.
+              if [[ "$classified" != "true" ]]; then
+                echo "Unclassified path routed to tooling checks: $file"
+                tooling=true
+              fi
+            done
+          fi
+
+          if [[ "$workflows" == "true" ]]; then
+            manager=true
+            launcher=true
+            packaged_docs=true
+            payload=true
+            tooling=true
+          fi
+
+          quality=false
+          if [[ "$manager" == "true" || "$launcher" == "true" || "$packaged_docs" == "true" || "$payload" == "true" || "$tooling" == "true" ]]; then
+            quality=true
+          fi
+
+          node_compat=false
+          if [[ "$launcher" == "true" || "$workflows" == "true" ]]; then
+            node_compat=true
+          fi
+
+          platform=false
+          if [[ "$EVENT_NAME" == "workflow_dispatch" ]]; then
+            platform=true
+          elif [[ "$EVENT_NAME" == "push" && "$REF_NAME" == "$DEFAULT_BRANCH" && ( "$manager" == "true" || "$launcher" == "true" || "$platform_support" == "true" || "$workflows" == "true" ) ]]; then
+            platform=true
+          fi
+
+          {
+            echo "manager=$manager"
+            echo "launcher=$launcher"
+            echo "packaged_docs=$packaged_docs"
+            echo "payload=$payload"
+            echo "tooling=$tooling"
+            echo "platform_support=$platform_support"
+            echo "workflows=$workflows"
+            echo "quality=$quality"
+            echo "node_compat=$node_compat"
+            echo "platform=$platform"
+          } >> "$GITHUB_OUTPUT"
+
+          {
+            echo "## CI routing"
+            echo
+            echo "| Area | Required |"
+            echo "|---|---:|"
+            echo "| manager | $manager |"
+            echo "| launcher | $launcher |"
+            echo "| packaged docs | $packaged_docs |"
+            echo "| payload | $payload |"
+            echo "| release/tooling | $tooling |"
+            echo "| platform support tooling | $platform_support |"
+            echo "| workflows | $workflows |"
+            echo "| core quality job | $quality |"
+            echo "| Node compatibility matrix | $node_compat |"
+            echo "| five-platform lane | $platform |"
+            echo
+            echo "### Changed paths"
+            if (( ${#files[@]} == 0 )); then
+              echo "No changed paths were reported."
+            else
+              printf -- '- `%s`\n' "${files[@]}"
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"
+
+  quality-checks:
+    name: Core quality checks
+    needs: changes
+    if: needs.changes.outputs.quality == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+
+      - name: Set up Node.js
+        if: needs.changes.outputs.launcher == 'true' || needs.changes.outputs.packaged_docs == 'true' || needs.changes.outputs.workflows == 'true'
+        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
         with:
           node-version: "26"
           package-manager-cache: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+
+      - name: Set up Python
+        if: needs.changes.outputs.payload == 'true' || needs.changes.outputs.tooling == 'true' || needs.changes.outputs.workflows == 'true'
+        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
         with:
           python-version: "3.13"
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
+
+      - name: Set up Rust
+        if: needs.changes.outputs.manager == 'true' || needs.changes.outputs.workflows == 'true'
+        uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
         with:
           components: clippy,rustfmt
+
       - name: Set up Cargo downloads and sccache
+        if: needs.changes.outputs.manager == 'true' || needs.changes.outputs.workflows == 'true'
         uses: ./.github/actions/setup-codex-rust-cache
         with:
           cache-scope: csa-manager-${{ hashFiles('Cargo.lock') }}
           toolchain: "1.95.0"
+
       - name: Rust quality
+        if: needs.changes.outputs.manager == 'true' || needs.changes.outputs.workflows == 'true'
         run: |
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --all-features -- -D warnings
           cargo test --all-targets
+
       - name: Rust cache statistics
-        if: always()
+        if: always() && (needs.changes.outputs.manager == 'true' || needs.changes.outputs.workflows == 'true')
         continue-on-error: true
         run: sccache --show-stats
-      - name: Launcher and package tools
+
+      - name: Launcher and npm package tooling
+        if: needs.changes.outputs.launcher == 'true' || needs.changes.outputs.packaged_docs == 'true' || needs.changes.outputs.workflows == 'true'
         run: |
           node --check npm/meta/bin/csa.js
           node --check scripts/stage_npm_packages.mjs
           node scripts/test_npm_launcher.mjs
+
+      - name: Patch, release, and compatibility tooling
+        if: needs.changes.outputs.payload == 'true' || needs.changes.outputs.tooling == 'true' || needs.changes.outputs.workflows == 'true'
+        run: |
           python scripts/test_verify_patch_payload.py
           python scripts/test_release_tools.py
+          python scripts/test_compat_catalog.py
+          python scripts/test_verify_release_asset_set.py
+          python scripts/compat_catalog.py validate --repository .
+          python scripts/compat_catalog.py guard-workflows \
+            .circleci/config.yml \
+            .github/workflows/ci.yml \
+            .github/workflows/release-csa.yml \
+            .github/workflows/release-patched-codex.yml \
+            .github/workflows/watch-codex-release.yml
+
       - name: Immutable compatibility entries
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && (needs.changes.outputs.payload == 'true' || needs.changes.outputs.workflows == 'true')
         env:
           BASE_SHA: ${{ github.event.pull_request.base.sha }}
         run: |
@@ -72,6 +306,8 @@ jobs:
 
   node-compat:
     name: Node ${{ matrix.node }}
+    needs: changes
+    if: needs.changes.outputs.node_compat == 'true'
     runs-on: ubuntu-24.04
     strategy:
       matrix:
@@ -90,8 +326,8 @@ jobs:
           node scripts/test_npm_launcher.mjs
 
   platform:
-    # EXPERIMENTAL: OpenAI-style fast PR path. Full platform verification runs on default-branch pushes or manual runs.
-    if: github.event_name == 'workflow_dispatch' || (github.event_name == 'push' && github.ref_name == github.event.repository.default_branch)
+    needs: changes
+    if: needs.changes.outputs.platform == 'true'
     name: ${{ matrix.id }}
     strategy:
       fail-fast: false
@@ -164,17 +400,45 @@ jobs:
         run: node scripts/test_npm_launcher.mjs
       - name: Stage npm packages
         run: node scripts/stage_npm_packages.mjs --out "${{ runner.temp }}/csa/stage" --binary "${{ matrix.id }}=${{ runner.temp }}/csa/cargo-target/${{ matrix.target }}/release/${{ matrix.binary }}"
-      - name: Pack npm candidates
+      - name: Pack npm candidates and resolve exact tarballs
+        shell: pwsh
         run: |
-          npm pack "${{ runner.temp }}/csa/stage/meta" --json --pack-destination "${{ runner.temp }}/csa/tarballs"
-          npm pack "${{ runner.temp }}/csa/stage/platforms/${{ matrix.id }}" --json --pack-destination "${{ runner.temp }}/csa/tarballs"
+          $meta = @(npm pack "${{ runner.temp }}/csa/stage/meta" --json --pack-destination "${{ runner.temp }}/csa/tarballs" | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0 -or $meta.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$meta[0].filename)) {
+            throw "npm pack did not produce exactly one meta package"
+          }
+          $platform = @(npm pack "${{ runner.temp }}/csa/stage/platforms/${{ matrix.id }}" --json --pack-destination "${{ runner.temp }}/csa/tarballs" | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0 -or $platform.Count -ne 1 -or [string]::IsNullOrWhiteSpace([string]$platform[0].filename)) {
+            throw "npm pack did not produce exactly one platform package"
+          }
+
+          $metaTarball = Join-Path "${{ runner.temp }}/csa/tarballs" ([string]$meta[0].filename)
+          $platformTarball = Join-Path "${{ runner.temp }}/csa/tarballs" ([string]$platform[0].filename)
+          if (-not (Test-Path -LiteralPath $metaTarball -PathType Leaf)) { throw "meta tarball is missing: $metaTarball" }
+          if (-not (Test-Path -LiteralPath $platformTarball -PathType Leaf)) { throw "platform tarball is missing: $platformTarball" }
+          @("META_TARBALL=$metaTarball", "PLATFORM_TARBALL=$platformTarball") |
+            Add-Content -Path $env:GITHUB_ENV -Encoding utf8
       - name: Temporary-prefix install
+        shell: pwsh
         run: |
-          npm install --prefix "${{ runner.temp }}/csa/npm-prefix" --offline --no-audit --no-fund "${{ runner.temp }}/csa/tarballs/dslzl-csa-${{ matrix.id }}-0.1.1.tgz" "${{ runner.temp }}/csa/tarballs/dslzl-csa-0.1.1.tgz"
+          npm install --prefix "${{ runner.temp }}/csa/npm-prefix" --offline --no-audit --no-fund "$env:PLATFORM_TARBALL" "$env:META_TARBALL"
+          if ($LASTEXITCODE -ne 0) { throw "temporary-prefix npm install failed" }
           node scripts/test_installed_launcher.mjs "${{ runner.temp }}/csa/npm-prefix"
+          if ($LASTEXITCODE -ne 0) { throw "installed launcher test failed" }
           npm uninstall --prefix "${{ runner.temp }}/csa/npm-prefix" --offline --no-audit --no-fund "@dslzl/csa" "@dslzl/csa-${{ matrix.id }}"
+          if ($LASTEXITCODE -ne 0) { throw "temporary-prefix npm uninstall failed" }
       - name: Record platform artifact
-        run: python scripts/ci_release.py platform --repository "${{ github.workspace }}" --platform "${{ matrix.id }}" --manager "${{ runner.temp }}/csa/cargo-target/${{ matrix.target }}/release/${{ matrix.binary }}" --meta-tarball "${{ runner.temp }}/csa/tarballs/dslzl-csa-0.1.1.tgz" --npm-tarball "${{ runner.temp }}/csa/tarballs/dslzl-csa-${{ matrix.id }}-0.1.1.tgz" --isolation-root "${{ runner.temp }}/csa" --output "${{ runner.temp }}/csa/artifact/${{ matrix.id }}"
+        shell: pwsh
+        run: |
+          python scripts/ci_release.py platform `
+            --repository "${{ github.workspace }}" `
+            --platform "${{ matrix.id }}" `
+            --manager "${{ runner.temp }}/csa/cargo-target/${{ matrix.target }}/release/${{ matrix.binary }}" `
+            --meta-tarball "$env:META_TARBALL" `
+            --npm-tarball "$env:PLATFORM_TARBALL" `
+            --isolation-root "${{ runner.temp }}/csa" `
+            --output "${{ runner.temp }}/csa/artifact/${{ matrix.id }}"
+          if ($LASTEXITCODE -ne 0) { throw "platform artifact recording failed" }
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: platform-${{ matrix.id }}
@@ -182,3 +446,42 @@ jobs:
           if-no-files-found: error
           retention-days: 1
 
+  quality:
+    name: Quality
+    needs: [changes, quality-checks, node-compat, platform]
+    if: always()
+    runs-on: ubuntu-24.04
+    steps:
+      - name: Enforce routed job results
+        shell: bash
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          QUALITY_REQUIRED: ${{ needs.changes.outputs.quality }}
+          NODE_REQUIRED: ${{ needs.changes.outputs.node_compat }}
+          PLATFORM_REQUIRED: ${{ needs.changes.outputs.platform }}
+          QUALITY_RESULT: ${{ needs['quality-checks'].result }}
+          NODE_RESULT: ${{ needs['node-compat'].result }}
+          PLATFORM_RESULT: ${{ needs.platform.result }}
+        run: |
+          set -euo pipefail
+          echo "Path classifier: result=$CHANGES_RESULT"
+          echo "Core quality: required=$QUALITY_REQUIRED result=$QUALITY_RESULT"
+          echo "Node compatibility: required=$NODE_REQUIRED result=$NODE_RESULT"
+          echo "Five-platform lane: required=$PLATFORM_REQUIRED result=$PLATFORM_RESULT"
+
+          if [[ "$CHANGES_RESULT" != "success" ]]; then
+            echo "Changed-path classification did not succeed."
+            exit 1
+          fi
+          if [[ "$QUALITY_REQUIRED" == "true" && "$QUALITY_RESULT" != "success" ]]; then
+            echo "Required core quality job did not succeed."
+            exit 1
+          fi
+          if [[ "$NODE_REQUIRED" == "true" && "$NODE_RESULT" != "success" ]]; then
+            echo "Required Node compatibility matrix did not succeed."
+            exit 1
+          fi
+          if [[ "$PLATFORM_REQUIRED" == "true" && "$PLATFORM_RESULT" != "success" ]]; then
+            echo "Required five-platform lane did not succeed."
+            exit 1
+          fi

@@ -3,12 +3,14 @@
 
 from __future__ import annotations
 
+from contextlib import redirect_stderr, redirect_stdout
 import hashlib
 import io
 import json
 import os
 import platform as sys_platform
 import shutil
+import subprocess
 import sys
 import tarfile
 import tempfile
@@ -24,7 +26,8 @@ sys.path.insert(0, str(SCRIPTS))
 from assemble_release_candidate import ReleaseError, assemble, digest, load_matrix  # noqa: E402
 from ci_release import build_input, platform_artifact  # noqa: E402
 from compatibility_audit import AuditError, check_immutability  # noqa: E402
-from check_sccache_stats import StatsError, validate as validate_sccache_stats  # noqa: E402
+from check_sccache_stats import main as sccache_stats_main  # noqa: E402
+from check_sccache_stats import summarize as summarize_sccache_stats  # noqa: E402
 from compat_release import (  # noqa: E402
     CompatibilityReleaseError,
     blocker_body,
@@ -39,8 +42,11 @@ from compat_release import (  # noqa: E402
 from run_patch_contract import (  # noqa: E402
     ContractError,
     cross_windows_build_argv,
+    cross_windows_build_env,
     execute_version,
     load_contract,
+    load_test_report,
+    run_step,
 )
 from verify_patch_payload import VerificationError, _load_payload, _payload_file  # noqa: E402
 
@@ -402,10 +408,135 @@ def test_contract_shape() -> None:
     assert "--test-threads=1" not in p3_contract["tests"][-3]["argv"]
     assert "--skip" in p3_contract["tests"][-3]["argv"]
     assert p3_contract["tests"][-4]["argv"][5] in p3_contract["tests"][-3]["argv"]
+    tui_tests = [
+        test
+        for test in p3_contract["tests"]
+        if test["argv"][:4] == ["cargo", "test", "-p", "codex-tui"]
+    ]
+    assert {test["name"] for test in tui_tests} == {
+        "CSA startup version display",
+        "TUI live state and panel",
+        "TUI background exit isolation",
+        "complete TUI library",
+    }
+    assert all(test.get("output") == "failure-only" for test in tui_tests)
     assert "unrelated asynchronous event" in p3_contract["known_upstream_errata"][-1]
     assert p3_contract["common_env"]["CARGO_BUILD_JOBS"] == "2"
     assert p3_contract["common_env"]["INSTA_WORKSPACE_ROOT"] == "{source}/codex-rs"
     assert p3_contract["build"]["env"]["CARGO_BUILD_JOBS"] == "4"
+    assert "RUSTFLAGS" not in p3_contract["build"]["env"]
+    assert cross_windows_build_env(p3_contract["build"]["env"])["RUSTFLAGS"] == (
+        "-C link-arg=/debug:none -C link-arg=/build-id:no"
+    )
+    report = {
+        "schema": 1,
+        "result": "pass",
+        "phase": "tests",
+        "compat_id": p3.name,
+        "source_verification": {},
+        "steps": [{"kind": "test", "name": "fixture", "exit_code": 0}],
+        "known_upstream_errata": p3_contract["known_upstream_errata"],
+    }
+    with tempfile.TemporaryDirectory(prefix="csa-test-phase-") as directory:
+        report_path = Path(directory) / "tests.json"
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        assert load_test_report(
+            report_path,
+            p3.name,
+            p3_contract["known_upstream_errata"],
+            [("test", "fixture")],
+        )["result"] == "pass"
+        report["steps"][0]["exit_code"] = 1
+        report_path.write_text(json.dumps(report), encoding="utf-8")
+        try:
+            load_test_report(
+                report_path,
+                p3.name,
+                p3_contract["known_upstream_errata"],
+                [("test", "fixture")],
+            )
+        except ContractError:
+            pass
+        else:
+            raise AssertionError("failed test phase report was accepted")
+    with patch(
+        "run_patch_contract.subprocess.run",
+        side_effect=[
+            subprocess.CompletedProcess([], 101),
+            subprocess.CompletedProcess([], 0),
+        ],
+    ) as execute:
+        result = run_step(
+            p3_contract["tests"][-4],
+            "test",
+            REPOSITORY,
+            {},
+            REPOSITORY,
+            REPOSITORY / ".dev" / "unused-target",
+        )
+    assert execute.call_count == 2
+    assert result["exit_code"] == 0
+
+    stdout = io.StringIO()
+    stderr = io.StringIO()
+
+    def noisy_result(argv: list[str], **options: object) -> subprocess.CompletedProcess:
+        captured_stdout = options["stdout"]
+        assert captured_stdout != subprocess.PIPE
+        assert "stderr" not in options
+        captured_stdout.write(b"\x1b[2Jrendered TUI frame\n")
+        print("cargo progress remains live", file=sys.stderr)
+        return subprocess.CompletedProcess(argv, 0)
+
+    with (
+        patch("run_patch_contract.subprocess.run", side_effect=noisy_result),
+        redirect_stdout(stdout),
+        redirect_stderr(stderr),
+    ):
+        run_step(
+            {"name": "quiet TUI", "argv": ["cargo", "test"], "output": "failure-only"},
+            "test",
+            REPOSITORY,
+            {},
+            REPOSITORY,
+            REPOSITORY / ".dev" / "unused-target",
+        )
+    quiet_output = stdout.getvalue()
+    assert "rendered TUI frame" not in quiet_output
+    assert "rendered TUI frame" not in stderr.getvalue()
+    assert "cargo progress remains live" in stderr.getvalue()
+
+    def failed_noisy_result(
+        argv: list[str], **options: object
+    ) -> subprocess.CompletedProcess:
+        captured_stdout = options["stdout"]
+        assert captured_stdout != subprocess.PIPE
+        assert "stderr" not in options
+        captured_stdout.write(b"\x1b[2Jfailed TUI frame\n")
+        return subprocess.CompletedProcess(argv, 101)
+
+    stderr = io.StringIO()
+    try:
+        with patch(
+            "run_patch_contract.subprocess.run", side_effect=failed_noisy_result
+        ), redirect_stderr(stderr):
+            run_step(
+                {
+                    "name": "failed quiet TUI",
+                    "argv": ["cargo", "test"],
+                    "output": "failure-only",
+                },
+                "test",
+                REPOSITORY,
+                {},
+                REPOSITORY,
+                REPOSITORY / ".dev" / "unused-target",
+            )
+    except ContractError:
+        pass
+    else:
+        raise AssertionError("failed quiet step was accepted")
+    assert "failed TUI frame" in stderr.getvalue()
     try:
         cross_windows_build_argv(["cargo", "test"])
     except ContractError:
@@ -437,20 +568,27 @@ def test_sccache_statistics() -> None:
             "cache_write_errors": 0,
         }
     }
-    assert validate_sccache_stats(document, 95)["rust_hit_rate"] == 97.0
-    for changed, message in (
-        ({"compile_requests": 0}, "zero requests"),
-        ({"cache_hits": metric(90), "cache_misses": metric(10)}, "low warm hit rate"),
-        ({"cache_write_errors": 1}, "cache write error"),
+    summary = summarize_sccache_stats(document, 95)
+    assert summary["rust_hit_rate"] == 97.0 and summary["warnings"] == []
+    for changed in (
+        {"compile_requests": 0},
+        {"cache_hits": metric(90), "cache_misses": metric(10)},
+        {"cache_write_errors": 1},
     ):
         candidate = json.loads(json.dumps(document))
         candidate["stats"].update(changed)
-        try:
-            validate_sccache_stats(candidate, 95)
-        except StatsError:
-            pass
-        else:
-            raise AssertionError(f"sccache accepted {message}")
+        assert summarize_sccache_stats(candidate, 95)["warnings"]
+
+    with tempfile.TemporaryDirectory(prefix="csa-sccache-stats-") as directory:
+        malformed = Path(directory) / "stats.json"
+        malformed.write_text("not json", encoding="utf-8")
+        stdout = io.StringIO()
+        with (
+            patch.object(sys, "argv", ["check_sccache_stats.py", "--stats", str(malformed)]),
+            redirect_stdout(stdout),
+        ):
+            assert sccache_stats_main() == 0
+        assert json.loads(stdout.getvalue())["result"] == "unavailable"
 
 
 def test_release_stream_contracts() -> None:
@@ -468,12 +606,33 @@ def test_release_stream_contracts() -> None:
         REPOSITORY / ".github" / "workflows" / "release-patched-codex.yml"
     ).read_text(encoding="utf-8")
     assert patched_workflow.count("Codex source must not live inside the CSA repository") == 1
-    assert 'default: "rust-v0.149.0-native-join-p3"' in patched_workflow
-    assert 'Path("payload") / "codex" / compat_id / "manifest.toml"' in patched_workflow
-    assert 'manifest.get("patch_set_version") != 6' in patched_workflow
-    assert "accepted_codex_sha256:" in patched_workflow
-    assert "Match locally accepted CircleCI executable" in patched_workflow
-    assert "Get-FileHash -LiteralPath $env:ARTIFACT_PATH" in patched_workflow
+    assert "default: current" in patched_workflow
+    assert "scripts/compat_catalog.py resolve" in patched_workflow
+    assert "--require-acceptance" not in patched_workflow
+    assert "--require-release" in patched_workflow
+    assert "accepted_codex_sha256:" not in patched_workflow
+    assert "Finalize production manifest from the GitHub-built CLI" in patched_workflow
+    assert patched_workflow.count("compat_release.py finalize") == 1
+    assert 'cp -a payload "$staged_root/"' in patched_workflow
+    assert '--manifest "$STAGED_MANIFEST"' in patched_workflow
+    assert 'sha256sum "$ARTIFACT_PATH"' in patched_workflow
+    assert 'gh release view "$TAG"' in patched_workflow
+    assert '--json databaseId' in patched_workflow
+    assert 'releases/$release_id' in patched_workflow
+    assert 'releases/tags/$TAG' not in patched_workflow
+    assert 'create_tag_object()' in patched_workflow
+    assert patched_workflow.count('tag_sha="$(create_tag_object)"') == 2
+    assert 'releases?per_page=100' in patched_workflow
+    assert 'Published release $TAG remains anchored' in patched_workflow
+    assert 'git/refs/tags/$TAG' in patched_workflow
+    assert '-F force=true' in patched_workflow
+    tag_step = patched_workflow.split(
+        "- name: Create or validate annotated compatibility tag", 1
+    )[1].split("- name: Create or resume draft", 1)[0]
+    published_case = tag_step.split("false)", 1)[1].split('true|"")', 1)[0]
+    mutable_case = tag_step.split('true|"")', 1)[1].split("*)", 1)[0]
+    assert "--method PATCH" not in published_case
+    assert "--method PATCH" in mutable_case
 
     ci_workflow = (REPOSITORY / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
@@ -482,49 +641,73 @@ def test_release_stream_contracts() -> None:
         encoding="utf-8"
     )
     circleci = (REPOSITORY / ".circleci" / "config.yml").read_text(encoding="utf-8")
-    assert patched_workflow.count("build_patched_codex_bundle.sh") == 1
+    build_profile = (
+        REPOSITORY / "release" / "build-profiles" / "windows-msvc-x64.json"
+    ).read_text(encoding="utf-8")
+    runtime_locks = "\n".join(
+        path.read_text(encoding="utf-8")
+        for path in sorted((REPOSITORY / "release" / "runtime-locks").glob("*.json"))
+    )
+    assert patched_workflow.count("build_patched_codex_bundle.sh") == 6
+    for phase in ("tools", "rust", "xwin", "runtime", "tests", "build"):
+        assert f"build_patched_codex_bundle.sh {phase}" in patched_workflow
+    assert "output.circle-artifacts.com" not in patched_workflow
+    assert "accepted_artifact_url" not in patched_workflow
     assert circleci.count("build_patched_codex_bundle.sh") == 1
-    assert "runs-on: ubuntu-26.04" in patched_workflow
+    assert patched_workflow.count("runs-on: ubuntu-24.04") == 2
+    assert "runs-on: ubuntu-26.04" not in patched_workflow
+    assert "timeout-minutes: 120" in patched_workflow
+    assert "timeout 50m bash scripts/build_patched_codex_bundle.sh" not in patched_workflow
+    assert "bash scripts/build_patched_codex_bundle.sh" in patched_workflow
+    assert "llvm-toolchain-noble-21" in build_profile
+    assert "6084F3CF814B57C1CF12EFD515CF4D18AF4F7421" in build_profile
+    assert "/usr/lib/llvm-$LLVM_MAJOR/bin" in shared_build
     assert "CARGO_HOME: ${{ runner.temp }}" not in patched_workflow
-    assert '"CARGO_HOME=$(Join-Path $root \'cache/cargo-home\')"' in patched_workflow
+    assert 'echo "CARGO_HOME=$root/cache/cargo-home"' in patched_workflow
     assert "build_patched_codex_bundle.sh" not in ci_workflow
+    assert "compat_catalog.py guard-workflows" in ci_workflow
     assert "build_patched_codex_bundle.sh" not in watcher
     assert "compat_release.py finalize" not in watcher
     assert "compat_release.py pack" not in watcher
     assert "CircleCI compilation and local Windows acceptance" in watcher
-    assert "official_windows_npm_integrity:" in watcher
+    assert "No artifact hash or npm integrity is copied into a workflow input" in watcher
     assert "full_payload" not in ci_workflow
     assert "warm_cache_acceptance" not in ci_workflow
     assert "default: false" in circleci
+    assert circleci.count("image: ubuntu-2604:current") == 2
+    assert "image: ubuntu-2604:2026.05.1" not in circleci
     assert "resource_class: large.gen3" in circleci
+    assert "resource_class: large.gen2" not in circleci
     assert "no_output_timeout: 20m" in circleci
-    assert 'CARGO_BUILD_JOBS: "4"' in circleci
-    assert "csa-cargo-home-v5-linux-amd64-1.95.0-codex-" in circleci
-    assert "csa-rustup-v2-linux-amd64-rustup-1.29.0-rustc-" in circleci
-    assert "csa-xwin-v2-linux-amd64-cargo-xwin-0.23.0-msvc17-x86_64-pc-windows-msvc" in circleci
-    assert "csa-sccache-v4-linux-amd64-rustc-" in circleci
+    assert "scripts/compat_catalog.py resolve" in circleci
+    assert "csa-cargo-home-v6-linux-amd64-" in circleci
+    assert "csa-rustup-v3-linux-amd64-" in circleci
+    assert "csa-xwin-v3-linux-amd64-" in circleci
+    assert "csa-sccache-v6-linux-amd64-" in circleci
     assert "csa-sccache-v3-linux-amd64-1.95.0-xwin-0.23.0-codex-" in circleci
     assert "csa-sccache-v2-" not in circleci
     for cargo_download in ("registry/index", "registry/cache", "git/db"):
         assert f"/cargo-home/{cargo_download}" in circleci
-    assert "RUSTC_WRAPPER: /home/circleci/.local/bin/sccache" in circleci
+    assert 'export RUSTC_WRAPPER="$CSA_TOOL_BIN/sccache"' in shared_build
     assert "SCCACHE_CACHE_SIZE: 4G" in circleci
     assert "SCCACHE_CACHE_SIZE: 450M" not in circleci
     assert "caches: 7d" in circleci
     assert "sccache --max-cache-size" not in circleci
-    assert 'root="$HOME/csa-patched-codex/$compat_id"' in circleci
-    assert 'root="/tmp/csa-patched-codex/$compat_id"' not in circleci
+    assert 'root="$HOME/csa-patched-codex/$CSA_COMPAT_ID"' in circleci
+    assert 'root="/tmp/csa-patched-codex/$CSA_COMPAT_ID"' not in circleci
     assert "TMPDIR: /home/circleci/csa-tmp" in circleci
     assert "umask 077" in circleci
     assert 'chmod 0700 "$TMPDIR"' in circleci
-    assert circleci.count("rust-v0.147.0-native-join-p2") == 1
-    assert circleci.count("rust-v0.148.0-native-join-p2") == 1
-    assert circleci.count("rust-v0.149.0-native-join-p3") == 2
-    assert circleci.count("b964d5b08aeb3049c4a52f3efc9eae52ce14a6a029250c14e1d1b7599192cde4") == 2
+    assert "rust-v0." not in circleci
+    assert "sha512-" not in circleci
     assert "build_latest_patched_codex:" in circleci
+    assert "build_patched_codex:" in circleci
+    assert "compat_selector:" in circleci
+    assert "build_all_compat is intentionally rejected" in circleci
+    assert "<<'EOF'" not in circleci
     assert "store_latest_patched_artifact:" in circleci
-    assert circleci.count("require_warm_cache:") == 3
-    assert "if << parameters.require_warm_cache >>; then" in circleci
+    assert circleci.count("require_warm_cache:") == 4
+    assert 'if [[ "$CSA_REQUIRE_WARM_CACHE_PARAM" == true ]]; then' in circleci
     assert "export CSA_MINIMUM_RUST_HIT_RATE=95" in circleci
     assert "build=(timeout 50m bash)" in circleci
     assert "build=(timeout 30m bash)" in circleci
@@ -534,51 +717,91 @@ def test_release_stream_contracts() -> None:
     assert "git clone +" not in circleci
     assert "condition: << parameters.store_artifact >>" in circleci
     assert "store_artifact: << pipeline.parameters.store_latest_patched_artifact >>" in circleci
-    assert "sha512-oT7Ss5fAPf2fiWE9QNURqZcQGAAawSVxmIUdgPzckq4K" in circleci
-    assert "sha512-/Jg8eYw0BqTGNUpnrzzWlK2kbu29NWg7t6pnUDEfxqp" in circleci
-    assert "sha512-qKbwSOOO/fdhQ5MlXE2fts6taPxRPZ/zqeC+eqHD72hLRymV9" in circleci
     assert "OPENAI_API_KEY" not in circleci
-    family_index = tomllib.loads(
-        (REPOSITORY / "payload" / "codex" / "native-join-p2" / "family.toml").read_text(
-            encoding="utf-8"
-        )
-    )
-    for binding in family_index["bindings"]:
-        assert f"binding_sha256: {binding['sha256']}" in circleci
+    assert "binding_sha256:" not in circleci
 
     assert "--portable-evidence" in shared_build
     assert "--stats-format json" in shared_build
     assert "CSA_MINIMUM_RUST_HIT_RATE" in shared_build
+    assert "SCCACHE_IDLE_TIMEOUT=0" in shared_build
+    assert 'check_sccache_stats.py" "${stats_args[@]}" || true' in shared_build
+    assert 'report_sccache "$test_stats_output" || true' in shared_build
+    assert 'report_sccache "$stats_output" || true' in shared_build
     assert "| grep -Fq" not in shared_build
-    assert 'require_identity_contains rustc "commit-hash: $rustc_commit"' in shared_build
+    assert 'require_identity_contains rustc "commit-hash: $RUSTC_COMMIT"' in shared_build
     assert '"$(cargo-xwin --version)"' in shared_build
     assert '"$(cargo xwin --version)"' not in shared_build
-    assert "sudo apt-get install --yes clang lld llvm ninja-build" in shared_build
+    assert '"clang-$LLVM_MAJOR" "lld-$LLVM_MAJOR" "llvm-$LLVM_MAJOR" ninja-build' in shared_build
+    for log in ("rustup_log", "xwin_cache_log", "apt_log"):
+        assert f'tee "${log}"' in shared_build
+        assert f'>"${log}" 2>&1' not in shared_build
     assert "identity mismatch; expected output to contain" in shared_build
     assert "identity mismatch; expected exactly" in shared_build
-    assert "d1368d4a94c7ac4bf09296f68516343a76ce11aa375363d4fcddc7fe8ef09730" in shared_build
-    assert "64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d" not in shared_build
+    for acceptance_path in (REPOSITORY / "release" / "acceptance").rglob("*.json"):
+        accepted_sha256 = json.loads(acceptance_path.read_text(encoding="utf-8"))["artifact_sha256"]
+        assert accepted_sha256 not in shared_build
+    assert "EXPECTED_ARTIFACT_SHA256" not in shared_build
+    assert "ACCEPTED_ARTIFACT_SHA256" not in shared_build
+    assert "artifact SHA-256 differs from" not in shared_build
     for path in (
         "build-environment.txt",
         "contract-result.json",
         "SHA256SUMS",
-        "bin/codex.exe",
     ):
         assert path in shared_build
+    assert '"$output/bin/$ARTIFACT_FILENAME"' in shared_build
+    assert 'f"bin/{artifact}"' in shared_build
+    assert 'data["runtime"]["required_files"]' in shared_build
     for path in (
         "bin/codex-code-mode-host.exe",
         "codex-resources/codex-command-runner.exe",
         "codex-resources/codex-windows-sandbox-setup.exe",
         "codex-path/rg.exe",
     ):
-        assert path in shared_build
+        assert path in runtime_locks
+        assert path not in shared_build
         assert f'cp "$official_root/{path}"' not in shared_build
-    assert "actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7" in patched_workflow
-    assert "csa-sccache-v4-linux-X64-rustc-" in patched_workflow
+    assert patched_workflow.count(
+        "actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7"
+    ) == 6
+    assert patched_workflow.count(
+        "actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7"
+    ) == 8
+    assert patched_workflow.count("gh cache delete") == 2
+    assert patched_workflow.count("continue-on-error: true") == 16
+    assert "actions: write" in patched_workflow
+    assert "group: csa-patched-codex-release-${{ inputs.target }}" in patched_workflow
+    assert "github.run_id" not in patched_workflow
+    for key in (
+        "csa-patched-codex-cargo-v8-linux-X64",
+        "csa-patched-codex-sccache-v8-linux-X64",
+    ):
+        assert patched_workflow.count(key) == 5
+        assert f"{key}-" not in patched_workflow
+    assert "sccache-stats*.json" in patched_workflow
+    ordered_steps = (
+        "Prepare pinned build tools",
+        "Save exact build tools",
+        "Prepare exact Rust toolchain",
+        "Save exact Rust toolchain",
+        "Prepare exact xwin SDK and LLVM toolchain",
+        "Save exact xwin SDK",
+        "Prepare official runtime archive",
+        "Save official runtime archive",
+        "Run patch generation and contract tests",
+        "Save test compiler cache",
+        "Build canonical patched Codex CLI bundle",
+        "Save final compiler cache",
+        "Finalize production manifest",
+    )
+    assert list(map(patched_workflow.index, ordered_steps)) == sorted(
+        map(patched_workflow.index, ordered_steps)
+    )
     assert "SCCACHE_DIR" in patched_workflow
+    assert "csa-sccache-v5-linux-X64-rustc-" not in patched_workflow
     assert "csa-sccache-v3-" not in patched_workflow
     for workflow in (ci_workflow, watcher):
-        assert "csa-sccache-v4-linux-X64-rustc-" not in workflow
+        assert "csa-sccache-v5-linux-X64-rustc-" not in workflow
 
     online = (REPOSITORY / "src" / "online.rs").read_text(encoding="utf-8")
     assert '"0.149.0" => Some("rust-v0.149.0-native-join-p3")' in online
@@ -604,6 +827,11 @@ def test_release_stream_contracts() -> None:
         REPOSITORY / ".github" / "actions" / "setup-codex-rust-cache" / "action.yml"
     ).read_text(encoding="utf-8")
     assert "CARGO_BUILD_JOBS=$([Environment]::ProcessorCount)" in cache_action
+    assert "csa-sccache-local-v1-" in cache_action
+    assert "csa-cargo-home-v5-" in cache_action
+    assert "${{ github.sha }}" in cache_action
+    assert "SCCACHE_CACHE_SIZE=1G" in cache_action
+    assert "SCCACHE_GHA_ENABLED" not in cache_action
     assert "steps.cargo-home.outputs.day" not in cache_action
     assert "inputs.target" not in cache_action
     assert "inputs.profile" not in cache_action

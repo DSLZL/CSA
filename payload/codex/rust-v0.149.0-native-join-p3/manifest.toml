@@ -158,5 +158,5 @@ sha256 = "046afd412c619969f94a5fb76e8eb12d9095c67526808e48671663624be8623e"
 [artifacts."x86_64-pc-windows-msvc"]
 url = "https://github.com/dslzl/CSA/releases/download/compat-rust-v0.149.0-native-join-p3/rust-v0.149.0-native-join-p3--codex.exe"
 filename = "codex.exe"
-sha256 = "64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d"
-size = 299645952
+sha256 = "e3302a04e8bc6062c5d092692e7d38239986453c599dcdf128fd1d9598f596fd"
+size = 298215424

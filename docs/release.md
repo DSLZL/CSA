@@ -1,150 +1,277 @@
-# Compatibility and Release Runbook
+# Release process
 
-## Current compatibility
+CSA has two independent release domains:
 
-The current local compatibility candidate is:
+1. **CSA Manager and npm packages** are published by `.github/workflows/release-csa.yml`.
+2. **Patched Codex CLI compatibility artifacts** are published by `.github/workflows/release-patched-codex.yml`.
 
-| Field | Value |
-| --- | --- |
-| compatibility ID | `rust-v0.149.0-native-join-p3` |
-| Codex version/tag | `0.149.0` / `rust-v0.149.0` |
-| upstream commit | `758ef40f50c1a458425c7cfbf1eb12cbc07af0b0` |
-| Rust toolchain | `1.95.0` |
-| target | `x86_64-pc-windows-msvc` |
-| patch-set version/count | `6` / `14` |
-| patched artifact size | `299,645,952` bytes |
-| patched artifact SHA-256 | `64badb66f88d0cee23276dd81e26fee3f2a490803a48c9c63bc55bca40b9174d` |
-| repository manifest SHA-256 | `b964d5b08aeb3049c4a52f3efc9eae52ce14a6a029250c14e1d1b7599192cde4` |
+Do not merge these release streams. A Manager release is a five-platform CSA product release. A patched-Codex release publishes only the reviewed patched `codex` CLI executable for targets explicitly declared by the selected compatibility contract.
 
-Do not retarget this payload in place. A new Codex tag or changed preimage requires a new compatibility ID, updated expected hashes, a new ordered patch set, and the full gate matrix.
+## Patched-Codex authority model
 
-The added `join_agent` remains in the default function namespace. OpenAI-compatible providers reject unrecognized additions to the reserved `collaboration` namespace; the upstream tools remain there unchanged.
+The patched-Codex pipeline is data driven. Workflow YAML is not allowed to own compatibility versions, upstream commits, npm integrity values, patch generations, or accepted artifact hashes.
 
-## Compatibility update
-
-1. Select an exact upstream release tag and resolve its immutable commit.
-2. Create a clean checkout at that commit. Do not work from a moving branch.
-3. Compare every manifest preimage and absent-path assertion using Git blob bytes.
-4. Port the smallest patch set; keep each layer independently reviewable.
-5. Update generated schemas and exact contract fixtures where the protocol changes.
-6. Run the drift audit, strict patch contract, negative tests, patched runtime gates, and stock comparison.
-7. Build each declared target and bind the resulting filename, size, and SHA-256 in a new manifest.
-8. Add support-matrix entries only for lanes that have build, package, installation, execution, and signal evidence.
-
-Core commands:
+The authority chain is:
 
 ```text
-python scripts/compatibility_audit.py drift --manifest <manifest> --source <clean-source> --tag <exact-tag> --output <drift.json>
-python scripts/run_patch_contract.py --manifest <absolute-manifest> --source <absolute-clean-source> --cargo-target <new-target-dir> --output <new-report.json>
-python scripts/verify_patch_payload.py --manifest <absolute-manifest> --source <absolute-clean-source> [--artifact <absolute-binary>]
+release/compatibility-index.json
+        │ routing and lifecycle only
+        ▼
+payload/codex/**/manifest.toml
+        │ upstream, patch, source-preimage, target, artifact contract
+        ├──────────────┐
+        ▼              ▼
+build profile      runtime lock
+        │              │
+        └──────┬───────┘
+               ▼
+       exact candidate build
+               │
+               ▼
+       machine-readable candidate record
+               │
+               ▼
+       disposable local acceptance
+               │
+               ▼
+       committed acceptance record
+               │
+               ▼
+       independent formal rebuild
+               │ exact SHA-256 and size match
+               ▼
+       draft reconciliation and publication
 ```
 
-The repository manifest binds the locally accepted native Windows executable exactly. CircleCI records its cross-compiled executable as portable evidence with `release_eligible=false`; it is not required to match that native artifact byte-for-byte. After the CircleCI executable passes local Windows acceptance, the formal workflow must rebuild the same cross-compiled SHA-256 and finalizes only its disposable manifest copy before packing. The canonical production bundle contains only four CSA-owned files: `build-environment.txt`, `contract-result.json`, `SHA256SUMS`, and `bin/codex.exe`. The official package is an exact validation input; its metadata, code-mode host, command runner, sandbox setup helper, and bundled `rg` never enter CSA output.
+The compatibility index selects a manifest and target-specific locks. It does not replace the manifest as the source of upstream, patch, or artifact truth.
 
-## Hourly upstream watcher
+## Current reviewed compatibility
 
-`.github/workflows/watch-codex-release.yml` runs at the top of every hour (`0 * * * *`) and supports manual dispatch. Its read-only detect job resolves `openai/codex`'s current non-draft, non-prerelease `rust-vX.Y.Z` Release and peels its tag to the exact commit.
-
-The state machine is:
+The current selector for `x86_64-pc-windows-msvc` resolves to:
 
 ```text
-formal compat Release exists -> no-op
-open upstream-patch-blocked Issue -> update that same Issue to the newest target; run no patch
-reviewed compatibility entry is on the default branch -> emit the manual Release inputs
-open automation candidate PR exists -> no-op
-otherwise -> port and open one review candidate PR
+rust-v0.149.0-native-join-p3
 ```
 
-The workflow reuses `scripts/compat_release.py` for exact detection and porting. It clones only the detected tag into `RUNNER_TEMP` and rejects any source path inside `GITHUB_WORKSPACE`; upstream Codex source is never copied into the CSA repository. It never performs a fuzzy or three-way repair. A failed clone, patch preflight, or candidate-PR step creates or updates the single open Issue labeled `upstream-patch-blocked`, including the latest upstream tag/commit, failed stage, run URL, captured failure, and reproduction direction. While that Issue remains open, later upstream versions do not start another automatic patch. The human repair PR must target the then-current latest stable release and contain `Fixes #<blocker>`.
-
-Passing automation creates a PR and review artifact only. No formal compatibility Release is published from the candidate branch or watcher. After review and merge, a later hourly run prints the separately authorized CircleCI, local Windows acceptance, and formal workflow inputs.
-
-The helper commands used by the workflow are also runnable manually:
+The current reviewed contract contains:
 
 ```text
-python scripts/compat_release.py detect --repository <repo> --output <new-json>
-python scripts/compat_release.py port --base-manifest <manifest> --source <clean-source> --tag <tag> --commit <commit> --output <new-entry>
-python scripts/compat_release.py finalize --manifest <new-manifest> --artifact <patched-binary>
-python scripts/compat_release.py pack --manifest <manifest> --artifact <patched-binary> --source-commit <csa-commit> --output <new-flat-assets>
+Codex version: 0.149.0
+Upstream tag: rust-v0.149.0
+Patch-set version: 6
+Patch count: 14
+Target: x86_64-pc-windows-msvc
+Product: codex-cli / codex
+Accepted artifact SHA-256:
+e3302a04e8bc6062c5d092692e7d38239986453c599dcdf128fd1d9598f596fd
+Accepted artifact size: 298215424 bytes
 ```
 
-Each formal compatibility Release uses tag `compat-<compat_id>` and contains only flat assets: the manifest, every referenced small payload file, the patched target artifact, `compatibility-release.json` provenance, and `SHA256SUMS`. Runtime install requires the Release tag commit, provenance, target, filenames, sizes, and SHA-256 values to agree.
+This repository currently declares only the Windows x64 patched-Codex target. The workflow is target-indexed, but an additional target is not publishable until its manifest artifact entry, build profile, runtime contract where applicable, acceptance record, Manager support, and hosted verification are all reviewed.
 
-## Two GitHub Release streams
+## Compatibility lifecycle
 
-| Stream | Tag | Managed assets |
-| --- | --- | --- |
-| CSA manager | `vX.Y.Z` | `csa` native binaries, npm tarballs, manager evidence/provenance, source bundle, and checksums |
-| Patched Codex | `compat-<compat_id>` | compatibility manifest/payload, patched `codex` binary, compatibility provenance, and checksums |
+Each compatibility in `release/compatibility-index.json` has a lifecycle and independent build/release flags.
 
-The streams never share managed assets. `csa install` reads only the `compat-*` stream; publishing a new patched Codex does not require a new manager version. GitHub's automatic source archives for either tag still represent the CSA repository and are not compatibility download assets.
+- `legacy`: retained and statically validated; an exact heavy build may be requested, but formal release is disabled.
+- `candidate`: a newly ported compatibility that may be built to produce candidate evidence; formal release is disabled.
+- `accepted`: local acceptance has been recorded and the exact artifact identity is frozen; formal release may be enabled.
 
-## Manager and npm artifacts
+Historical compatibility payloads are immutable. Removing a historical version from the default heavy-build path does not permit changing or deleting its payload.
 
-Build with the pinned toolchain, then stage packages only into a new directory:
+## Resolve and validate
+
+Validate the whole catalog:
+
+```bash
+python scripts/compat_catalog.py validate \
+  --repository . \
+  --workflow .circleci/config.yml \
+  --workflow .github/workflows/release-patched-codex.yml
+```
+
+Resolve the current Windows target:
+
+```bash
+python scripts/compat_catalog.py resolve \
+  --repository . \
+  --selector current \
+  --target x86_64-pc-windows-msvc \
+  --output /tmp/csa-compat-resolution.json
+```
+
+Resolve the exact accepted p3 route and require release authority:
+
+```bash
+python scripts/compat_catalog.py resolve \
+  --repository . \
+  --selector rust-v0.149.0-native-join-p3 \
+  --target x86_64-pc-windows-msvc \
+  --require-acceptance \
+  --require-release \
+  --output /tmp/csa-compat-resolution.json
+```
+
+Unknown selectors, unknown targets, hash drift, disabled build/release flags, and missing acceptance records fail closed.
+
+## CircleCI candidate build
+
+CircleCI owns acceptance-oriented candidate compilation. It does not publish the formal GitHub compatibility Release. The machine executor is pinned to the dated `ubuntu-2604:2026.05.1` image; advancing that image is an explicit reviewed infrastructure change, not an implicit moving-tag update.
+
+For the current version, trigger one pipeline with:
 
 ```text
-cargo +1.95.0 build --locked --release
-node scripts/stage_npm_packages.mjs --out <new-absolute-stage> --binary win32-x64=<absolute-manager.exe>
-npm pack <stage/platforms/win32-x64> --pack-destination <tarball-dir>
-npm pack <stage/meta> --pack-destination <tarball-dir>
+build_patched_codex=true
+compat_selector=current
+target=x86_64-pc-windows-msvc
+store_artifact=true
+require_warm_cache=false
 ```
 
-Each platform package must contain only its manifest, manager binary, README, license, and notices. The meta package must contain no manager binary or lifecycle script. Repacking identical staged inputs must preserve the expected file set and binary binding.
+For one exact historical or candidate version, set `compat_selector` to its exact compatibility ID. One pipeline request creates one heavy build. `build_all_compat=true` is intentionally rejected; enumerate reviewed IDs and trigger them separately when an explicit historical regression is required.
 
-## CI and candidate assembly
-
-The ordinary `.github/workflows/ci.yml` has read-only repository permissions, SHA-pinned actions, Node 22/24/26 checks, and five native manager/npm lanes. The separate upstream watcher grants write permissions only to the candidate-PR and blocker-Issue jobs that need them. Hosted results must be downloaded and inspected before a manager/npm release; a configured matrix is not evidence that a lane passed.
-
-After all lane artifacts are present:
+CircleCI stores:
 
 ```text
-python scripts/ci_release.py input --repository . --artifacts <downloaded-artifacts> --output <release-input.json> --revision <clean-commit> --ref <tag> --repository-url <url>
-python scripts/assemble_release_candidate.py --repository . --input <release-input.json> --output <new-candidate-dir>
+resolution/
+bundle/
+diagnostics/
+candidates/
 ```
 
-Manager candidate assembly is atomic and refuses an existing output path. It has no patched-Codex input and emits no top-level `payload/`, `patched/`, or compatibility descriptor. Verify every `SHA256SUMS` entry, source provenance, dependency inventory, npm tarball, and platform evidence. Assembly must report `ready`, not merely finish successfully.
+The candidate record binds the artifact to the manifest, build profile, runtime lock, provider pipeline/job identity, and source commit. It is not an acceptance record by itself.
 
-## Publication gate
+`require_warm_cache=true` is a deliberate benchmark lane. It raises the minimum Rust cache-hit requirement and uses a shorter timeout. It must not be enabled for every ordinary candidate build.
 
-Do not publish until all declared platform lanes pass, source is a clean commit/tag, required signatures exist, checksums match, and manual gates have explicit results.
+## Port a new compatibility
 
-Publish every scoped platform package first and the meta package last:
+First create and review the complete payload manifest and runtime lock. Then register it as a non-releasable candidate:
+
+```bash
+python scripts/compat_catalog.py stage-candidate \
+  --repository . \
+  --manifest payload/codex/rust-v0.150.0-native-join-p4/manifest.toml \
+  --target x86_64-pc-windows-msvc \
+  --runtime-lock release/runtime-locks/rust-v0.150.0-native-join-p4.json
+```
+
+This command reads the exact compatibility ID and upstream facts from the manifest. It does not place version identities in CircleCI or GitHub workflow YAML.
+
+Commit the payload, runtime lock, and catalog candidate route together. Run static validation before requesting a heavy build.
+
+## Candidate acceptance
+
+Download the CircleCI canonical bundle and candidate record. Perform acceptance only in a disposable Windows environment using an isolated `CODEX_HOME`, working directory, npm prefix, and activation path. Do not replace the official Codex installation.
+
+The sanitized evidence JSON must identify the actual tests performed and must not contain credentials, auth files, tokens, session content, or private paths.
+
+After acceptance, bind the exact candidate artifact:
+
+```powershell
+$CompatId = "rust-v0.150.0-native-join-p4"
+$Target = "x86_64-pc-windows-msvc"
+python scripts/compat_catalog.py accept `
+  --repository . `
+  --selector $CompatId `
+  --target $Target `
+  --candidate-record .\candidate-record.json `
+  --artifact .\codex.exe `
+  --acceptance ("release/acceptance/{0}/{1}.json" -f $CompatId, $Target) `
+  --evidence .\sanitized-acceptance-evidence.json `
+  --make-current
+```
+
+`accept` requires:
+
+- a catalog entry still in `candidate` lifecycle;
+- an artifact matching the candidate record;
+- a manifest already finalized with that exact artifact SHA-256 and size;
+- matching manifest, build-profile, and runtime-lock hashes;
+- an explicit evidence file.
+
+Review the finalized manifest, acceptance JSON, and compatibility-index changes as one security-sensitive change.
+
+## Formal patched-Codex release
+
+Dispatch `.github/workflows/release-patched-codex.yml` from the default branch with:
 
 ```text
-npm publish <platform-package.tgz> --access public --provenance
-npm publish <next-platform-package.tgz> --access public --provenance
-npm publish <dslzl-csa-0.1.1.tgz> --access public --provenance
+compat_selector=rust-v0.149.0-native-join-p3
+target=x86_64-pc-windows-msvc
 ```
 
-Then create an annotated `v<manager-version>` tag and GitHub Release from the same clean commit, attach only the manager/npm candidate artifacts and `SHA256SUMS`, and record registry/release URLs in provenance. Never attach compatibility payloads or patched Codex binaries to this Release. Never reuse a version after a partial publication; finish missing packages only when their bytes match the approved candidate, otherwise increment the version.
+The workflow does not accept copied npm integrity, CircleCI artifacts, or accepted SHA values. It resolves committed source/runtime authority and performs an independent CLI-only production build.
 
-No npm publish, GitHub Release, signing, or tag is represented as complete by this repository state.
+The formal build command remains limited to:
 
-## Production plug smoke
+```text
+cargo xwin build --locked --release -p codex-cli --bin codex
+```
 
-This lane changes user command resolution and requires explicit authorization:
+It does not publish Codex App, Desktop, app-server, exec-server, MCP server, or unrelated binaries.
 
-1. Record official launcher/native and manager identities and hashes.
-2. Install the approved npm package, run `doctor`, then run bare `csa install` against the reviewed formal compatibility Release and require healthy `status`. Record the resolved OpenAI tag/commit and CSA Release checksums. The explicit local artifact mode remains available for comparison and diagnosis.
-3. Add the manager `bin` once before the official npm bin using the chosen user PATH mechanism. Do not use `setx`; keep the official entry.
-4. While unplugged, open a new shell and prove `codex` resolves to official.
-5. Open another shell, prove resolution reaches the checksum-matched shim published by `install`, and verify the version.
-6. In disposable cwd and `CODEX_HOME`, run an interactive command and test Ctrl+C, shell usability, and orphan-free shutdown.
-7. Run `uninstall` twice and prove both are safe. Open a new shell and prove official fallback.
-8. Rehash official files and preserve sanitized evidence.
+The workflow finalizes a temporary manifest copy from its own executable, verifies that staged production authority, and then calls `scripts/compat_release.py pack`. The committed manifest and optional development acceptance record are not rewritten.
 
-Rollback: run `unplug`; if resolution still reaches the manager directory, remove only that PATH entry and open a new shell. Run `uninstall` only after official fallback works. Do not delete official Codex or user auth/session data.
+## Draft recovery and immutable publication
 
-Status for this repository: **production plug not executed**. Disposable local install/reinstall/default-config launch/doctor/uninstall-twice passed under `.dev/p3-manager-e2e-hybrid`; it did not edit a profile, persistent PATH, global npm prefix, user config, or official installation.
+A failed upload can leave a draft Release. Rerunning the same exact release:
 
-## Required release evidence
+1. verifies the tag points to the same source commit;
+2. creates or resumes the matching draft;
+3. removes only unexpected draft assets;
+4. uploads the reviewed local asset set idempotently;
+5. re-reads remote names, sizes, and GitHub digests;
+6. publishes only after the remote set exactly matches the local set.
 
-- clean source commit and annotated tag;
-- exact compatibility drift and patch-contract results;
-- one native manager/npm result for every declared platform;
-- patched payload results for every advertised compatibility target;
-- deterministic candidate manifest and complete checksums;
-- signing status and signature artifacts when required;
-- authenticated/manual, production plug, and rollback results classified as pass, fail, or not verified;
-- proof that official hashes and persistent user configuration remained unchanged during automation.
+A published compatibility Release is never mutated. If it already exists, the workflow verifies the exact asset set and exits successfully; a mismatch fails closed.
+
+## Release assets
+
+The user-facing executable remains an independent asset. Compatibility payload files, descriptor, and checksums are verification assets required by CSA Manager. The asset guard enforces exactly one executable product for the current target and rejects unrelated Codex binaries.
+
+The formal release is intentionally not a five-platform aggregate. When additional patched targets are eventually accepted, each target must remain an independently named downloadable executable and must be represented by an exact target-specific contract.
+
+## Cache policy
+
+The replacement preserves the existing cache classes. Manager platform CI also discovers npm tarball filenames from `npm pack --json`; it does not assume a package version in workflow YAML.
+
+The retained cache classes are:
+
+- Cargo registry/index/cache and git DB;
+- Rustup toolchain;
+- cargo-xwin SDK;
+- pinned build-tool archives;
+- official runtime archive;
+- sccache compiler objects.
+
+Cache keys are bound to reviewed build-profile, runtime-lock, manifest, target, and upstream identities. A cache miss must never affect correctness; a cold build remains authoritative.
+
+Do not add an uncontrolled `target/` cache without a measured restore/save benchmark and a compatibility-safety design.
+
+## Manager compatibility discovery boundary
+
+This release architecture removes compatibility/version authority from CI and release workflow YAML. The current CSA Manager still contains its existing compatibility-selection behavior. Replacing Manager online discovery with a remotely fetched compatibility index is a separate client protocol and trust migration requiring Rust integration tests, downgrade/rollback rules, signature or immutable-release verification, and an independent Manager release.
+
+Do not silently mix that client change into a CI configuration replacement. Until that migration is implemented, adding a new compatibility may still require the existing Manager mapping update and a Manager release.
+
+## Required validation
+
+Before merging:
+
+```bash
+python validation/validate_replacements.py --repository .
+python scripts/test_compat_catalog.py
+python scripts/test_verify_release_asset_set.py
+python scripts/test_verify_patch_payload.py
+python scripts/test_release_tools.py
+bash -n scripts/build_patched_codex_bundle.sh
+```
+
+Also run when available:
+
+```bash
+actionlint
+circleci config validate .circleci/config.yml
+```
+
+Hosted GitHub Actions, hosted CircleCI, the full patched-Codex rebuild, and formal draft publication remain mandatory canary validations; local static checks do not substitute for them.

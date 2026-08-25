@@ -1,11 +1,10 @@
 #!/usr/bin/env python3
-"""Validate machine-readable sccache statistics for one Rust build."""
+"""Display machine-readable sccache statistics without gating a build."""
 
 from __future__ import annotations
 
 import argparse
 import json
-import sys
 from pathlib import Path
 from typing import Any
 
@@ -40,7 +39,9 @@ def _language_count(metric: object, language: str) -> int:
     return _sum_integers(advanced.get(language, {})) if isinstance(advanced, dict) else 0
 
 
-def validate(stats_document: object, minimum_rust_hit_rate: float | None = None) -> dict[str, Any]:
+def summarize(
+    stats_document: object, minimum_rust_hit_rate: float | None = None
+) -> dict[str, Any]:
     if not isinstance(stats_document, dict) or not isinstance(stats_document.get("stats"), dict):
         raise StatsError("sccache JSON must contain a stats object")
     stats = stats_document["stats"]
@@ -51,18 +52,19 @@ def validate(stats_document: object, minimum_rust_hit_rate: float | None = None)
     read_errors = _integer(stats.get("cache_read_errors"), "cache_read_errors")
     write_errors = _integer(stats.get("cache_write_errors"), "cache_write_errors")
     rust_requests = hits + misses + errors
-    if compile_requests == 0 or rust_requests == 0:
-        raise StatsError("Rust build recorded zero sccache compile requests")
-    if read_errors or write_errors or errors:
-        raise StatsError("sccache recorded Rust or cache read/write errors")
     hit_rate = hits * 100.0 / (hits + misses) if hits + misses else 0.0
+    warnings = []
+    if compile_requests == 0 or rust_requests == 0:
+        warnings.append("Rust build recorded zero sccache compile requests")
+    if read_errors or write_errors or errors:
+        warnings.append("sccache recorded Rust or cache read/write errors")
     if minimum_rust_hit_rate is not None and hit_rate < minimum_rust_hit_rate:
-        raise StatsError(
+        warnings.append(
             f"Rust cache hit rate {hit_rate:.2f}% is below {minimum_rust_hit_rate:.2f}%"
         )
     return {
         "schema": 1,
-        "result": "pass",
+        "result": "reported",
         "compile_requests": compile_requests,
         "rust_requests": rust_requests,
         "rust_hits": hits,
@@ -70,6 +72,7 @@ def validate(stats_document: object, minimum_rust_hit_rate: float | None = None)
         "rust_hit_rate": round(hit_rate, 2),
         "cache_read_errors": read_errors,
         "cache_write_errors": write_errors,
+        "warnings": warnings,
     }
 
 
@@ -81,10 +84,13 @@ def main() -> int:
     try:
         if args.minimum_rust_hit_rate is not None and not 0 <= args.minimum_rust_hit_rate <= 100:
             raise StatsError("minimum Rust hit rate must be between 0 and 100")
-        result = validate(json.loads(args.stats.read_bytes()), args.minimum_rust_hit_rate)
+        result = summarize(json.loads(args.stats.read_bytes()), args.minimum_rust_hit_rate)
     except (OSError, json.JSONDecodeError, StatsError) as error:
-        print(json.dumps({"schema": 1, "error": str(error)}, indent=2), file=sys.stderr)
-        return 2
+        result = {
+            "schema": 1,
+            "result": "unavailable",
+            "warnings": [str(error)],
+        }
     print(json.dumps(result, indent=2, sort_keys=True))
     return 0
 
