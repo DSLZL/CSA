@@ -115,6 +115,18 @@
         "cargo",
         "test",
         "-p",
+        "codex-core",
+        "spawned_child_inherits_parent_http_fallback_for_the_same_provider",
+        "--",
+        "--nocapture"
+      ],
+      "name": "subagent transport fallback inheritance"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
         "codex-app-server-protocol",
         "schema_fixtures_tests",
         "--",

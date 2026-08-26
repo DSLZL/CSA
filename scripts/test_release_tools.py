@@ -429,14 +429,14 @@ def test_contract_shape() -> None:
         assert payload_tui_tests
         assert all(test.get("output") == "failure-only" for test in payload_tui_tests)
 
-    p6_patch = (
-        REPOSITORY
-        / "payload"
-        / "codex"
-        / "rust-v0.149.1-native-join-p6"
-        / "patches"
-        / "0013-subagent-live-polish.patch"
-    ).read_text(encoding="utf-8")
+    p6 = REPOSITORY / "payload" / "codex" / "rust-v0.149.1-native-join-p6"
+    p6_contract = load_contract(p6 / "test-contract.json", p6.name)
+    assert "subagent transport fallback inheritance" in {
+        test["name"] for test in p6_contract["tests"]
+    }
+    p6_patch = (p6 / "patches" / "0013-subagent-live-polish.patch").read_text(
+        encoding="utf-8"
+    )
     expected_orbit = (
         'const ORBIT_FRAMES: [&str; 8] = '
         '["⠁", "⠈", "⠐", "⠠", "⢀", "⡀", "⠄", "⠂"];'
@@ -444,6 +444,28 @@ def test_contract_shape() -> None:
     assert expected_orbit in p6_patch
     assert "Duration::from_millis(110)" in p6_patch
     assert "ORBIT_FRAMES.into_iter().enumerate()" in p6_patch
+    assert "ORBIT_RENDER_INTERVAL: Duration = Duration::from_millis(40)" in p6_patch
+    assert "ORBIT_PIXEL_STAGGER: Duration = Duration::from_millis(110)" in p6_patch
+    assert "ORBIT_DURATION: Duration = Duration::from_millis(950)" in p6_patch
+    assert "ORBIT_ORDER: [usize; 8] = [0, 1, 2, 5, 8, 7, 6, 3]" in p6_patch
+    assert "orbit_intensities_at" in p6_patch
+    assert "fn css_ease_in_out" in p6_patch
+    assert "cubic_bezier_axis(t, 0.42, 0.58)" in p6_patch
+    assert "subagent_live_orbit_propagates_phase_and_peak_clockwise" in p6_patch
+    assert "const ORBIT_COMET_FRAMES" not in p6_patch
+    assert "ORBIT_GRID_HEIGHT: u16 = 3" in p6_patch
+    assert 'Span::raw("▪")' in p6_patch
+    assert '"├─".dim()' in p6_patch
+    assert '"└─".dim()' in p6_patch
+    assert '"┊ ".dim()' not in p6_patch
+    assert "spawned_child_inherits_parent_http_fallback_for_the_same_provider" in p6_patch
+    assert "config.model_provider.supports_websockets &= parent_thread" in p6_patch
+    assert "CollabAgentTool::Wait | CollabAgentTool::Join => None" in p6_patch
+    assert "subagent_live_started_activity_creates_panel_before_first_work_item" in p6_patch
+    assert "subagent_live_control_items_are_omitted_from_hydrated_transcripts" in p6_patch
+    assert "spawn_start_then_turn_start_transitions_without_resetting_orbit" in p6_patch
+    assert "tokens_at_turn_start" in p6_patch
+    assert ".saturating_sub(agent.tokens_at_turn_start)" in p6_patch
     default_codex_foreground = (
         "+            LiveAgentStatus::Starting | LiveAgentStatus::Running | "
         "LiveAgentStatus::Completed => {\n+                symbol\n+            }"
