@@ -19,6 +19,7 @@ from verify_patch_payload import VerificationError, _load_payload, _payload_file
 
 ENV_NAME = re.compile(r"[A-Z][A-Z0-9_]*\Z")
 FLAKY_TUI_BACKGROUND_EXIT_STEP = "TUI background exit isolation"
+FAILURE_OUTPUT_TAIL_BYTES = 256 * 1024
 
 
 class ContractError(RuntimeError):
@@ -126,7 +127,14 @@ def run_step(
                     stdout=captured_stdout,
                 )
                 if result.returncode and attempt == attempts:
-                    captured_stdout.seek(0)
+                    captured_stdout.seek(0, os.SEEK_END)
+                    captured_size = captured_stdout.tell()
+                    captured_stdout.seek(max(0, captured_size - FAILURE_OUTPUT_TAIL_BYTES))
+                    if captured_size > FAILURE_OUTPUT_TAIL_BYTES:
+                        sys.stderr.write(
+                            f"[captured stdout truncated; showing final "
+                            f"{FAILURE_OUTPUT_TAIL_BYTES} bytes]\n"
+                        )
                     sys.stderr.write(captured_stdout.read().decode("utf-8", errors="replace"))
                     sys.stderr.flush()
         else:

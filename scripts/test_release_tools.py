@@ -42,6 +42,7 @@ from compat_release import (  # noqa: E402
 )
 from run_patch_contract import (  # noqa: E402
     ContractError,
+    FAILURE_OUTPUT_TAIL_BYTES,
     cross_windows_build_argv,
     cross_windows_build_env,
     execute_version,
@@ -606,7 +607,11 @@ def test_contract_shape() -> None:
         captured_stdout = options["stdout"]
         assert captured_stdout != subprocess.PIPE
         assert "stderr" not in options
-        captured_stdout.write(b"\x1b[2Jfailed TUI frame\n")
+        captured_stdout.write(
+            b"old TUI frame\n"
+            + b"x" * FAILURE_OUTPUT_TAIL_BYTES
+            + b"\nfinal TUI failure summary\n"
+        )
         return subprocess.CompletedProcess(argv, 101)
 
     stderr = io.StringIO()
@@ -630,7 +635,10 @@ def test_contract_shape() -> None:
         pass
     else:
         raise AssertionError("failed quiet step was accepted")
-    assert "failed TUI frame" in stderr.getvalue()
+    failed_output = stderr.getvalue()
+    assert "old TUI frame" not in failed_output
+    assert "captured stdout truncated" in failed_output
+    assert "final TUI failure summary" in failed_output
     try:
         cross_windows_build_argv(["cargo", "test"])
     except ContractError:
