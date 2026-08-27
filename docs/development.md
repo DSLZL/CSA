@@ -31,8 +31,8 @@ The Windows distribution harness is the final default E2E. It:
 ```powershell
 $TempRoot = Join-Path $env:TEMP ("csa-e2e-" + [Guid]::NewGuid().ToString('N'))
 powershell -NoProfile -File .\scripts\test_npm_distribution_windows.ps1 `
-  -MetaTarball C:\absolute\dslzl-csa-0.1.1.tgz `
-  -PlatformTarball C:\absolute\dslzl-csa-win32-x64-0.1.1.tgz `
+  -MetaTarball C:\absolute\dslzl-csa-0.1.2.tgz `
+  -PlatformTarball C:\absolute\dslzl-csa-win32-x64-0.1.2.tgz `
   -TempRoot $TempRoot `
   -OutputPath C:\existing-directory\trellis-e2e.json `
   -Official C:\absolute\official\codex.exe `

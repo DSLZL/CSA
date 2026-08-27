@@ -64,6 +64,7 @@ pub struct OnlineInstallOptions {
     pub manager_root: Option<PathBuf>,
     pub official: Option<PathBuf>,
     pub official_native: Option<PathBuf>,
+    pub compat: Option<String>,
 }
 
 #[derive(Clone, Debug)]

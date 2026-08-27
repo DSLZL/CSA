@@ -275,7 +275,7 @@ try {
 
     $version = Invoke-External $launcher @('--version')
     Assert-Success 'packaged manager version' $version
-    if ($version.output -notmatch 'csa 0\.1\.1') {
+    if ($version.output -notmatch 'csa 0\.1\.2') {
         throw "unexpected packaged manager version: $($version.output)"
     }
 
@@ -360,8 +360,8 @@ try {
         schema = 1
         result = 'pass'
         packages = [ordered]@{
-            meta = '@dslzl/csa@0.1.1'
-            platform = '@dslzl/csa-win32-x64@0.1.1'
+            meta = '@dslzl/csa@0.1.2'
+            platform = '@dslzl/csa-win32-x64@0.1.2'
             lifecycle_scripts = $false
         }
         install = [ordered]@{
@@ -372,7 +372,7 @@ try {
             manager_state_created = $false
         }
         manager = [ordered]@{
-            version = 'csa 0.1.1'
+            version = 'csa 0.1.2'
             doctor = 'pass'
             cold_install = 'pass'
             status = 'prepared_and_plugged'

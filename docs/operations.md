@@ -15,7 +15,7 @@ The official package, manager tree, shim, and patched overlay must remain distin
 | Command | Effect |
 | --- | --- |
 | `doctor` | Verifies official identity and compatibility inputs without preparing state. |
-| `install` | Discovers a complete supported official npm/Bun/pnpm runtime. With no release input, downloads the exact formal `dslzl/CSA` compatibility Release; with `--manifest` plus one artifact/source, stays local-only. It then prepares and publishes the managed shim without editing PATH. |
+| `install` | Discovers a complete supported official npm/Bun/pnpm runtime. Bare interactive use lists formal `dslzl/CSA` compatibility Releases; automation selects one exact `--compat`. With `--manifest` plus one artifact/source, it stays local-only. It then prepares and publishes the managed shim without editing PATH. |
 | `uninstall` | Withdraws the shim, then removes manager-owned preparation data. Repeated calls are safe. |
 | `prepare` | Validates or builds the exact patched artifact and atomically records prepared state. |
 | `status` | Reports prepared/activation health and drift. |
@@ -26,7 +26,9 @@ The official package, manager tree, shim, and patched overlay must remain distin
 
 Always pass an absolute normalized `--manager-root` in automation. This prevents a test from using the default per-user data location by accident.
 
-Online install is deliberately strict. The installed official version, OpenAI's current latest formal release, the compatibility manifest, and the CSA Release provenance must all identify the same version/tag/commit. Missing support returns `latest_not_yet_supported`; malformed releases, unexpected redirects, extra/missing assets, or checksum drift fail closed. There is no fallback to an older CSA payload.
+Online install is deliberately strict. The list shows every formal compatibility Release, but only entries matching the Manager target and installed official Codex version are selectable. The selected OpenAI tag, compatibility manifest, and CSA Release provenance must identify the same exact version and commits. Malformed or duplicate metadata, unexpected redirects, extra/missing assets, and checksum drift fail closed; there is no implicit fallback.
+
+The catalog uses GitHub's public API by default. If its unauthenticated rate limit is exhausted, set `GITHUB_TOKEN` or `GH_TOKEN` only for the `csa install` process. The token is attached only to fixed `api.github.com` requests, is never forwarded to Release asset hosts, and is not persisted.
 
 ## PATH setup
 

@@ -9,7 +9,7 @@ use std::path::PathBuf;
 
 pub const USAGE: &str = "\
 csa doctor [--manager-root PATH] [--official PATH] [--official-native PATH] [--manifest PATH]
-csa install [--manager-root PATH] [--official PATH] [--official-native PATH] [--manifest PATH (--artifact PATH | --source PATH)]
+csa install [--manager-root PATH] [--official PATH] [--official-native PATH] [--compat ID | --manifest PATH (--artifact PATH | --source PATH)]
 csa uninstall [--manager-root PATH]
 csa prepare [--manager-root PATH] [--official PATH] [--official-native PATH] --manifest PATH (--artifact PATH | --source PATH)
 csa plug [--manager-root PATH]
@@ -69,6 +69,7 @@ fn parse_install(mut args: VecDeque<OsString>) -> Result<Cli> {
     let mut manifest = None;
     let mut artifact = None;
     let mut source = None;
+    let mut compat = None;
     while let Some(flag) = args.pop_front() {
         match unicode_flag(&flag)? {
             "--manager-root" => set_path(
@@ -97,6 +98,7 @@ fn parse_install(mut args: VecDeque<OsString>) -> Result<Cli> {
                 "--artifact",
             )?,
             "--source" => set_path(&mut source, take_value(&mut args, "--source")?, "--source")?,
+            "--compat" => set_string(&mut compat, take_value(&mut args, "--compat")?, "--compat")?,
             "--help" | "-h" => return Ok(Cli::Help),
             flag => return Err(unknown_flag(flag)),
         }
@@ -106,27 +108,32 @@ fn parse_install(mut args: VecDeque<OsString>) -> Result<Cli> {
             manager_root,
             official,
             official_native,
+            compat,
         }),
-        (Some(manifest), Some(artifact), None) => InstallOptions::Local(PrepareOptions {
-            manager_root,
-            official,
-            official_native,
-            manifest,
-            artifact: Some(artifact),
-            source: None,
-        }),
-        (Some(manifest), None, Some(source)) => InstallOptions::Local(PrepareOptions {
-            manager_root,
-            official,
-            official_native,
-            manifest,
-            artifact: None,
-            source: Some(source),
-        }),
+        (Some(manifest), Some(artifact), None) if compat.is_none() => {
+            InstallOptions::Local(PrepareOptions {
+                manager_root,
+                official,
+                official_native,
+                manifest,
+                artifact: Some(artifact),
+                source: None,
+            })
+        }
+        (Some(manifest), None, Some(source)) if compat.is_none() => {
+            InstallOptions::Local(PrepareOptions {
+                manager_root,
+                official,
+                official_native,
+                manifest,
+                artifact: None,
+                source: Some(source),
+            })
+        }
         _ => {
             return Err(ManagerError::new(
                 "invalid_cli",
-                "install accepts no release input for online mode, or --manifest with exactly one of --artifact/--source for local mode",
+                "install accepts --compat only in online mode, or --manifest with exactly one of --artifact/--source for local mode",
             ));
         }
     };
@@ -340,6 +347,22 @@ fn set_path(slot: &mut Option<PathBuf>, value: OsString, flag: &str) -> Result<(
     Ok(())
 }
 
+fn set_string(slot: &mut Option<String>, value: OsString, flag: &str) -> Result<()> {
+    let value = value
+        .into_string()
+        .map_err(|_| ManagerError::new("invalid_cli", format!("{flag} must be valid Unicode")))?;
+    if value.is_empty() {
+        return Err(ManagerError::new(
+            "invalid_cli",
+            format!("{flag} must not be empty"),
+        ));
+    }
+    if slot.replace(value).is_some() {
+        return Err(duplicate_flag(flag));
+    }
+    Ok(())
+}
+
 fn required_path(value: Option<PathBuf>, flag: &str) -> Result<PathBuf> {
     value.ok_or_else(|| ManagerError::new("invalid_cli", format!("exec requires {flag} PATH")))
 }
@@ -385,6 +408,30 @@ mod tests {
         };
         assert!(options.manager_root.is_none());
         assert!(options.official.is_none());
+        assert!(options.compat.is_none());
+
+        let Cli::Install(InstallOptions::Online(options)) =
+            parse(&["install", "--compat", "rust-v0.149.0-native-join-p3"]).unwrap()
+        else {
+            panic!("expected selected online install")
+        };
+        assert_eq!(
+            options.compat.as_deref(),
+            Some("rust-v0.149.0-native-join-p3")
+        );
+        assert!(parse(&["install", "--compat", "a", "--compat", "b"]).is_err());
+        assert!(
+            parse(&[
+                "install",
+                "--compat",
+                "rust-v0.149.0-native-join-p3",
+                "--manifest",
+                "C:/tmp/manifest.toml",
+                "--artifact",
+                "C:/tmp/patched.exe",
+            ])
+            .is_err()
+        );
 
         let cli = parse(&[
             "install",

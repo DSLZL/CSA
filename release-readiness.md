@@ -62,7 +62,7 @@ real-manifest repository overlay: 52 / 52 passed
 - workflow static guard: no compatibility ID, upstream commit, or npm SRI authority in CircleCI/formal patched release YAML;
 - CircleCI uses the dated `ubuntu-2604:2026.05.1` machine image rather than a moving `current` tag;
 - workflow-dispatch and CircleCI selector/target values are passed as environment data rather than interpolated into shell source;
-- Manager platform CI discovers `npm pack --json` output paths instead of assuming version `0.1.1`;
+- Manager platform CI discovers `npm pack --json` output paths instead of assuming version `0.1.2`;
 - resolver validation against the real p1/p2/p3 manifests from the fixed baseline;
 - current p3 resolution with acceptance and release authority required.
 

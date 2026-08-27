@@ -75,7 +75,7 @@ def package_fixtures(root: Path) -> tuple[Path, Path, Path, Path]:
         "bin": {"csa": "bin/csa.js"},
         "optionalDependencies": optional,
     }
-    meta = root / "dslzl-csa-0.1.1.tgz"
+    meta = root / "dslzl-csa-0.1.2.tgz"
     write_tar(
         meta,
         {
@@ -99,7 +99,7 @@ def package_fixtures(root: Path) -> tuple[Path, Path, Path, Path]:
             "sha256": manager_hash,
         },
     }
-    npm_platform = root / "dslzl-csa-win32-x64-0.1.1.tgz"
+    npm_platform = root / "dslzl-csa-win32-x64-0.1.2.tgz"
     write_tar(
         npm_platform,
         {
@@ -141,7 +141,7 @@ def release_input(
         )
     value = {
         "schema": 1,
-        "release_version": "0.1.1",
+        "release_version": "0.1.2",
         "source": {"revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ref": None, "repository": None},
         "meta_tarball": str(meta),
         "platforms": results,
@@ -178,8 +178,8 @@ def test_assembler(root: Path) -> None:
     provenance = json.loads((first / "provenance.json").read_bytes())
     assert all(not Path(asset["path"]).is_absolute() for asset in provenance["assets"])
     assemble(REPOSITORY, inputs, second)
-    assert digest(first / "source" / "csa-0.1.1.tar.gz") == digest(
-        second / "source" / "csa-0.1.1.tar.gz"
+    assert digest(first / "source" / "csa-0.1.2.tar.gz") == digest(
+        second / "source" / "csa-0.1.2.tar.gz"
     )
 
     corrupt = root / "corrupt-platform.tgz"
@@ -242,7 +242,7 @@ def test_ci_input(root: Path) -> None:
         artifact_root,
         output,
         "a" * 40,
-        "refs/tags/v0.1.1",
+        "refs/tags/v0.1.2",
         "https://example.invalid/csa",
     )
     assert value["platforms"]["win32-x64"]["status"] == "pass"
@@ -960,7 +960,10 @@ def test_release_stream_contracts() -> None:
         assert "csa-sccache-v5-linux-X64-rustc-" not in workflow
 
     online = (REPOSITORY / "src" / "online.rs").read_text(encoding="utf-8")
-    assert '"0.149.0" => Some("rust-v0.149.0-native-join-p3")' in online
+    assert "compatibility_id_for_version" not in online
+    assert "discover_catalog" in online
+    assert "prompt_catalog" in online
+    assert "releases/latest" not in online
     assert 'format!("rust-v{upstream_version}-native-join-p2")' not in online
     assert 'format!("rust-v{upstream_version}-native-join-p1")' not in online
 
@@ -973,6 +976,10 @@ def test_release_stream_contracts() -> None:
     assert manager_workflow.count("needs: validate") == 2
     assert "needs: [validate, quality, build]" in manager_workflow
     assert "csa-release-${{ matrix.id }}" in manager_workflow
+    assert "node scripts/stage_npm_packages.mjs" in manager_workflow
+    assert "node scripts/test_installed_launcher.mjs" in manager_workflow
+    assert "dslzl-csa-darwin-arm64-${VERSION}.tgz" in manager_workflow
+    assert "Validate exact manager and npm asset set" in manager_workflow
 
     for workflow in (manager_workflow, patched_workflow):
         assert 'repos/$GITHUB_REPOSITORY/git/tags' in workflow

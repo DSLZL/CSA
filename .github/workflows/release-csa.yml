@@ -6,7 +6,7 @@ on:
       version:
         description: CSA version to release (without the v prefix)
         required: true
-        default: "0.1.1"
+        default: "0.1.2"
         type: string
 
 concurrency:
@@ -60,12 +60,13 @@ jobs:
           cargo_version = cargo["package"]["version"]
           matrix = json.loads(Path("release/support-matrix.json").read_text(encoding="utf-8"))
           matrix_version = matrix["manager_version"]
+          npm_version = json.loads(Path("npm/meta/package.json").read_text(encoding="utf-8"))["version"]
 
-          if requested != cargo_version or requested != matrix_version:
+          if requested != cargo_version or requested != matrix_version or requested != npm_version:
               raise SystemExit(
                   "version mismatch: "
                   f"requested={requested}, Cargo.toml={cargo_version}, "
-                  f"release/support-matrix.json={matrix_version}"
+                  f"release/support-matrix.json={matrix_version}, npm/meta/package.json={npm_version}"
               )
 
           output = Path(os.environ["GITHUB_OUTPUT"])
@@ -92,6 +93,15 @@ jobs:
         with:
           components: clippy,rustfmt
 
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "26"
+          package-manager-cache: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
       - name: Set up Cargo downloads and sccache
         uses: ./.github/actions/setup-codex-rust-cache
         with:
@@ -103,6 +113,13 @@ jobs:
           cargo fmt --all -- --check
           cargo clippy --workspace --all-targets --all-features -- -D warnings
           cargo test --all-targets
+
+      - name: Validate npm and release tooling
+        run: |
+          node --check npm/meta/bin/csa.js
+          node --check scripts/stage_npm_packages.mjs
+          node scripts/test_npm_launcher.mjs
+          python scripts/test_release_tools.py
 
       - name: Rust cache statistics
         if: always()
@@ -117,26 +134,31 @@ jobs:
       matrix:
         include:
           - id: windows-x86_64
+            npm_id: win32-x64
             runner: windows-2025
             target: x86_64-pc-windows-msvc
             binary: csa.exe
             archive: zip
           - id: linux-x86_64
+            npm_id: linux-x64
             runner: ubuntu-24.04
             target: x86_64-unknown-linux-gnu
             binary: csa
             archive: tar
           - id: linux-aarch64
+            npm_id: linux-arm64
             runner: ubuntu-24.04-arm
             target: aarch64-unknown-linux-gnu
             binary: csa
             archive: tar
           - id: macos-x86_64
+            npm_id: darwin-x64
             runner: macos-15-intel
             target: x86_64-apple-darwin
             binary: csa
             archive: tar
           - id: macos-aarch64
+            npm_id: darwin-arm64
             runner: macos-15
             target: aarch64-apple-darwin
             binary: csa
@@ -158,6 +180,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           persist-credentials: false
+
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "26"
+          package-manager-cache: false
 
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
 
@@ -218,6 +245,43 @@ jobs:
           "asset=$destination" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
           "asset_name=$name" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
 
+      - name: Pack and test npm candidates
+        shell: pwsh
+        env:
+          VERSION: ${{ needs.validate.outputs.version }}
+        run: |
+          $npmStage = Join-Path $env:CSA_RELEASE_ROOT "npm-stage"
+          $tarballs = Join-Path $env:CSA_RELEASE_ROOT "npm-tarballs"
+          $prefix = Join-Path $env:CSA_RELEASE_ROOT "npm-prefix"
+          New-Item -ItemType Directory -Force $tarballs, $prefix | Out-Null
+
+          $binary = Join-Path $env:CARGO_TARGET_DIR "${{ matrix.target }}/release/${{ matrix.binary }}"
+          node scripts/stage_npm_packages.mjs --out $npmStage --binary "${{ matrix.npm_id }}=$binary"
+          if ($LASTEXITCODE -ne 0) { throw "npm package staging failed" }
+
+          $meta = @(npm pack (Join-Path $npmStage "meta") --json --pack-destination $tarballs | ConvertFrom-Json)
+          $platform = @(npm pack (Join-Path $npmStage "platforms/${{ matrix.npm_id }}") --json --pack-destination $tarballs | ConvertFrom-Json)
+          if ($LASTEXITCODE -ne 0 -or $meta.Count -ne 1 -or $platform.Count -ne 1) {
+            throw "npm pack did not produce exactly one meta and one platform tarball"
+          }
+          $metaTarball = Join-Path $tarballs ([string]$meta[0].filename)
+          $platformTarball = Join-Path $tarballs ([string]$platform[0].filename)
+          if (-not (Test-Path -LiteralPath $metaTarball -PathType Leaf)) { throw "meta tarball is missing: $metaTarball" }
+          if (-not (Test-Path -LiteralPath $platformTarball -PathType Leaf)) { throw "platform tarball is missing: $platformTarball" }
+
+          npm install --prefix $prefix --offline --no-audit --no-fund $platformTarball $metaTarball
+          if ($LASTEXITCODE -ne 0) { throw "temporary-prefix npm install failed" }
+          node scripts/test_installed_launcher.mjs $prefix "csa $env:VERSION"
+          if ($LASTEXITCODE -ne 0) { throw "installed launcher test failed" }
+          npm uninstall --prefix $prefix --offline --no-audit --no-fund "@dslzl/csa" "@dslzl/csa-${{ matrix.npm_id }}"
+          if ($LASTEXITCODE -ne 0) { throw "temporary-prefix npm uninstall failed" }
+
+          $assets = Join-Path $env:CSA_RELEASE_ROOT "assets"
+          Copy-Item -LiteralPath $platformTarball -Destination $assets
+          if ("${{ matrix.npm_id }}" -eq "win32-x64") {
+            Copy-Item -LiteralPath $metaTarball -Destination $assets
+          }
+
       - name: Rust cache statistics
         if: always()
         continue-on-error: true
@@ -226,7 +290,7 @@ jobs:
       - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: csa-release-${{ matrix.id }}
-          path: ${{ steps.package.outputs.asset }}
+          path: ${{ env.CSA_RELEASE_ROOT }}/assets
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
@@ -249,7 +313,7 @@ jobs:
           path: ${{ runner.temp }}/csa-release-assets
           merge-multiple: true
 
-      - name: Validate exactly five platform assets
+      - name: Validate exact manager and npm asset set
         env:
           VERSION: ${{ needs.validate.outputs.version }}
         run: |
@@ -262,6 +326,12 @@ jobs:
             "csa-v${VERSION}-linux-aarch64.tar.gz"
             "csa-v${VERSION}-macos-x86_64.tar.gz"
             "csa-v${VERSION}-macos-aarch64.tar.gz"
+            "dslzl-csa-${VERSION}.tgz"
+            "dslzl-csa-win32-x64-${VERSION}.tgz"
+            "dslzl-csa-linux-x64-${VERSION}.tgz"
+            "dslzl-csa-linux-arm64-${VERSION}.tgz"
+            "dslzl-csa-darwin-x64-${VERSION}.tgz"
+            "dslzl-csa-darwin-arm64-${VERSION}.tgz"
           )
 
           mapfile -t actual < <(find . -maxdepth 1 -type f -printf '%f\n' | sort)
@@ -319,8 +389,9 @@ jobs:
           cat > "$RUNNER_TEMP/release-notes.md" <<EOF
           CSA v${VERSION}
 
-          This Release contains the CSA manager only.
-          Each supported platform is published as an independent downloadable asset.
+          This Release contains the CSA manager distribution only.
+          Each supported platform is published as an independent manager archive and verified npm package tarball.
+          The @dslzl/csa meta package tarball is included for exact npm publication.
           Patched Codex CLI builds are published separately under compat-<compat_id> Releases.
           EOF
 

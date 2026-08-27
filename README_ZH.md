@@ -1,150 +1,245 @@
+<div align="center">
+
 # CSA
 
-CSA 提供一个 fail-closed 的 Rust 管理器和一份绑定具体 Codex 版本的 Native Join 补丁。它与官方 Codex CLI 并排安装，不覆盖官方安装。
+一个 fail-closed 管理器，在不替换官方 Codex CLI 的前提下运行绑定特定版本的 patched CLI。
 
-当前状态：**Windows x64 的本地 p3 hybrid candidate 已完成验证，但未执行任何发布**。14-patch Codex `0.149.0` payload 已精确应用，install-context 测试和 release build 通过；disposable manager 的 install/start/uninstall 生命周期复用了完整的官方 Bun runtime，没有复制 companion executable。托管 Release workflow 仍是唯一发布入口。详见 [release-readiness.md](release-readiness.md)。
+[![CI](https://github.com/DSLZL/CSA/actions/workflows/ci.yml/badge.svg)](https://github.com/DSLZL/CSA/actions/workflows/ci.yml)
+[![CSA release](https://img.shields.io/github/v/release/DSLZL/CSA?filter=v%2A&label=CSA)](https://github.com/DSLZL/CSA/releases)
+[![Patched Codex](https://img.shields.io/badge/patched%20Codex-0.149.0%20accepted-white)](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.149.0-native-join-p3)
 
-[English README](README.md)
+[快速开始](#快速开始) · [工作原理](#工作原理) · [兼容状态](#兼容状态) · [命令](#命令) · [开发](#开发) · [English](README.md)
 
-## 解决的问题
+</div>
 
-Patched Codex 允许 Parent 对精确 child run 提交一次原生 Join，并一直等待到该 run 进入 terminal 状态。这样无需客户端反复 wait/status，同时保留 approval、cancellation、replay 和 shutdown 语义。
+CSA 为 Codex 加入原生子代理 Join 和实时子代理视图，但不会替换官方 CLI。管理器会找到本机的 Codex 安装，校验 runtime 文件，并把 patched executable 放进独立的受管目录。
 
-CSA 新增的 `join_agent` 以普通 function 暴露，因为 provider 会拒绝在保留的 `collaboration` namespace 中增加新工具名；上游 multi-agent 工具仍保留原 namespace。
+> [!IMPORTANT]
+> CSA 管理器 `0.1.2` 通过 `@dslzl/csa` 和 GitHub `v0.1.2` Release 分发。Patched Codex `0.149.0` p3 是当前已接受并发布的 Windows x64 版本；`0.149.1` p6 和 p7 仍是只开放构建的候选版本。
 
-开发时必须区分两个角色：
+## 补丁改了什么
+
+- `join_agent` 用一次工具调用等待一个精确的 child run 结束。
+- `join_agents` 等待多个精确 run，并按请求顺序返回结果。
+- Native Join 处于 pending 状态时，Parent 不需要反复查询 child status。
+- TUI 可以显示子代理的实时进度和完成状态，并支持跳转到对应的子会话。
+- Patched executable 复用官方 Codex runtime package 和 companion tools，不携带第二套副本。
+
+`0.149.1` p7 候选版本还包含最新的子代理面板和终端无损 Orbit 动画。它目前不是正式的 compatibility release。
+
+## 工作原理
 
 ```text
-Official Codex       运行 Trellis，并作为开发控制面
-Patched Codex SUT    只通过绝对路径、isolated exec 或显式 shim 运行
+官方 Codex 安装（只读）
+          │
+          │ 发现并校验指纹
+          ▼
+      CSA 管理器
+          │ prepare + plug
+          ▼
+<manager-root>/bin/codex
+    ├─ binding 有效 -> patched codex.exe + 官方 runtime
+    └─ binding 无效 -> 官方 Codex launcher
 ```
 
-安装 `@dslzl/csa` 只暴露 `csa`，且不运行 lifecycle script；npm 安装阶段不会下载、构建、打补丁、激活或修改 PATH/profile。之后用户显式执行 `csa install` 时，管理器会发现官方 CLI 及完整的 npm/Bun/pnpm Windows runtime，只接受 OpenAI 当前最新的正式 `rust-vX.Y.Z` Release，并从固定的 `dslzl/CSA` 下载对应正式 `compat-<compat_id>` 资产。官方 package 始终保持外部只读且不变。
+CSA 把四个部分分开管理：
 
-GitHub Release 分成两条独立流：`vX.Y.Z` 只放 CSA manager/npm 产物，`compat-<compat_id>` 只放 patched Codex 兼容资产。整点 watcher 只把上游 Codex clone 到 runner 临时目录，不会放进 CSA 仓库。
-
-## 已验证范围
-
-| 平台 | 管理器/npm | Patched Codex payload |
+| 组件 | 所有者 | 用途 |
 | --- | --- | --- |
-| Windows x64 | manager 本地 PASS；当前 npm candidate 未验证；`windows-2025` CI 已配置 | `rust-v0.149.0-native-join-p3` hybrid install/runtime 生命周期 PASS；未运行托管 Release |
-| Linux x64 | CI 已配置，未验证 | 无 |
-| Linux arm64 | CI 已配置，未验证 | 无 |
-| macOS x64 | CI 已配置，未验证 | 无 |
-| macOS arm64 | CI 已配置，未验证 | 无 |
+| 官方 Codex | OpenAI package manager 安装 | 配置、认证、runtime helpers 和安全回退 |
+| CSA 管理器 | CSA | 验证、prepare、激活、状态检查和卸载 |
+| Patched Codex | CSA 受管目录 | 绑定版本的 Native Join 与 TUI 修改 |
+| `codex` shim | CSA 受管目录 | 选择已验证的 patched binary，验证失败时回退到官方 Codex |
 
-当前兼容 authority 固定到上游 tag `rust-v0.149.0`、commit `758ef40f50c1a458425c7cfbf1eb12cbc07af0b0`、Rust `1.95.0` 和 `x86_64-pc-windows-msvc`。本地接受的 executable 为 298,215,424 bytes，SHA-256 为 `e3302a04e8bc6062c5d092692e7d38239986453c599dcdf128fd1d9598f596fd`。上游、官方 runtime 或 artifact 发生漂移时会 fail closed。
+管理器不会覆盖官方文件、复制用户的 Codex Home 或修改 `PATH`。通过 shim 正常启动时，patched Codex 会像官方 Codex 一样继承当前的 `CODEX_HOME`、配置、认证信息、工作目录和终端环境。
+
+## 兼容状态
+
+| Compatibility | Codex | Target | 状态 |
+| --- | --- | --- | --- |
+| [`rust-v0.149.0-native-join-p3`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.149.0-native-join-p3) | `0.149.0` | Windows x64 | 已接受并发布 |
+| `rust-v0.149.1-native-join-p6` | `0.149.1` | Windows x64 | 候选，未开放发布 |
+| `rust-v0.149.1-native-join-p7` | `0.149.1` | Windows x64 | 候选，未开放发布 |
+
+[兼容索引](release/compatibility-index.json)是仓库 payload 的权威来源。正常在线安装会发现所有正式 `compat-*` GitHub Release；只开放构建的候选版本不会出现在列表里。
+
+在线安装仍然严格失败关闭。CSA 会列出所有正式 patched Release，但只有 target、Codex 版本与当前管理器及本机只读官方 runtime 完全匹配的条目才能选择。选中后还会重新验证 tag、upstream commit、manifest、size 和 SHA-256。
 
 ## 前置条件
 
-- 保留可用的官方 Codex CLI `0.149.0`。
-- Node.js `>=18`；CI 覆盖 Node 22、24、26。
-- 当前平台的管理器包，以及已发布且哈希匹配的 CSA compatibility Release。目前只有 Windows x64 的 patched target 得到验证。
-- 只有从源码构建管理器或 payload 时才需要 Rust `1.95.0`。
+- 本机已安装 CSA 能够发现的官方 Codex CLI。
+- 当前已接受的 patched Codex target 仅支持 Windows x64。
+- 从源码构建当前管理器或 patched payload 时需要 Rust `1.95.0`。
+- 从 npm 安装管理器时需要 Node.js `18` 或更高版本。
 
-包尚未发布。开发阶段只能将本地 tarball 安装到临时 prefix：
+公开 GitHub API 请求默认不需要认证。如果公共限额已耗尽，可只为当前 `csa install` 进程设置 `GITHUB_TOKEN` 或 `GH_TOKEN`；CSA 只会把它发送给 `api.github.com`，不会保存。
+
+## 快速开始
+
+### 获取管理器
+
+使用 npm 安装标准 CLI：
 
 ```powershell
-$Prefix = Join-Path $env:TEMP 'csa-prefix'
-npm install --prefix $Prefix --offline --no-audit --no-fund `
-  C:\absolute\dslzl-csa-win32-x64-0.1.1.tgz `
-  C:\absolute\dslzl-csa-0.1.1.tgz
-$Manager = Join-Path $Prefix 'node_modules\.bin\csa.cmd'
+npm install --global @dslzl/csa
+csa --version
+```
+
+[Releases 页面](https://github.com/DSLZL/CSA/releases)也提供预编译的管理器压缩包和 `SHA256SUMS`。下载对应平台的压缩包，校验后解压出 `csa` executable。
+
+也可以构建当前源码：
+
+```powershell
+git clone https://github.com/DSLZL/CSA.git
+Set-Location CSA
+cargo build --release --locked
+
+$Manager = (Resolve-Path '.\target\release\csa.exe').Path
 & $Manager --version
 ```
 
-只有发布状态变为 ready 且 registry 中已存在全部平台包之后，才能使用计划中的 `npm install -g @dslzl/csa@0.1.1`。
+> [!NOTE]
+> npm package 只暴露 `csa`，安装 package 时不会替换 `codex`，也不会自动激活 patched build；仍需显式执行 `csa install`。
 
-## 冷安装与隔离运行
+### 验证并安装
 
-管理器发布后，正常用法是：
+测试时建议传入明确的 manager root，便于检查和清理文件：
 
 ```powershell
-csa install
-csa status
+$ManagerRoot = Join-Path $env:LOCALAPPDATA 'CSA\managed'
+
+csa doctor --manager-root $ManagerRoot
+csa install --manager-root $ManagerRoot
+csa status --manager-root $ManagerRoot
 ```
 
-只有当发现的官方 CLI 版本等于 OpenAI 当前最新的非 draft、非 prerelease `rust-vX.Y.Z` Release，且 CSA 已发布精确匹配的正式兼容 Release 时才会成功。它不会回退到旧 payload；OpenAI 新版刚发布而 CSA 尚未适配时返回 `latest_not_yet_supported`。
-
-离线诊断或本地 payload 开发仍使用绝对路径，并显式传入 manager root：
+在交互式终端中，直接运行 `csa install` 会拉取正式兼容目录，列出 patched Codex 版本及可安装状态，并让用户输入编号。自动化环境必须显式指定完整 ID：
 
 ```powershell
-$Repo = (Resolve-Path '.').Path
-$Manager = Join-Path $Repo 'target\release\csa.exe'
-$ManagerRoot = Join-Path $env:LOCALAPPDATA 'csa\managed'
-$Manifest = Join-Path $Repo 'payload\codex\rust-v0.149.0-native-join-p3\manifest.toml'
-$Artifact = Join-Path $Repo '.dev\p3-final-target\x86_64-pc-windows-msvc\release\codex.exe'
+csa install --compat rust-v0.149.0-native-join-p3
+```
 
-& $Manager doctor --manager-root $ManagerRoot --manifest $Manifest
+> [!WARNING]
+> 只有 target 和 Codex 版本同时匹配当前管理器与本机官方 runtime 的 Release 才能选择。CSA 不会下载或覆盖另一个官方 Codex 版本。本地 payload 模式只用于开发和验收，不能用来绕过版本限制。
+
+开发本地 payload 时，需要传入 manifest，以及一个本地 artifact 或 source 目录：
+
+```powershell
+$CompatId = 'rust-v0.149.0-native-join-p3'
+$Manifest = Join-Path 'C:\absolute\payload' "$CompatId\manifest.toml"
+$Artifact = 'C:\absolute\patched\codex.exe'
+
 & $Manager install --manager-root $ManagerRoot `
-  --manifest $Manifest --artifact $Artifact
-& $Manager status --manager-root $ManagerRoot
+  --manifest $Manifest `
+  --artifact $Artifact
 ```
 
-两种 install 模式都复用同一套 prepare 和 plug 事务。无输入模式只下载经过评审的正式 Release manifest、manifest 引用文件和 patched artifact，并验证 release/tag/commit/target/size/SHA-256 后清理下载暂存；传入 `--manifest` 加且仅加一个 `--artifact` 或 `--source` 时进入纯本地诊断模式。官方路径会自动发现，`--official` 与 `--official-native` 只用于确定性覆盖。两种模式都不修改 PATH，也不复制用户配置。
+Compatibility 目录名必须与其中的 `compat_id` 一致。Candidate manifest 只能在一次性 payload 副本中 finalize，仓库内提交的 candidate 文件应保持不变。
 
-日常开发使用 isolated exec，不创建 shim，也不修改 PATH：
+### 使用 patched CLI
+
+`install` 会创建受管 shim，但不会修改 `PATH`。先只把它加入当前 PowerShell 进程：
 
 ```powershell
-& $Manager exec --isolated --manager-root $ManagerRoot `
-  --codex-home C:\绝对路径\isolated-codex-home `
-  --cwd C:\绝对路径\fixture `
-  --logs-dir C:\绝对路径\logs `
-  --state-dir C:\绝对路径\state `
-  --record C:\绝对路径\evidence.json `
-  --npm-prefix C:\绝对路径\npm-prefix `
+$ManagedBin = Join-Path $ManagerRoot 'bin'
+$env:PATH = $ManagedBin + [IO.Path]::PathSeparator + $env:PATH
+
+Get-Command codex -All
+codex --version
+codex
+```
+
+自动化或一次性测试应使用 `exec --isolated`，不需要激活 shim：
+
+```powershell
+& $Manager exec --isolated `
+  --manager-root $ManagerRoot `
+  --codex-home C:\absolute\isolated\codex-home `
+  --cwd C:\absolute\fixture `
+  --logs-dir C:\absolute\logs `
+  --state-dir C:\absolute\state `
+  --record C:\absolute\evidence.json `
+  --npm-prefix C:\absolute\npm-prefix `
   -- --version
 ```
 
-## 可逆激活
+所有隔离目录都必须是绝对规范路径，彼此不能重叠，也不能位于管理器目录或官方 Codex 目录内。
 
-`plug` 只会把管理器复制为 manager 自有 `bin` 目录中的 `codex` shim；`install` 已经调用它，底层命令用于重试和诊断。应先在当前 Shell 或测试子 Shell 中验证：
-
-```powershell
-& $Manager plug --manager-root $ManagerRoot
-$env:PATH = (Join-Path $ManagerRoot 'bin') + [IO.Path]::PathSeparator + $env:PATH
-Get-Command codex -CommandType Application
-codex --version
-
-& $Manager uninstall --manager-root $ManagerRoot
-Get-Command codex -CommandType Application
-codex --version
-```
-
-`uninstall` 先撤回 shim，再清除 manager 自有的激活和 prepare 数据。PATH 会自然回落到未修改的官方 launcher；它不卸载 npm 包，也不删除官方 Codex。
-
-正常 shim 启动会继承当前环境，因此与官方 Codex 一样使用默认 `CODEX_HOME` 和 `~/.codex/config.toml`。只有 `exec --isolated` 会刻意使用操作者传入的独立 `--codex-home`。
-
-## 恢复与卸载
-
-按以下顺序执行：
+### 卸载
 
 ```powershell
 & $Manager uninstall --manager-root $ManagerRoot
-Get-Command codex -CommandType Application
+
+Get-Command codex -All
 codex --version
-npm uninstall --prefix $Prefix @dslzl/csa @dslzl/csa-win32-x64
 ```
 
-如果用户曾手动添加持久 PATH，只能在确认 official fallback 正常后删除 manager `bin` 那一项。恢复流程不得删除或覆盖官方 Codex。
+`uninstall` 会移除受管 shim 和管理器自己的 prepare 数据。重复执行是安全的。它不会删除官方 Codex、npm package、用户配置，或用户手动添加的 `PATH` 项。
+
+如果曾把受管 `bin` 目录写入用户 `PATH`，请先确认 `codex` 已回落到官方 launcher，再只删除这一项。
+
+## 命令
+
+| 命令 | 作用 |
+| --- | --- |
+| `csa doctor` | 检查官方安装和可选 compatibility inputs，不修改状态 |
+| `csa install` | 列出正式 patched Release，安装选中的精确匹配项，或接收精确的本地 payload |
+| `csa uninstall` | 撤回 shim，移除管理器自己的 prepare 数据 |
+| `csa prepare` | 验证或构建精确的本地 payload，但不激活 |
+| `csa plug` | 在 `<manager-root>/bin` 中发布绑定 checksum 的 shim |
+| `csa unplug` | 撤回 shim，保留 prepared data |
+| `csa status` | 报告 prepared state、激活状态和 drift |
+| `csa purge` | 移除 shim 以及所有受管的 prepared、source、build 和 state 数据 |
+| `csa exec --isolated` | 使用明确的隔离目录运行 prepared Codex binary，并记录 evidence |
+
+运行 `csa --help` 可以查看准确的参数列表。管理器命令返回机器可读的 JSON；参数或验证失败时，会向 stderr 输出结构化错误。
+
+## 安全边界
+
+- 官方 Codex 路径始终位于管理器外部，并保持只读。
+- Manifest、source preimages、runtime files、artifacts、state 和 shims 都绑定 checksum。
+- 文件缺失、版本漂移、路径重叠或 asset 未验证时，操作会 fail closed。
+- Shim 会在启动前重新验证 binding；patched path 不再可信时会回退到官方 Codex。
+- 测试使用一次性 Home、工作目录、state、logs、npm prefixes 和 child-only `PATH`。
+- 测试 evidence 和 release assets 不得包含认证文件、token、cookie 或完整环境变量。
+
+## 开发
+
+管理器是一个小型 Rust binary。Patched Codex payload 采用数据驱动，并绑定精确的 upstream tag、commit、source hashes、toolchain、target 和 test contract。
+
+运行管理器质量检查：
+
+```powershell
+cargo fmt --all -- --check
+cargo clippy --workspace --all-targets --all-features -- -D warnings
+cargo test --all-targets
+```
+
+验证 compatibility 和 release tooling：
+
+```powershell
+py -3 validation\validate_replacements.py --repository .
+py -3 scripts\test_compat_catalog.py
+py -3 scripts\test_verify_release_asset_set.py
+py -3 scripts\test_verify_patch_payload.py
+py -3 scripts\test_release_tools.py
+```
+
+CSA 有两条相互独立的发布流：
+
+- `vX.Y.Z` release 包含管理器和各平台压缩包。
+- `compat-<compat_id>` release 包含一个经过评审的 patched Codex compatibility。
+
+CircleCI 负责编译验收 candidate。GitHub Actions 会独立执行 production build，并负责正式发布。两条 pipeline 都不会把对方的 binary 当作发布 authority。
 
 ## 文档
 
-- [操作与故障恢复](docs/operations.md)
-- [开发与 Trellis 隔离](docs/development.md)
-- [兼容更新、发布和 production plug runbook](docs/release.md)
-- [当前发布就绪状态](release-readiness.md)
-
-## 安全边界和非目标
-
-- manifest、preimage、artifact、state 和 activation shim 均绑定 SHA-256。
-- 缺失、漂移、路径重叠或未验证状态会 fail closed，或安全回落到 official Codex。
-- 自动化测试使用 disposable HOME、`CODEX_HOME`、npm prefix、cwd、logs、state 和 child-only PATH。
-- 不复制 auth、token、cookie、session 到仓库、日志或发布 artifact。
-- 不热替换正在运行的 Codex，不静默修改 profile，不从任意来源下载，也不支持任意 Codex 版本。兼容 Release 只有在对应候选 PR 经评审并合并到默认分支后才允许发布。
-
-许可证为 [MIT](LICENSE)，上游和依赖声明见 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
-
+- [操作与恢复](docs/operations.md)
+- [开发与测试隔离](docs/development.md)
+- [兼容与发布流程](docs/release.md)
+- [当前发布准备状态](release-readiness.md)
+- [兼容目录](release/compatibility-index.json)
+- [平台支持矩阵](release/support-matrix.json)
 
 ## 友链
 
