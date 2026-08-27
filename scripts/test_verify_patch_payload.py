@@ -38,12 +38,12 @@ class PatchPayloadVerifierTests(unittest.TestCase):
         self._assert_rejected(
             "patch_set_version = 1",
             "patch_set_version = true",
-            "patch_set_version must be 1, 2, 3, 4, 5, or 6",
+            "patch_set_version must be 1, 2, 3, 4, 5, 6, or 7",
         )
         self._assert_rejected(
             "patch_set_version = 1",
-            "patch_set_version = 7",
-            "patch_set_version must be 1, 2, 3, 4, 5, or 6",
+            "patch_set_version = 8",
+            "patch_set_version must be 1, 2, 3, 4, 5, 6, or 7",
         )
         self._assert_rejected("size = 299944448", "size = true", "artifact size must be positive")
         self._assert_rejected(

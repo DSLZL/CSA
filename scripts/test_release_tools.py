@@ -473,6 +473,40 @@ def test_contract_shape() -> None:
     assert default_codex_foreground in p6_patch
     assert "+                symbol.white()" not in p6_patch
     assert "+                symbol.green()" not in p6_patch
+
+    p7 = REPOSITORY / "payload" / "codex" / "rust-v0.149.1-native-join-p7"
+    p7_manifest = tomllib.loads((p7 / "manifest.toml").read_text(encoding="utf-8"))
+    p7_contract = load_contract(p7 / "test-contract.json", p7.name)
+    assert p7_manifest["patch_set_version"] == 7
+    assert len(p7_manifest["patches"]) == 15
+    assert p7_manifest["patches"][-1]["path"] == "patches/0015-csa-1x1-lossless-orbit.patch"
+    assert len(p7_contract["tests"]) == 19
+    assert p7_contract["tests"][14]["name"] == "CSA lossless Orbit"
+    assert p7_contract["tests"][14]["argv"] == [
+        "cargo",
+        "test",
+        "-p",
+        "codex-tui",
+        "--lib",
+        "csa_",
+        "--",
+        "--test-threads=1",
+        "--format=terse",
+    ]
+    p7_hashes = json.loads((p7 / "expected" / "source-hashes.json").read_bytes())
+    assert "codex-rs/tui/src/csa_graphics.rs" in p7_hashes["absent"]
+    assert "codex-rs/tui/src/csa_orbit.rs" in p7_hashes["absent"]
+    assert "codex-rs/tui/src/pets/image_protocol.rs" in p7_hashes["present"]
+    p7_patch = (p7 / "patches" / "0015-csa-1x1-lossless-orbit.patch").read_text(
+        encoding="utf-8"
+    )
+    assert "CsaOrbitFrameCache" in p7_patch
+    assert "CsaGraphicsState" in p7_patch
+    assert "CellDiffOption::Skip" in p7_patch
+    assert "orbit_intensities_at" in p7_patch
+    assert "ImageProtocol::Kitty" in p7_patch
+    assert "ImageProtocol::Sixel" in p7_patch
+    assert "GetCurrentConsoleFontEx" in p7_patch
     for attributes in (
         REPOSITORY / "payload" / "codex" / ".gitattributes",
         REPOSITORY / "release" / ".gitattributes",
@@ -624,10 +658,13 @@ def test_sccache_statistics() -> None:
             "cache_errors": metric(0),
             "cache_read_errors": 0,
             "cache_write_errors": 0,
-        }
+        },
+        "cache_size": 3 * 1024**3,
+        "max_cache_size": 4 * 1024**3,
     }
     summary = summarize_sccache_stats(document, 95)
-    assert summary["rust_hit_rate"] == 97.0 and summary["warnings"] == []
+    assert summary["rust_hit_rate"] == 97.0 and summary["cache_utilization"] == 75.0
+    assert summary["warnings"] == []
     for changed in (
         {"compile_requests": 0},
         {"cache_hits": metric(90), "cache_misses": metric(10)},
@@ -636,8 +673,36 @@ def test_sccache_statistics() -> None:
         candidate = json.loads(json.dumps(document))
         candidate["stats"].update(changed)
         assert summarize_sccache_stats(candidate, 95)["warnings"]
+    near_capacity = json.loads(json.dumps(document))
+    near_capacity["cache_size"] = near_capacity["max_cache_size"]
+    assert "near capacity" in summarize_sccache_stats(near_capacity, 95)["warnings"][0]
 
     with tempfile.TemporaryDirectory(prefix="csa-sccache-stats-") as directory:
+        valid = Path(directory) / "valid.json"
+        step_summary = Path(directory) / "summary.md"
+        valid.write_text(json.dumps(document), encoding="utf-8")
+        stdout = io.StringIO()
+        with (
+            patch.object(
+                sys,
+                "argv",
+                [
+                    "check_sccache_stats.py",
+                    "--stats",
+                    str(valid),
+                    "--profile",
+                    "test",
+                    "--github-step-summary",
+                    str(step_summary),
+                ],
+            ),
+            redirect_stdout(stdout),
+        ):
+            assert sccache_stats_main() == 0
+        assert json.loads(stdout.getvalue())["profile"] == "test"
+        assert "### sccache: test" in step_summary.read_text(encoding="utf-8")
+        assert "97.00%" in step_summary.read_text(encoding="utf-8")
+
         malformed = Path(directory) / "stats.json"
         malformed.write_text("not json", encoding="utf-8")
         stdout = io.StringIO()
@@ -823,21 +888,49 @@ def test_release_stream_contracts() -> None:
         assert f'cp "$official_root/{path}"' not in shared_build
     assert patched_workflow.count(
         "actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7"
-    ) == 6
+    ) == 7
     assert patched_workflow.count(
         "actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7"
     ) == 8
     assert patched_workflow.count("gh cache delete") == 2
-    assert patched_workflow.count("continue-on-error: true") == 16
+    assert patched_workflow.count("continue-on-error: true") == 17
     assert "actions: write" in patched_workflow
     assert "group: csa-patched-codex-release-${{ inputs.target }}" in patched_workflow
     assert "github.run_id" not in patched_workflow
-    for key in (
-        "csa-patched-codex-cargo-v8-linux-X64",
-        "csa-patched-codex-sccache-v8-linux-X64",
-    ):
-        assert patched_workflow.count(key) == 5
-        assert f"{key}-" not in patched_workflow
+    cargo_key = "csa-patched-codex-cargo-v8-linux-X64"
+    assert patched_workflow.count(cargo_key) == 5
+    assert f"{cargo_key}-" not in patched_workflow
+    assert patched_workflow.count("csa-patched-codex-sccache-v8-linux-X64") == 1
+    compiler_prefix = (
+        "csa-patched-codex-sccache-v9-linux-X64-"
+        "${{ steps.resolve.outputs.build_target }}-rust-"
+        "${{ steps.resolve.outputs.rust_toolchain }}"
+    )
+    for profile in ("test", "release"):
+        compatible = (
+            f"{compiler_prefix}-{profile}-"
+            "${{ steps.resolve.outputs.build_profile_sha256 }}-"
+        )
+        exact = (
+            f"{compatible}upstream-${{{{ steps.resolve.outputs.upstream_commit }}}}-"
+            "patch-${{ steps.resolve.outputs.manifest_sha256 }}"
+        )
+        assert patched_workflow.count(exact) == 3
+        restore_key = (
+            f"restore-keys: {compatible}"
+            if profile == "test"
+            else f"restore-keys: |\n            {compatible}\n"
+        )
+        assert patched_workflow.count(restore_key) == 1
+    assert "SCCACHE_TEST_DIR=$root/cache/sccache-test" in patched_workflow
+    assert "SCCACHE_RELEASE_DIR=$root/cache/sccache" in patched_workflow
+    assert "SCCACHE_DIR: ${{ env.SCCACHE_TEST_DIR }}" in patched_workflow
+    assert "SCCACHE_DIR: ${{ env.SCCACHE_RELEASE_DIR }}" in patched_workflow
+    assert "CSA_SCCACHE_CACHE_SIZE: 4G" in patched_workflow
+    assert "CSA_SCCACHE_CACHE_SIZE: 6G" in patched_workflow
+    assert "CSA_SCCACHE_PROFILE: test" in patched_workflow
+    assert "CSA_SCCACHE_PROFILE: release" in patched_workflow
+    assert patched_workflow.count("CSA_MINIMUM_RUST_HIT_RATE: 95") == 2
     assert "sccache-stats*.json" in patched_workflow
     ordered_steps = (
         "Prepare pinned build tools",
@@ -851,13 +944,16 @@ def test_release_stream_contracts() -> None:
         "Run patch generation and contract tests",
         "Save test compiler cache",
         "Build canonical patched Codex CLI bundle",
-        "Save final compiler cache",
+        "Save release compiler cache",
         "Finalize production manifest",
     )
     assert list(map(patched_workflow.index, ordered_steps)) == sorted(
         map(patched_workflow.index, ordered_steps)
     )
     assert "SCCACHE_DIR" in patched_workflow
+    assert 'export SCCACHE_CACHE_SIZE="${CSA_SCCACHE_CACHE_SIZE:-$SCCACHE_CACHE_SIZE_PROFILE}"' in shared_build
+    assert "--github-step-summary" in shared_build
+    assert "CSA_SCCACHE_PROFILE" in shared_build
     assert "csa-sccache-v5-linux-X64-rustc-" not in patched_workflow
     assert "csa-sccache-v3-" not in patched_workflow
     for workflow in (ci_workflow, watcher):
@@ -1126,7 +1222,7 @@ def test_compatibility_release_tools(root: Path) -> None:
             if repository == "openai/codex":
                 assert tag == "rust-v9.8.7"
                 return "f" * 40
-            assert repository == "dslzl/CSA" and tag == "compat-rust-v9.8.7-native-join-p6"
+            assert repository == "dslzl/CSA" and tag == "compat-rust-v9.8.7-native-join-p7"
             return "d" * 40
 
     fake = FakeApi()
@@ -1139,13 +1235,13 @@ def test_compatibility_release_tools(root: Path) -> None:
     detection = detect(REPOSITORY.resolve(), fake)
     assert detection["action"] == "blocked" and detection["issue_needs_update"] is False
     fake.issue_body = ""
-    fake.pulls = [{"head": {"ref": "automation/compat-rust-v9.8.7-native-join-p6"}}]
+    fake.pulls = [{"head": {"ref": "automation/compat-rust-v9.8.7-native-join-p7"}}]
     assert detect(REPOSITORY.resolve(), fake)["action"] == "candidate_open"
     fake.pulls = []
     with patch("compat_release.exact_local_entry", return_value=True):
         assert detect(REPOSITORY.resolve(), fake)["action"] == "publish"
     fake.release = {
-        "tag_name": "compat-rust-v9.8.7-native-join-p6",
+        "tag_name": "compat-rust-v9.8.7-native-join-p7",
         "draft": False,
         "prerelease": False,
     }
@@ -1165,7 +1261,7 @@ def test_compatibility_release_tools(root: Path) -> None:
 
     matching = MatchingApi()
     current = detect(REPOSITORY.resolve(), matching)
-    assert current["compat_id"] == "rust-v0.149.1-native-join-p6"
+    assert current["compat_id"] == "rust-v0.149.1-native-join-p7"
     assert current["action"] == "publish"
 
 

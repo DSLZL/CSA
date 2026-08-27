@@ -152,7 +152,7 @@ export PATH="$CARGO_HOME/bin:$CSA_TOOL_BIN:/usr/lib/llvm-$LLVM_MAJOR/bin:$PATH"
 export CARGO_BUILD_JOBS="$CARGO_BUILD_JOBS_PROFILE"
 export CARGO_INCREMENTAL="$CARGO_INCREMENTAL_PROFILE"
 export RUSTC_WRAPPER="$CSA_TOOL_BIN/sccache"
-export SCCACHE_CACHE_SIZE="$SCCACHE_CACHE_SIZE_PROFILE"
+export SCCACHE_CACHE_SIZE="${CSA_SCCACHE_CACHE_SIZE:-$SCCACHE_CACHE_SIZE_PROFILE}"
 export SCCACHE_IDLE_TIMEOUT=0
 export XWIN_ACCEPT_LICENSE=1
 export XWIN_ARCH="$XWIN_ARCH_PROFILE"
@@ -385,6 +385,12 @@ report_sccache() {
     local stats_args=(--stats "$destination")
     if [[ -n "${CSA_MINIMUM_RUST_HIT_RATE:-}" ]]; then
       stats_args+=(--minimum-rust-hit-rate "$CSA_MINIMUM_RUST_HIT_RATE")
+    fi
+    if [[ -n "${CSA_SCCACHE_PROFILE:-}" ]]; then
+      stats_args+=(--profile "$CSA_SCCACHE_PROFILE")
+    fi
+    if [[ -n "${GITHUB_STEP_SUMMARY:-}" ]]; then
+      stats_args+=(--github-step-summary "$GITHUB_STEP_SUMMARY")
     fi
     python3 "$repository/scripts/check_sccache_stats.py" "${stats_args[@]}" || true
   else

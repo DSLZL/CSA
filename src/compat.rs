@@ -497,10 +497,11 @@ fn validate_manifest(manifest: &CompatibilityManifest) -> Result<()> {
         4 => 12,
         5 => 13,
         6 => 14,
+        7 => 15,
         _ => {
             return Err(ManagerError::new(
                 "unsupported_manifest",
-                "only patch sets 1, 2, 3, 4, 5, and 6 are supported",
+                "only patch sets 1, 2, 3, 4, 5, 6, and 7 are supported",
             ));
         }
     };
@@ -730,10 +731,23 @@ pub struct BuildContract {
 impl TestContract {
     fn validate(&self, manifest: &CompatibilityManifest) -> Result<()> {
         let p2 = manifest.patch_set_version == 2;
-        let p3 = matches!(manifest.patch_set_version, 3..=6);
-        let p3_isolates_background_exit = manifest.patch_set_version == 6;
+        let p3 = matches!(manifest.patch_set_version, 3..=7);
+        let p3_isolates_background_exit = matches!(manifest.patch_set_version, 6..=7);
         let p3_tui_offset = usize::from(p3_isolates_background_exit);
         let p3_offset = usize::from(p3);
+        let transport_fallback = matches!(manifest.patch_set_version, 6..=7)
+            && manifest.patches.iter().any(|patch| {
+                patch.path == "patches/0013-subagent-live-polish.patch"
+                    && patch.sha256
+                        == "37853b54b759412b4f10a942dc036a2ffb18a03091455617ea81cd832ace9ce4"
+            });
+        let transport_fallback_offset = usize::from(transport_fallback);
+        let csa_orbit = manifest.patch_set_version == 7
+            && manifest
+                .patches
+                .iter()
+                .any(|patch| patch.path == "patches/0015-csa-1x1-lossless-orbit.patch");
+        let csa_orbit_offset = usize::from(csa_orbit);
         let batch_join = (p2 || p3)
             && manifest
                 .patches
@@ -746,7 +760,8 @@ impl TestContract {
             3 if batch_join => 15,
             4 if batch_join => 16,
             5 if batch_join => 16,
-            6 if batch_join => 17,
+            6 if batch_join => 17 + transport_fallback_offset,
+            7 if batch_join && csa_orbit => 17 + transport_fallback_offset + csa_orbit_offset,
             _ => {
                 return Err(ManagerError::new(
                     "invalid_test_contract",
@@ -798,7 +813,7 @@ impl TestContract {
                 &[],
             );
         let first_native_test = if batch_join {
-            2 + p3_offset
+            2 + p3_offset + transport_fallback_offset
         } else if p2 {
             1
         } else {
@@ -820,7 +835,7 @@ impl TestContract {
                 ],
                 &[],
             ) && step_matches(
-                &self.tests[7 + p3_offset],
+                &self.tests[7 + p3_offset + transport_fallback_offset],
                 "batch Join tool schema",
                 &[
                     "cargo",
@@ -833,7 +848,7 @@ impl TestContract {
                 ],
                 &[],
             ) && step_matches(
-                &self.tests[8 + p3_offset],
+                &self.tests[8 + p3_offset + transport_fallback_offset],
                 "batch Join waits for every exact run",
                 &[
                     "cargo",
@@ -846,6 +861,21 @@ impl TestContract {
                 ],
                 &[],
             ));
+        let transport_fallback_test_matches = !transport_fallback
+            || step_matches(
+                &self.tests[3],
+                "subagent transport fallback inheritance",
+                &[
+                    "cargo",
+                    "test",
+                    "-p",
+                    "codex-core",
+                    "spawned_child_inherits_parent_http_fallback_for_the_same_provider",
+                    "--",
+                    "--nocapture",
+                ],
+                &[],
+            );
 
         let parameters_match = map_matches(
             &self.parameters,
@@ -1024,7 +1054,7 @@ impl TestContract {
         );
         let background_exit_test_matches = !p3_isolates_background_exit
             || step_matches(
-                &self.tests[13],
+                &self.tests[13 + transport_fallback_offset + csa_orbit_offset],
                 "TUI background exit isolation",
                 &[
                     "cargo",
@@ -1042,7 +1072,7 @@ impl TestContract {
         let complete_tui_test_matches = !p3
             || if p3_isolates_background_exit {
                 step_matches(
-                    &self.tests[13 + p3_tui_offset],
+                    &self.tests[13 + p3_tui_offset + transport_fallback_offset + csa_orbit_offset],
                     "complete TUI library",
                     &[
                         "cargo",
@@ -1073,6 +1103,23 @@ impl TestContract {
                     &[],
                 )
             };
+        let csa_orbit_test_matches = !csa_orbit
+            || step_matches(
+                &self.tests[13 + transport_fallback_offset],
+                "CSA lossless Orbit",
+                &[
+                    "cargo",
+                    "test",
+                    "-p",
+                    "codex-tui",
+                    "--lib",
+                    "csa_",
+                    "--",
+                    "--test-threads=1",
+                    "--format=terse",
+                ],
+                &[],
+            );
         let p3_tests_match = !p3
             || (step_matches(
                 &self.tests[0],
@@ -1080,7 +1127,7 @@ impl TestContract {
                 &["cargo", "fmt", "--all", "--", "--check"],
                 &[],
             ) && step_matches(
-                &self.tests[12],
+                &self.tests[12 + transport_fallback_offset],
                 "TUI live state and panel",
                 &[
                     "cargo",
@@ -1096,8 +1143,9 @@ impl TestContract {
                 &[],
             ) && background_exit_test_matches
                 && complete_tui_test_matches
+                && csa_orbit_test_matches
                 && step_matches(
-                    &self.tests[14 + p3_tui_offset],
+                    &self.tests[14 + p3_tui_offset + transport_fallback_offset + csa_orbit_offset],
                     "TUI clippy",
                     &[
                         "cargo",
@@ -1112,9 +1160,9 @@ impl TestContract {
                     ],
                     &[],
                 ));
-        let overlay_test_matches = !matches!(manifest.patch_set_version, 4..=6)
+        let overlay_test_matches = !matches!(manifest.patch_set_version, 4..=7)
             || step_matches(
-                &self.tests[15 + p3_tui_offset],
+                &self.tests[15 + p3_tui_offset + transport_fallback_offset + csa_orbit_offset],
                 "CSA official runtime overlay",
                 &[
                     "cargo",
@@ -1153,7 +1201,7 @@ impl TestContract {
                     ("SOURCE_DATE_EPOCH", "1786063808"),
                 ],
             ),
-            6 => map_matches(
+            6..=7 => map_matches(
                 &self.build.env,
                 &[
                     ("CARGO_BUILD_JOBS", "4"),
@@ -1182,6 +1230,7 @@ impl TestContract {
             || !generation_matches
             || !branding_matches
             || !batch_tests_match
+            || !transport_fallback_test_matches
             || !tests_match
             || !p3_tests_match
             || !overlay_test_matches
