@@ -6,11 +6,11 @@ if [[ $# -eq 6 ]]; then
   phase="$1"
   shift
 elif [[ $# -ne 5 ]]; then
-  echo "usage: $0 [tools|rust|xwin|runtime|tests|build|all] RESOLUTION_JSON SOURCE CARGO_TARGET OUTPUT STATS_OUTPUT" >&2
+  echo "usage: $0 [tools|rust|xwin|runtime|tests|build|release|all] RESOLUTION_JSON SOURCE CARGO_TARGET OUTPUT STATS_OUTPUT" >&2
   exit 2
 fi
 case "$phase" in
-  tools|rust|xwin|runtime|tests|build|all) ;;
+  tools|rust|xwin|runtime|tests|build|release|all) ;;
   *) echo "unsupported build phase: $phase" >&2; exit 2 ;;
 esac
 
@@ -43,9 +43,9 @@ done
   exit 2
 }
 case "$phase" in
-  all|tests)
+  all|tests|release)
     [[ ! -e "$cargo_target" && ! -e "$output" && ! -e "$test_report" ]] || {
-      echo "test phase requires new cargo target, output, and phase report paths" >&2
+      echo "$phase phase requires new cargo target, output, and phase report paths" >&2
       exit 2
     }
     ;;
@@ -424,6 +424,10 @@ run_build() {
   local contract_result="$temp_root/contract-result.json"
   local build_started build_finished
   build_started="$(date +%s)"
+  local -a contract_phase=(--phase build --resume "$test_report")
+  if [[ "$phase" == release ]]; then
+    contract_phase=(--phase release)
+  fi
   python3 "$repository/scripts/run_patch_contract.py" \
     --manifest "$MANIFEST" \
     --source "$source_root" \
@@ -431,8 +435,7 @@ run_build() {
     --output "$contract_result" \
     --cross-windows-msvc \
     --portable-evidence \
-    --phase build \
-    --resume "$test_report"
+    "${contract_phase[@]}"
   build_finished="$(date +%s)"
 
   local artifact="$cargo_target/$BUILD_TARGET/release/$ARTIFACT_FILENAME"
@@ -518,6 +521,10 @@ case "$phase" in
     run_tests
     ;;
   build)
+    install_pinned_tools
+    run_build
+    ;;
+  release)
     install_pinned_tools
     run_build
     ;;

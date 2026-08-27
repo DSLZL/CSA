@@ -236,7 +236,7 @@ def run_contract(
     ):
         if not path.is_absolute():
             raise ContractError(f"{label} path must be absolute")
-    if phase not in {"all", "tests", "build"}:
+    if phase not in {"all", "tests", "build", "release"}:
         raise ContractError(f"unsupported contract phase: {phase}")
     if resume is not None and not resume.is_absolute():
         raise ContractError("resume path must be absolute")
@@ -248,7 +248,7 @@ def run_contract(
     source = source.resolve(strict=True)
     if output.exists() or not output.parent.is_dir():
         raise ContractError("output must be a new file under an existing directory")
-    if phase in {"all", "tests"} and cargo_target.exists():
+    if phase in {"all", "tests", "release"} and cargo_target.exists():
         raise ContractError("cargo target must not already exist")
     if phase == "build" and not cargo_target.is_dir():
         raise ContractError("build phase requires the existing test cargo target")
@@ -298,24 +298,34 @@ def run_contract(
                 }
             )
         steps = []
-        for step in contract["generation"]:
-            steps.append(
-                run_step(step, "generation", cwd, contract["common_env"], source, cargo_target)
-            )
-        for step in contract["tests"]:
-            steps.append(run_step(step, "test", cwd, contract["common_env"], source, cargo_target))
-        if phase == "tests":
-            report = {
-                "schema": 1,
-                "result": "pass",
-                "phase": "tests",
-                "compat_id": manifest["compat_id"],
-                "source_verification": verification,
-                "steps": steps,
-                "known_upstream_errata": contract["known_upstream_errata"],
-            }
-            write_report(output, report)
-            return report
+        if phase != "release":
+            for step in contract["generation"]:
+                steps.append(
+                    run_step(
+                        step,
+                        "generation",
+                        cwd,
+                        contract["common_env"],
+                        source,
+                        cargo_target,
+                    )
+                )
+            for step in contract["tests"]:
+                steps.append(
+                    run_step(step, "test", cwd, contract["common_env"], source, cargo_target)
+                )
+            if phase == "tests":
+                report = {
+                    "schema": 1,
+                    "result": "pass",
+                    "phase": "tests",
+                    "compat_id": manifest["compat_id"],
+                    "source_verification": verification,
+                    "steps": steps,
+                    "known_upstream_errata": contract["known_upstream_errata"],
+                }
+                write_report(output, report)
+                return report
     build = contract["build"]
     if not isinstance(build, dict) or set(build) != {"env", "argv", "artifact"}:
         raise ContractError("invalid build contract")
@@ -369,7 +379,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--output", type=Path, required=True)
     parser.add_argument("--cross-windows-msvc", action="store_true")
     parser.add_argument("--portable-evidence", action="store_true")
-    parser.add_argument("--phase", choices=("all", "tests", "build"), default="all")
+    parser.add_argument(
+        "--phase", choices=("all", "tests", "build", "release"), default="all"
+    )
     parser.add_argument("--resume", type=Path)
     return parser.parse_args()
 

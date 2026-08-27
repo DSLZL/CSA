@@ -16,6 +16,7 @@ import tarfile
 import tempfile
 import tomllib
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 
@@ -46,6 +47,7 @@ from run_patch_contract import (  # noqa: E402
     execute_version,
     load_contract,
     load_test_report,
+    run_contract,
     run_step,
 )
 from verify_patch_payload import VerificationError, _load_payload, _payload_file  # noqa: E402
@@ -728,7 +730,11 @@ def test_release_stream_contracts() -> None:
     patched_workflow = (
         REPOSITORY / ".github" / "workflows" / "release-patched-codex.yml"
     ).read_text(encoding="utf-8")
+    validation_workflow = (
+        REPOSITORY / ".github" / "workflows" / "validate-patched-codex.yml"
+    ).read_text(encoding="utf-8")
     assert patched_workflow.count("Codex source must not live inside the CSA repository") == 1
+    assert validation_workflow.count("Codex source must not live inside the CSA repository") == 1
     assert "default: current" in patched_workflow
     assert "scripts/compat_catalog.py resolve" in patched_workflow
     assert "--require-acceptance" not in patched_workflow
@@ -741,6 +747,21 @@ def test_release_stream_contracts() -> None:
     assert 'cp -a payload "$staged_root/"' in patched_workflow
     assert '--manifest "$STAGED_MANIFEST"' in patched_workflow
     assert 'sha256sum "$ARTIFACT_PATH"' in patched_workflow
+    assert "Upload release candidate assets" in patched_workflow
+    assert patched_workflow.count("actions/upload-artifact@") == 1
+    assert patched_workflow.count("actions/download-artifact@") == 2
+    assert "Upload production build bundle" not in patched_workflow
+    assert "patched-codex-cli-bundle-" not in patched_workflow
+    assert "patched-codex-validation-${{ steps.resolve.outputs.compat_id }}" in patched_workflow
+    assert "run-id: ${{ steps.validation.outputs.validation_run_id }}" in patched_workflow
+    assert "github-token: ${{ github.token }}" in patched_workflow
+    assert "validation_evidence.py verify" in patched_workflow
+    assert validation_workflow.count("actions/upload-artifact@") == 1
+    assert validation_workflow.count("actions/download-artifact@") == 0
+    assert "patched-codex-validation-${{ steps.resolve.outputs.compat_id }}" in validation_workflow
+    assert "validation-result.json" in validation_workflow
+    assert "test-report.json" in validation_workflow
+    assert "bin/codex.exe" not in validation_workflow
     assert 'gh release view "$TAG"' in patched_workflow
     assert '--json databaseId' in patched_workflow
     assert 'releases/$release_id' in patched_workflow
@@ -765,6 +786,9 @@ def test_release_stream_contracts() -> None:
     shared_build = (REPOSITORY / "scripts" / "build_patched_codex_bundle.sh").read_text(
         encoding="utf-8"
     )
+    contract_runner = (REPOSITORY / "scripts" / "run_patch_contract.py").read_text(
+        encoding="utf-8"
+    )
     circleci = (REPOSITORY / ".circleci" / "config.yml").read_text(encoding="utf-8")
     build_profile = (
         REPOSITORY / "release" / "build-profiles" / "windows-msvc-x64.json"
@@ -773,9 +797,16 @@ def test_release_stream_contracts() -> None:
         path.read_text(encoding="utf-8")
         for path in sorted((REPOSITORY / "release" / "runtime-locks").glob("*.json"))
     )
-    assert patched_workflow.count("build_patched_codex_bundle.sh") == 6
-    for phase in ("tools", "rust", "xwin", "runtime", "tests", "build"):
+    assert patched_workflow.count("bash scripts/build_patched_codex_bundle.sh") == 4
+    for phase in ("tools", "rust", "xwin", "release"):
         assert f"build_patched_codex_bundle.sh {phase}" in patched_workflow
+    for phase in ("runtime", "tests", "build"):
+        assert f"build_patched_codex_bundle.sh {phase}" not in patched_workflow
+    assert validation_workflow.count("bash scripts/build_patched_codex_bundle.sh") == 5
+    for phase in ("tools", "rust", "xwin", "runtime", "tests"):
+        assert f"build_patched_codex_bundle.sh {phase}" in validation_workflow
+    for phase in ("build", "release"):
+        assert f"build_patched_codex_bundle.sh {phase}" not in validation_workflow
     assert "output.circle-artifacts.com" not in patched_workflow
     assert "accepted_artifact_url" not in patched_workflow
     assert circleci.count("build_patched_codex_bundle.sh") == 1
@@ -784,13 +815,18 @@ def test_release_stream_contracts() -> None:
     assert "timeout-minutes: 120" in patched_workflow
     assert "timeout 50m bash scripts/build_patched_codex_bundle.sh" not in patched_workflow
     assert "bash scripts/build_patched_codex_bundle.sh" in patched_workflow
+    assert "bash scripts/build_patched_codex_bundle.sh" in validation_workflow
     assert "llvm-toolchain-noble-21" in build_profile
     assert "6084F3CF814B57C1CF12EFD515CF4D18AF4F7421" in build_profile
     assert "/usr/lib/llvm-$LLVM_MAJOR/bin" in shared_build
     assert "CARGO_HOME: ${{ runner.temp }}" not in patched_workflow
     assert 'echo "CARGO_HOME=$root/cache/cargo-home"' in patched_workflow
+    assert "CARGO_HOME: ${{ runner.temp }}" not in validation_workflow
+    assert 'echo "CARGO_HOME=$root/cache/cargo-home"' in validation_workflow
     assert "build_patched_codex_bundle.sh" not in ci_workflow
     assert "compat_catalog.py guard-workflows" in ci_workflow
+    assert "scripts/test_validation_evidence.py" in ci_workflow
+    assert ".github/workflows/validate-patched-codex.yml" in ci_workflow
     assert "build_patched_codex_bundle.sh" not in watcher
     assert "compat_release.py finalize" not in watcher
     assert "compat_release.py pack" not in watcher
@@ -886,53 +922,88 @@ def test_release_stream_contracts() -> None:
         assert path in runtime_locks
         assert path not in shared_build
         assert f'cp "$official_root/{path}"' not in shared_build
-    assert patched_workflow.count(
-        "actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7"
-    ) == 7
-    assert patched_workflow.count(
-        "actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7"
-    ) == 8
-    assert patched_workflow.count("gh cache delete") == 2
-    assert patched_workflow.count("continue-on-error: true") == 17
+    cache_restore = "actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7"
+    cache_save = "actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7"
+    assert patched_workflow.count(cache_restore) == 5
+    assert patched_workflow.count(cache_save) == 5
+    assert patched_workflow.count("gh cache delete") == 1
+    assert patched_workflow.count("continue-on-error: true") == 11
+    assert validation_workflow.count(cache_restore) == 6
+    assert validation_workflow.count(cache_save) == 6
+    assert validation_workflow.count("gh cache delete") == 1
+    assert validation_workflow.count("continue-on-error: true") == 13
     assert "actions: write" in patched_workflow
+    assert "actions: write" in validation_workflow
     assert "group: csa-patched-codex-release-${{ inputs.target }}" in patched_workflow
     assert "github.run_id" not in patched_workflow
+    assert "github.run_id" not in validation_workflow
     cargo_key = "csa-patched-codex-cargo-v8-linux-X64"
-    assert patched_workflow.count(cargo_key) == 5
-    assert f"{cargo_key}-" not in patched_workflow
+    for workflow in (patched_workflow, validation_workflow):
+        assert workflow.count(cargo_key) == 3
+        assert f"{cargo_key}-" not in workflow
     assert patched_workflow.count("csa-patched-codex-sccache-v8-linux-X64") == 1
+    assert "csa-patched-codex-sccache-v8-linux-X64" not in validation_workflow
     compiler_prefix = (
         "csa-patched-codex-sccache-v9-linux-X64-"
         "${{ steps.resolve.outputs.build_target }}-rust-"
         "${{ steps.resolve.outputs.rust_toolchain }}"
     )
-    for profile in ("test", "release"):
-        compatible = (
-            f"{compiler_prefix}-{profile}-"
-            "${{ steps.resolve.outputs.build_profile_sha256 }}-"
-        )
-        exact = (
-            f"{compatible}upstream-${{{{ steps.resolve.outputs.upstream_commit }}}}-"
-            "patch-${{ steps.resolve.outputs.manifest_sha256 }}"
-        )
-        assert patched_workflow.count(exact) == 3
-        restore_key = (
-            f"restore-keys: {compatible}"
-            if profile == "test"
-            else f"restore-keys: |\n            {compatible}\n"
-        )
-        assert patched_workflow.count(restore_key) == 1
-    assert "SCCACHE_TEST_DIR=$root/cache/sccache-test" in patched_workflow
+    test_compatible = (
+        f"{compiler_prefix}-test-"
+        "${{ steps.resolve.outputs.build_profile_sha256 }}-"
+    )
+    test_exact = (
+        f"{test_compatible}upstream-${{{{ steps.resolve.outputs.upstream_commit }}}}-"
+        "patch-${{ steps.resolve.outputs.manifest_sha256 }}"
+    )
+    release_compatible = (
+        f"{compiler_prefix}-release-"
+        "${{ steps.resolve.outputs.build_profile_sha256 }}-"
+    )
+    release_exact = (
+        f"{release_compatible}upstream-${{{{ steps.resolve.outputs.upstream_commit }}}}-"
+        "patch-${{ steps.resolve.outputs.manifest_sha256 }}"
+    )
+    assert validation_workflow.count(test_exact) == 3
+    assert patched_workflow.count(test_exact) == 0
+    assert validation_workflow.count(f"restore-keys: {test_compatible}") == 1
+    assert patched_workflow.count(release_exact) == 3
+    assert validation_workflow.count(release_exact) == 0
+    assert patched_workflow.count(
+        f"restore-keys: |\n            {release_compatible}\n"
+    ) == 1
+    assert "SCCACHE_TEST_DIR" not in patched_workflow
     assert "SCCACHE_RELEASE_DIR=$root/cache/sccache" in patched_workflow
-    assert "SCCACHE_DIR: ${{ env.SCCACHE_TEST_DIR }}" in patched_workflow
     assert "SCCACHE_DIR: ${{ env.SCCACHE_RELEASE_DIR }}" in patched_workflow
-    assert "CSA_SCCACHE_CACHE_SIZE: 4G" in patched_workflow
     assert "CSA_SCCACHE_CACHE_SIZE: 6G" in patched_workflow
-    assert "CSA_SCCACHE_PROFILE: test" in patched_workflow
     assert "CSA_SCCACHE_PROFILE: release" in patched_workflow
-    assert patched_workflow.count("CSA_MINIMUM_RUST_HIT_RATE: 95") == 2
-    assert "sccache-stats*.json" in patched_workflow
-    ordered_steps = (
+    assert patched_workflow.count("CSA_MINIMUM_RUST_HIT_RATE: 95") == 1
+    assert "SCCACHE_DIR=$root/cache/sccache-test" in validation_workflow
+    assert "SCCACHE_DIR: ${{ env.SCCACHE_DIR }}" in validation_workflow
+    assert "CSA_SCCACHE_CACHE_SIZE: 4G" in validation_workflow
+    assert "CSA_SCCACHE_PROFILE: test" in validation_workflow
+    assert validation_workflow.count("CSA_MINIMUM_RUST_HIT_RATE: 95") == 1
+    assert 'echo "SCCACHE_STATS=$root/sccache-stats.json"' in patched_workflow
+    assert 'echo "SCCACHE_STATS=$root/sccache-stats.json"' in validation_workflow
+    assert "sccache-stats*.json" not in patched_workflow + validation_workflow
+    release_steps = (
+        "Select successful exact-commit validation",
+        "Download exact validation evidence",
+        "Verify exact validation evidence",
+        "Prepare pinned build tools",
+        "Save exact build tools",
+        "Prepare exact Rust toolchain",
+        "Save exact Rust toolchain",
+        "Prepare exact xwin SDK and LLVM toolchain",
+        "Save exact xwin SDK",
+        "Build canonical patched Codex CLI bundle",
+        "Save release compiler cache",
+        "Finalize production manifest",
+    )
+    assert list(map(patched_workflow.index, release_steps)) == sorted(
+        map(patched_workflow.index, release_steps)
+    )
+    validation_steps = (
         "Prepare pinned build tools",
         "Save exact build tools",
         "Prepare exact Rust toolchain",
@@ -941,21 +1012,30 @@ def test_release_stream_contracts() -> None:
         "Save exact xwin SDK",
         "Prepare official runtime archive",
         "Save official runtime archive",
-        "Run patch generation and contract tests",
-        "Save test compiler cache",
-        "Build canonical patched Codex CLI bundle",
-        "Save release compiler cache",
-        "Finalize production manifest",
+        "Run complete patch generation and contract tests",
+        "Save validation compiler cache",
+        "Create exact validation evidence",
+        "Upload validation evidence",
     )
-    assert list(map(patched_workflow.index, ordered_steps)) == sorted(
-        map(patched_workflow.index, ordered_steps)
+    assert list(map(validation_workflow.index, validation_steps)) == sorted(
+        map(validation_workflow.index, validation_steps)
     )
     assert "SCCACHE_DIR" in patched_workflow
+    assert "SCCACHE_DIR" in validation_workflow
     assert 'export SCCACHE_CACHE_SIZE="${CSA_SCCACHE_CACHE_SIZE:-$SCCACHE_CACHE_SIZE_PROFILE}"' in shared_build
     assert "--github-step-summary" in shared_build
     assert "CSA_SCCACHE_PROFILE" in shared_build
+    assert 'contract_phase=(--phase build --resume "$test_report")' in shared_build
+    assert 'if [[ "$phase" == release ]]' in shared_build
+    assert "contract_phase=(--phase release)" in shared_build
+    assert 'if phase != "release":' in contract_runner
+    assert '{"all", "tests", "build", "release"}' in contract_runner
+    assert 'if phase == "build" and resume is None:' in contract_runner
+    assert 'if phase in {"all", "tests", "release"} and cargo_target.exists():' in contract_runner
     assert "csa-sccache-v5-linux-X64-rustc-" not in patched_workflow
+    assert "csa-sccache-v5-linux-X64-rustc-" not in validation_workflow
     assert "csa-sccache-v3-" not in patched_workflow
+    assert "csa-sccache-v3-" not in validation_workflow
     for workflow in (ci_workflow, watcher):
         assert "csa-sccache-v5-linux-X64-rustc-" not in workflow
 
@@ -1004,15 +1084,94 @@ def test_release_stream_contracts() -> None:
     for workflow, expected in (
         (ci_workflow, 1),
         (manager_workflow, 1),
-        (patched_workflow, 2),
+        (patched_workflow, 1),
         (watcher, 1),
     ):
         assert workflow.count("retention-days: 1") == expected
+    validation_lines = validation_workflow.splitlines()
+    assert validation_lines.count("          retention-days: 1") == 0
+    assert validation_lines.count("          retention-days: 14") == 1
     schema = json.loads(
         (REPOSITORY / "release" / "release-inputs.schema.json").read_bytes()
     )
     assert "patched_artifacts" not in schema["required"]
     assert "patched_artifacts" not in schema["properties"]
+
+
+def test_release_phase_skips_validation_steps() -> None:
+    artifact_bytes = b"release-only artifact"
+    with tempfile.TemporaryDirectory(prefix="csa-release-phase-") as directory:
+        root = Path(directory)
+        manifest_path = root / "manifest.toml"
+        manifest_path.write_text("schema = 1\n", encoding="utf-8")
+        source = root / "source"
+        (source / "codex-rs").mkdir(parents=True)
+        cargo_target = root / "cargo-target"
+        output = root / "contract-result.json"
+        artifact = cargo_target / "x86_64-pc-windows-msvc" / "release" / "codex.exe"
+        manifest = {
+            "compat_id": "fixture-native-join-p8",
+            "codex_version": "1.2.3",
+            "build_target": "x86_64-pc-windows-msvc",
+            "artifacts": {
+                "x86_64-pc-windows-msvc": {
+                    "sha256": hashlib.sha256(artifact_bytes).hexdigest(),
+                    "size": len(artifact_bytes),
+                }
+            },
+        }
+        contract = {
+            "cwd": "{source}/codex-rs",
+            "common_env": {},
+            "generation": [{"name": "must not run", "argv": ["cargo", "test"]}],
+            "tests": [{"name": "must not run", "argv": ["cargo", "clippy"]}],
+            "build": {
+                "env": {},
+                "argv": ["cargo", "build"],
+                "artifact": "{cargo_target}/x86_64-pc-windows-msvc/release/codex.exe",
+            },
+            "known_upstream_errata": [],
+        }
+        called: list[str] = []
+
+        def fake_step(step: dict[str, object], kind: str, *_: object) -> dict[str, object]:
+            called.append(kind)
+            if kind == "build":
+                artifact.parent.mkdir(parents=True)
+                artifact.write_bytes(artifact_bytes)
+            return {"kind": kind, "name": step["name"], "argv": step["argv"], "exit_code": 0}
+
+        with (
+            patch(
+                "run_patch_contract._load_payload",
+                return_value=SimpleNamespace(manifest=manifest),
+            ),
+            patch("run_patch_contract._payload_file", return_value=root / "test-contract.json"),
+            patch("run_patch_contract.load_contract", return_value=contract),
+            patch(
+                "run_patch_contract.verify",
+                return_value={
+                    "compat_id": manifest["compat_id"],
+                    "commit": "a" * 40,
+                    "applied": True,
+                },
+            ),
+            patch("run_patch_contract.run_step", side_effect=fake_step),
+            patch(
+                "run_patch_contract.execute_version",
+                return_value={"argv": [str(artifact), "--version"], "exit_code": 0},
+            ),
+        ):
+            report = run_contract(
+                manifest_path.resolve(),
+                source.resolve(),
+                cargo_target.resolve(),
+                output.resolve(),
+                phase="release",
+            )
+        assert called == ["build"]
+        assert [step["kind"] for step in report["steps"]] == ["build"]
+        assert report["artifact"]["canonical_manifest_match"] is True
 
 
 def git(root: Path, *args: str) -> str:
@@ -1282,6 +1441,7 @@ def main() -> int:
         test_contract_shape()
         test_sccache_statistics()
         test_release_stream_contracts()
+        test_release_phase_skips_validation_steps()
         test_compatibility_release_tools(root / "compat-release")
     print(
         json.dumps(
@@ -1297,6 +1457,7 @@ def main() -> int:
                 "patch_contract_shape": "pass",
                 "sccache_statistics": "pass",
                 "release_stream_contracts": "pass",
+                "release_only_contract": "pass",
                 "absolute_path_version_execution": "pass",
                 "compatibility_release_pack": "pass",
                 "compatibility_port": "pass",

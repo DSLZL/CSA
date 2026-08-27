@@ -122,7 +122,7 @@ jobs:
               esac
 
               case "$file" in
-                payload/codex/*|scripts/*.sh|scripts/run_patch_contract.py|scripts/verify_patch_payload.py|scripts/test_verify_patch_payload.py|scripts/compatibility_audit.py|scripts/check_sccache_stats.py)
+                payload/codex/*|scripts/*.sh|scripts/run_patch_contract.py|scripts/validation_evidence.py|scripts/test_validation_evidence.py|scripts/verify_patch_payload.py|scripts/test_verify_patch_payload.py|scripts/compatibility_audit.py|scripts/check_sccache_stats.py)
                   payload=true
                   classified=true
                   ;;
@@ -285,12 +285,14 @@ jobs:
           python scripts/test_release_tools.py
           python scripts/test_compat_catalog.py
           python scripts/test_verify_release_asset_set.py
+          python scripts/test_validation_evidence.py
           python scripts/compat_catalog.py validate --repository .
           python scripts/compat_catalog.py guard-workflows \
             .circleci/config.yml \
             .github/workflows/ci.yml \
             .github/workflows/release-csa.yml \
             .github/workflows/release-patched-codex.yml \
+            .github/workflows/validate-patched-codex.yml \
             .github/workflows/watch-codex-release.yml
 
       - name: Immutable compatibility entries

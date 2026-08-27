@@ -18,6 +18,10 @@ on:
         required: true
         default: true
         type: boolean
+      validation_run_id:
+        description: "Optional exact validation run ID; otherwise use the newest matching default-branch run"
+        required: false
+        type: string
 
 concurrency:
   group: csa-patched-codex-release-${{ inputs.target }}
@@ -62,10 +66,9 @@ jobs:
             echo "CARGO_HOME=$root/cache/cargo-home"
             echo "CSA_TOOL_BIN=$root/tools/bin"
             echo "CSA_TOOL_CACHE=$root/cache/tools"
-            echo "CSA_RUNTIME_CACHE=$root/cache/official-runtime"
+            echo "CSA_RUNTIME_CACHE=$root/cache/unused-official-runtime"
             echo "RUSTUP_HOME=$root/cache/rustup"
             echo "SCCACHE_DIR=$root/cache/sccache-bootstrap"
-            echo "SCCACHE_TEST_DIR=$root/cache/sccache-test"
             echo "SCCACHE_RELEASE_DIR=$root/cache/sccache"
             echo "TMPDIR=$root/tmp"
             echo "XWIN_CACHE_DIR=$root/cache/xwin"
@@ -75,8 +78,10 @@ jobs:
             echo "BUNDLE_ROOT=$root/bundle"
             echo "SCCACHE_STATS=$root/sccache-stats.json"
             echo "ARTIFACT_PATH=$root/bundle/bin/codex.exe"
+            echo "VALIDATION_EVIDENCE_ROOT=$root/validation-evidence"
+            echo "VALIDATION_RUNS_JSON=$root/validation-runs.json"
           } >> "$GITHUB_ENV"
-          mkdir -p "$root/home" "$root/codex-home" "$root/tmp"
+          mkdir -p "$root/home" "$root/codex-home" "$root/tmp" "$root/validation-evidence"
           chmod 0700 "$root/tmp"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -115,6 +120,55 @@ jobs:
             --github-output "$GITHUB_OUTPUT"
           python scripts/compat_catalog.py validate --repository .
 
+      - id: validation
+        name: Select successful exact-commit validation
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
+        run: |
+          set -euo pipefail
+          gh api \
+            "repos/$GITHUB_REPOSITORY/actions/workflows/validate-patched-codex.yml/runs?branch=$DEFAULT_BRANCH&head_sha=$GITHUB_SHA&status=success&per_page=100" \
+            > "$VALIDATION_RUNS_JSON"
+          selection_args=()
+          if [[ -n "$REQUESTED_VALIDATION_RUN_ID" ]]; then
+            [[ "$REQUESTED_VALIDATION_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
+              echo "validation_run_id must be a positive integer" >&2
+              exit 2
+            }
+            selection_args+=(--requested-run-id "$REQUESTED_VALIDATION_RUN_ID")
+          fi
+          python scripts/validation_evidence.py select-run \
+            --runs "$VALIDATION_RUNS_JSON" \
+            --csa-commit "$GITHUB_SHA" \
+            --default-branch "$DEFAULT_BRANCH" \
+            "${selection_args[@]}" \
+            --github-output "$GITHUB_OUTPUT"
+
+      - name: Download exact validation evidence
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: patched-codex-validation-${{ steps.resolve.outputs.compat_id }}
+          path: ${{ env.VALIDATION_EVIDENCE_ROOT }}
+          github-token: ${{ github.token }}
+          repository: ${{ github.repository }}
+          run-id: ${{ steps.validation.outputs.validation_run_id }}
+
+      - name: Verify exact validation evidence
+        shell: bash
+        run: |
+          set -euo pipefail
+          python scripts/validation_evidence.py verify \
+            --repository . \
+            --resolution "$RESOLUTION_JSON" \
+            --test-report "$VALIDATION_EVIDENCE_ROOT/test-report.json" \
+            --evidence "$VALIDATION_EVIDENCE_ROOT/validation-result.json" \
+            --csa-commit "$GITHUB_SHA" \
+            --workflow-run-id '${{ steps.validation.outputs.validation_run_id }}' \
+            --workflow-run-attempt '${{ steps.validation.outputs.validation_run_attempt }}'
+
       - name: Restore rolling Cargo downloads
         id: cargo-cache
         continue-on-error: true
@@ -151,23 +205,6 @@ jobs:
         with:
           path: ${{ env.CSA_TOOL_CACHE }}
           key: csa-build-tools-v1-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}
-
-      - name: Restore official runtime archive
-        id: runtime-cache
-        continue-on-error: true
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.CSA_RUNTIME_CACHE }}
-          key: csa-official-runtime-v1-${{ steps.resolve.outputs.runtime_lock_sha256 }}
-
-      - name: Restore test compiler cache
-        id: test-compiler-cache
-        continue-on-error: true
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.SCCACHE_TEST_DIR }}
-          key: csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-test-${{ steps.resolve.outputs.build_profile_sha256 }}-upstream-${{ steps.resolve.outputs.upstream_commit }}-patch-${{ steps.resolve.outputs.manifest_sha256 }}
-          restore-keys: csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-test-${{ steps.resolve.outputs.build_profile_sha256 }}-
 
       - name: Restore release compiler cache
         id: release-compiler-cache
@@ -278,72 +315,6 @@ jobs:
           path: ${{ env.XWIN_CACHE_DIR }}
           key: csa-xwin-v3-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}
 
-      - name: Prepare official runtime archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/build_patched_codex_bundle.sh runtime \
-            "$RESOLUTION_JSON" \
-            "$SOURCE_ROOT" \
-            "$CARGO_TARGET_DIR" \
-            "$BUNDLE_ROOT" \
-            "$SCCACHE_STATS"
-
-      - name: Save official runtime archive
-        if: steps.runtime-cache.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.CSA_RUNTIME_CACHE }}
-          key: csa-official-runtime-v1-${{ steps.resolve.outputs.runtime_lock_sha256 }}
-
-      - name: Run patch generation and contract tests
-        shell: bash
-        env:
-          SCCACHE_DIR: ${{ env.SCCACHE_TEST_DIR }}
-          CSA_SCCACHE_CACHE_SIZE: 4G
-          CSA_SCCACHE_PROFILE: test
-          CSA_MINIMUM_RUST_HIT_RATE: 95
-        run: |
-          set -euo pipefail
-          bash scripts/build_patched_codex_bundle.sh tests \
-            "$RESOLUTION_JSON" \
-            "$SOURCE_ROOT" \
-            "$CARGO_TARGET_DIR" \
-            "$BUNDLE_ROOT" \
-            "$SCCACHE_STATS"
-
-      - name: Replace rolling caches after tests
-        continue-on-error: true
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          for key in \
-            csa-patched-codex-cargo-v8-linux-X64 \
-            csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-test-${{ steps.resolve.outputs.build_profile_sha256 }}-upstream-${{ steps.resolve.outputs.upstream_commit }}-patch-${{ steps.resolve.outputs.manifest_sha256 }}; do
-            gh cache delete "$key" \
-              --repo "$GITHUB_REPOSITORY" \
-              --ref "$GITHUB_REF" || true
-          done
-
-      - name: Save test Cargo downloads
-        continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: |
-            ${{ env.CARGO_HOME }}/registry/index
-            ${{ env.CARGO_HOME }}/registry/cache
-            ${{ env.CARGO_HOME }}/git/db
-          key: csa-patched-codex-cargo-v8-linux-X64
-
-      - name: Save test compiler cache
-        continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.SCCACHE_TEST_DIR }}
-          key: csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-test-${{ steps.resolve.outputs.build_profile_sha256 }}-upstream-${{ steps.resolve.outputs.upstream_commit }}-patch-${{ steps.resolve.outputs.manifest_sha256 }}
-
       - name: Build canonical patched Codex CLI bundle
         shell: bash
         env:
@@ -353,7 +324,7 @@ jobs:
           CSA_MINIMUM_RUST_HIT_RATE: 95
         run: |
           set -euo pipefail
-          bash scripts/build_patched_codex_bundle.sh build \
+          bash scripts/build_patched_codex_bundle.sh release \
             "$RESOLUTION_JSON" \
             "$SOURCE_ROOT" \
             "$CARGO_TARGET_DIR" \
@@ -443,18 +414,6 @@ jobs:
         with:
           name: patched-codex-cli-release-${{ steps.resolve.outputs.compat_id }}
           path: ${{ runner.temp }}/csa-patched-codex/release-assets
-          if-no-files-found: error
-          compression-level: 0
-          retention-days: 1
-
-      - name: Upload production build bundle
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
-        with:
-          name: patched-codex-cli-bundle-${{ steps.resolve.outputs.compat_id }}
-          path: |
-            ${{ runner.temp }}/csa-patched-codex/bundle
-            ${{ runner.temp }}/csa-patched-codex/sccache-stats*.json
-            ${{ runner.temp }}/csa-patched-codex/resolution.json
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
