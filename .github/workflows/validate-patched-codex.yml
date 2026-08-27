@@ -70,6 +70,7 @@ jobs:
         run: |
           set -euo pipefail
           root="$RUNNER_TEMP/csa-patched-codex-validation"
+          tmp="$RUNNER_TEMP/csa-tmp"
           {
             echo "VALIDATION_ROOT=$root"
             echo "SOURCE_ROOT=$root/source"
@@ -81,7 +82,7 @@ jobs:
             echo "RUSTUP_HOME=$root/cache/rustup"
             echo "SCCACHE_DIR=$root/cache/sccache-test"
             echo "XWIN_CACHE_DIR=$root/cache/xwin"
-            echo "TMPDIR=$root/tmp"
+            echo "TMPDIR=$tmp"
             echo "HOME=$root/home"
             echo "CODEX_HOME=$root/codex-home"
             echo "RESOLUTION_JSON=$root/resolution.json"
@@ -90,8 +91,8 @@ jobs:
             echo "TEST_REPORT=$root/bundle.tests.json"
             echo "EVIDENCE_ROOT=$root/evidence"
           } >> "$GITHUB_ENV"
-          mkdir -p "$root/home" "$root/codex-home" "$root/tmp" "$root/evidence"
-          chmod 0700 "$root/tmp"
+          mkdir -p "$root/home" "$root/codex-home" "$tmp" "$root/evidence"
+          chmod 0700 "$tmp"
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:

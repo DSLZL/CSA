@@ -831,6 +831,9 @@ def test_release_stream_contracts() -> None:
     assert 'echo "CARGO_HOME=$root/cache/cargo-home"' in patched_workflow
     assert "CARGO_HOME: ${{ runner.temp }}" not in validation_workflow
     assert 'echo "CARGO_HOME=$root/cache/cargo-home"' in validation_workflow
+    assert 'tmp="$RUNNER_TEMP/csa-tmp"' in validation_workflow
+    assert 'echo "TMPDIR=$tmp"' in validation_workflow
+    assert 'chmod 0700 "$tmp"' in validation_workflow
     assert "build_patched_codex_bundle.sh" not in ci_workflow
     assert "compat_catalog.py guard-workflows" in ci_workflow
     assert "scripts/test_validation_evidence.py" in ci_workflow
