@@ -111,6 +111,9 @@ def run_step(
     if not isinstance(output, str) or output not in {"live", "failure-only"}:
         raise ContractError(f"invalid {kind} output policy")
     expanded = [expand(value, source, cargo_target) for value in argv]
+    if step["name"] == "complete TUI library":
+        expanded[expanded.index("--format=terse")] = "--format=pretty"
+        expanded.append("--test-threads=1")
     attempts = 2 if step["name"] == FLAKY_TUI_BACKGROUND_EXIT_STEP else 1
     print(f"{kind} step started: {step['name']}", flush=True)
     for attempt in range(1, attempts + 1):
