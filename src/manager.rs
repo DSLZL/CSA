@@ -1,7 +1,7 @@
 use crate::BUILD_TARGET;
 use crate::activation::{
-    ActivationReport, PlugReport, inspect as inspect_activation, plug, purge,
-    recover as recover_activation, unplug,
+    ActivationReport, CommandResolution, PlugReport, inspect as inspect_activation,
+    inspect_command_resolution, plug, purge, recover as recover_activation, unplug,
 };
 use crate::compat::{ArtifactEntry, ContractStep, LoadedCompatibility, TestContract};
 use crate::detect::{
@@ -36,6 +36,7 @@ pub struct DoctorReport {
     pub manager_root: PathBuf,
     pub manager_build_target: &'static str,
     pub official: OfficialCodex,
+    pub command_resolution: CommandResolution,
     pub compatibility: Option<CompatibilityReport>,
 }
 
@@ -188,6 +189,8 @@ impl ArtifactProvider for OfflineArtifactProvider {
 
 pub fn doctor(options: DoctorOptions, runner: &dyn ProcessRunner) -> Result<DoctorReport> {
     let paths = ManagerPaths::resolve(options.manager_root)?;
+    let path_value = std::env::var_os("PATH");
+    let command_resolution = inspect_command_resolution(&paths, path_value.as_deref());
     let official = detect_official(
         runner,
         options.official.as_deref(),
@@ -212,6 +215,7 @@ pub fn doctor(options: DoctorOptions, runner: &dyn ProcessRunner) -> Result<Doct
         manager_root: paths.root,
         manager_build_target: BUILD_TARGET,
         official,
+        command_resolution,
         compatibility,
     })
 }

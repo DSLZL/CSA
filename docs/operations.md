@@ -111,9 +111,9 @@ In an interactive terminal:
 csa install
 ```
 
-CSA reads formal `compat-*` Releases from the fixed `DSLZL/CSA` repository. Drafts and prereleases are ignored. The list is sorted by Codex version and patch generation. Entries that do not match the current Manager target or installed official Codex version remain visible but cannot be selected.
+CSA discovers public `compat-*` tags without using the GitHub REST API and keeps only tags whose fixed Release assets include `SHA256SUMS`. The list is sorted by Codex version and patch generation. Entries that do not match the current Manager target or installed official Codex version remain visible but cannot be selected.
 
-The selected Release is checked against its annotated tag, CSA commit, upstream Codex tag and commit, manifest, exact asset inventory, file sizes, and SHA-256 values. A mismatch stops the install.
+The selected Release is checked against its peeled tag, CSA commit, upstream Codex tag and commit, manifest, descriptor/checksum coverage, file sizes, and SHA-256 values. A mismatch stops the install.
 
 Bare `csa install` needs interactive stdin and stderr. Scripts and CI must select an exact ID:
 
@@ -121,7 +121,7 @@ Bare `csa install` needs interactive stdin and stderr. Scripts and CI must selec
 csa install --compat rust-v0.150.1-native-join-p8
 ```
 
-Public GitHub API access normally needs no token. If the rate limit is exhausted, set `GITHUB_TOKEN` or `GH_TOKEN` only for that process. CSA attaches the token only to fixed `api.github.com` metadata requests, never forwards it to redirected asset hosts, and never stores it.
+No GitHub login or token is required. Before the first GitHub request, CSA runs five-second bounded country probes against Cloudflare's fixed trace endpoint and Alibaba's Taobao IP service in parallel. If either one reports mainland China (`CN`), CSA starts with the same GitHub URL prefixed by `https://gh-proxy.com/`; without a `CN` result, it starts with GitHub directly. If both checks are unavailable, CSA still switches the rest of that installation to the mirror after a connection, timeout, throttling, or transient server failure. Country results are not logged or stored. Redirect hosts remain restricted and every downloaded file still has to pass the Release size and SHA-256 checks.
 
 ## Install an exact local payload
 
@@ -154,13 +154,15 @@ The compatibility directory name must equal the manifest `compat_id`. Source pre
 
 ## Activate the shim
 
-`install` prepares the payload and publishes `<manager-root>/bin/codex`, but does not edit `PATH`. Test the shim in the current process before making any persistent change.
+On Windows, `install` prepares the payload, publishes `<manager-root>/bin/codex.exe`, moves that managed directory to the front of the current user's persistent `PATH`, and silently verifies the result with the system `where.exe`. It does not overwrite the official Codex launcher or modify the system `PATH`.
 
-PowerShell with the default Manager root:
+An already-running VS Code window keeps its inherited environment. To use the freshly installed shim immediately in the current PowerShell process:
 
 ```powershell
 $Status = csa status | ConvertFrom-Json
-$env:PATH = $Status.activation.managed_bin + [IO.Path]::PathSeparator + $env:PATH
+$ManagedBin = [string]$Status.activation.managed_bin
+$OtherEntries = @($env:PATH -split ';' | Where-Object { $_ -and $_ -ine $ManagedBin })
+$env:PATH = (@($ManagedBin) + $OtherEntries) -join ';'
 ```
 
 PowerShell with an explicit root:
@@ -181,7 +183,7 @@ Bash or Zsh:
 export PATH="/absolute/manager-root/bin:$PATH"
 ```
 
-Keep the official Codex launcher later on `PATH`. Confirm resolution in a new shell before adding the managed directory to a persistent user `PATH`. CSA does not automate profile changes.
+Keep the official Codex launcher later on `PATH` so an unplugged shim falls through safely. Fully quit and reopen VS Code after installation; opening only a new integrated terminal still inherits the existing VS Code window environment. `uninstall` and `purge` remove only CSA's managed user-PATH entry.
 
 ## Read health and activation state
 
@@ -208,6 +210,8 @@ The nested activation status is:
 | `unplugged` | No managed shim is active |
 | `plugged` | Shim and binding validate |
 | `fallback` | The shim state is present but cannot safely launch the patched artifact |
+
+`activation.effective` is true only when the shim validates and the current process resolves `codex` to that shim. `activation.command_resolution` and `doctor.command_resolution` show the first resolved executable and whether it is the managed shim.
 
 Both official and patched Codex `0.150.1` report `codex-cli 0.150.1`. Version output alone does not prove which executable ran. Use `status`, command resolution, and the reported absolute paths together.
 

@@ -8,6 +8,7 @@ use crate::process::ProcessRunner;
 use crate::state::{ManagerPaths, ensure_managed_directory, remove_managed_tree};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
+use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, BufRead, IsTerminal, Write};
@@ -17,20 +18,23 @@ use ureq::{Agent, ResponseExt};
 
 const OPENAI_REPOSITORY: &str = "openai/codex";
 const CSA_REPOSITORY: &str = "dslzl/CSA";
-const API_ROOT: &str = "https://api.github.com/repos";
+const GH_PROXY_ROOT: &str = "https://gh-proxy.com/";
+const CLOUDFLARE_TRACE_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
+const ALIBABA_REGION_URL: &str = "https://ip.taobao.com/outGetIpInfo?ip=myip&accessKey=alibaba-inc";
 const RELEASE_DESCRIPTOR: &str = "compatibility-release.json";
 const RELEASE_CHECKSUMS: &str = "SHA256SUMS";
-const MAX_JSON_BYTES: u64 = 4 * 1024 * 1024;
+const MAX_REGION_TRACE_BYTES: u64 = 8 * 1024;
+const MAX_GIT_REFS_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RELEASE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES: u64 = 1024 * 1024 * 1024;
-const RELEASES_PER_PAGE: usize = 100;
-const MAX_RELEASE_PAGES: usize = 10;
+const MAX_COMPATIBILITY_TAGS: usize = 1_000;
 
 struct CompatibilityEntry {
     compat_id: String,
     codex_version: String,
     build_target: String,
     version_key: (u64, u64, u64),
+    csa_commit: String,
     unavailable: Option<String>,
 }
 
@@ -101,24 +105,22 @@ pub fn resolve_online_install(
     let selected = &catalog[selected_index];
     let compat_id = &selected.compat_id;
     let release_tag = format!("compat-{compat_id}");
-    let release_url = format!("{API_ROOT}/{CSA_REPOSITORY}/releases/tags/{release_tag}");
-    let compatibility_release: GitHubRelease =
-        client.get_json_optional(&release_url)?.ok_or_else(|| {
+    let csa_commit = client.peel_tag(CSA_REPOSITORY, &release_tag)?;
+    if csa_commit != selected.csa_commit {
+        return Err(ManagerError::new(
+            "compatibility_release_changed",
+            "selected compatibility tag changed during installation",
+        ));
+    }
+    let selected_path = staging_path.join("selected");
+    ensure_managed_directory(&paths.root, &selected_path)?;
+    let (descriptor, checksums) = download_release_metadata(&client, &release_tag, &selected_path)?
+        .ok_or_else(|| {
             ManagerError::new(
                 "compatibility_release_missing",
                 format!("selected compatibility release disappeared: {release_tag}"),
             )
         })?;
-    require_formal_compatibility_release(&compatibility_release, &release_tag)?;
-    let csa_commit = client.peel_tag(CSA_REPOSITORY, &release_tag)?;
-    let selected_path = staging_path.join("selected");
-    ensure_managed_directory(&paths.root, &selected_path)?;
-    let (descriptor, checksums) = download_release_metadata(
-        &client,
-        &release_tag,
-        &compatibility_release,
-        &selected_path,
-    )?;
     validate_catalog_descriptor(&descriptor, &release_tag, &csa_commit, compat_id)?;
     if descriptor.upstream.version != selected.codex_version
         || descriptor.build_target != selected.build_target
@@ -129,20 +131,15 @@ pub fn resolve_online_install(
         ));
     }
 
-    let upstream_url = format!(
-        "{API_ROOT}/{OPENAI_REPOSITORY}/releases/tags/{}",
-        descriptor.upstream.tag
-    );
-    let upstream_release: GitHubRelease = client.get_json(&upstream_url)?;
-    let upstream_version = stable_release_version(&upstream_release)?;
-    let upstream_commit = client.peel_tag(OPENAI_REPOSITORY, &upstream_release.tag_name)?;
+    let upstream_version = stable_release_version(&descriptor.upstream.tag)?;
+    let upstream_commit = client.peel_tag(OPENAI_REPOSITORY, &descriptor.upstream.tag)?;
     validate_descriptor(
         &descriptor,
         &release_tag,
         &csa_commit,
         compat_id,
         &upstream_version,
-        &upstream_release.tag_name,
+        &descriptor.upstream.tag,
         &upstream_commit,
     )?;
     if official.version != upstream_version {
@@ -155,12 +152,10 @@ pub fn resolve_online_install(
         ));
     }
 
-    let assets = release_assets(&compatibility_release)?;
-
     let payload_root = selected_path.join(compat_id);
     ensure_managed_directory(&paths.root, &payload_root)?;
     for file in &descriptor.payload {
-        let asset = validate_declared_asset(file, &assets, &checksums)?;
+        validate_declared_asset(file, &checksums)?;
         let destination = payload_root.join(&file.path);
         let parent = destination.parent().ok_or_else(|| {
             ManagerError::new(
@@ -169,9 +164,21 @@ pub fn resolve_online_install(
             )
         })?;
         ensure_managed_directory(&paths.root, parent)?;
-        client.download_asset(&release_tag, asset, &destination, Some(&file.sha256))?;
+        if !client.download_asset(
+            &release_tag,
+            &file.asset,
+            &destination,
+            Some(file.size),
+            Some(&file.sha256),
+            MAX_RELEASE_FILE_BYTES,
+        )? {
+            return Err(ManagerError::new(
+                "invalid_compatibility_release",
+                format!("declared release asset is missing: {}", file.asset),
+            ));
+        }
     }
-    let artifact = validate_declared_asset(&descriptor.artifact, &assets, &checksums)?;
+    validate_declared_asset(&descriptor.artifact, &checksums)?;
     let artifact_path = selected_path
         .join("artifact")
         .join(&descriptor.artifact.path);
@@ -179,12 +186,22 @@ pub fn resolve_online_install(
         &paths.root,
         artifact_path.parent().expect("artifact path has a parent"),
     )?;
-    client.download_asset(
+    if !client.download_asset(
         &release_tag,
-        artifact,
+        &descriptor.artifact.asset,
         &artifact_path,
+        Some(descriptor.artifact.size),
         Some(&descriptor.artifact.sha256),
-    )?;
+        MAX_ARTIFACT_BYTES,
+    )? {
+        return Err(ManagerError::new(
+            "invalid_compatibility_release",
+            format!(
+                "declared release asset is missing: {}",
+                descriptor.artifact.asset
+            ),
+        ));
+    }
 
     let manifest_path = payload_root.join("manifest.toml");
     let compatibility = LoadedCompatibility::load(&manifest_path)?;
@@ -212,52 +229,31 @@ fn discover_catalog(
     let catalog_path = staging_path.join("catalog");
     ensure_managed_directory(manager_root, &catalog_path)?;
     let mut entries = Vec::new();
-    let mut compat_ids = BTreeSet::new();
-    for page in 1..=MAX_RELEASE_PAGES {
-        let releases: Vec<GitHubRelease> = client.get_json(&format!(
-            "{API_ROOT}/{CSA_REPOSITORY}/releases?per_page={RELEASES_PER_PAGE}&page={page}"
-        ))?;
-        let page_len = releases.len();
-        for release in releases {
-            if !release.tag_name.starts_with("compat-") || release.draft || release.prerelease {
-                continue;
-            }
-            let compat_id = release.tag_name.strip_prefix("compat-").unwrap();
-            validate_asset_name(compat_id)?;
-            if !compat_ids.insert(compat_id.to_owned()) {
-                return Err(ManagerError::new(
-                    "invalid_compatibility_release",
-                    format!("duplicate compatibility release: {compat_id}"),
-                ));
-            }
-            let csa_commit = client.peel_tag(CSA_REPOSITORY, &release.tag_name)?;
-            let entry_path = catalog_path.join(entries.len().to_string());
-            ensure_managed_directory(manager_root, &entry_path)?;
-            let (descriptor, _) =
-                download_release_metadata(client, &release.tag_name, &release, &entry_path)?;
-            validate_catalog_descriptor(&descriptor, &release.tag_name, &csa_commit, compat_id)?;
-            entries.push(CompatibilityEntry {
-                compat_id: descriptor.compat_id,
-                codex_version: descriptor.upstream.version.clone(),
-                build_target: descriptor.build_target.clone(),
-                version_key: version_key(&descriptor.upstream.version)?,
-                unavailable: incompatibility_reason(
-                    &descriptor.upstream.version,
-                    &descriptor.build_target,
-                    official_version,
-                ),
-            });
-        }
-        if page_len < RELEASES_PER_PAGE {
-            break;
-        }
-        // ponytail: 1,000 releases bounds unauthenticated API work; paginate further only if the real catalog reaches it.
-        if page == MAX_RELEASE_PAGES {
-            return Err(ManagerError::new(
-                "compatibility_catalog_too_large",
-                "compatibility catalog reached the 1,000-release safety limit",
-            ));
-        }
+    let refs = client.repository_refs(CSA_REPOSITORY)?;
+    for release_tag in compatibility_tags(&refs)? {
+        let compat_id = release_tag
+            .strip_prefix("compat-")
+            .expect("compatibility_tags only returns compatibility tags");
+        let csa_commit = peel_tag_from_refs(&refs, &release_tag)?;
+        let entry_path = catalog_path.join(entries.len().to_string());
+        ensure_managed_directory(manager_root, &entry_path)?;
+        let Some((descriptor, _)) = download_release_metadata(client, &release_tag, &entry_path)?
+        else {
+            continue;
+        };
+        validate_catalog_descriptor(&descriptor, &release_tag, &csa_commit, compat_id)?;
+        entries.push(CompatibilityEntry {
+            compat_id: descriptor.compat_id,
+            codex_version: descriptor.upstream.version.clone(),
+            build_target: descriptor.build_target.clone(),
+            version_key: version_key(&descriptor.upstream.version)?,
+            csa_commit,
+            unavailable: incompatibility_reason(
+                &descriptor.upstream.version,
+                &descriptor.build_target,
+                official_version,
+            ),
+        });
     }
     sort_catalog(&mut entries);
     Ok(entries)
@@ -275,73 +271,60 @@ fn sort_catalog(entries: &mut [CompatibilityEntry]) {
 fn download_release_metadata(
     client: &GitHubClient,
     release_tag: &str,
-    release: &GitHubRelease,
     destination: &Path,
-) -> Result<(CompatibilityRelease, BTreeMap<String, String>)> {
-    let assets = release_assets(release)?;
-    let checksums_asset = assets.get(RELEASE_CHECKSUMS).ok_or_else(|| {
-        ManagerError::new(
-            "invalid_compatibility_release",
-            "compatibility release is missing SHA256SUMS",
-        )
-    })?;
+) -> Result<Option<(CompatibilityRelease, BTreeMap<String, String>)>> {
     let checksums_path = destination.join(RELEASE_CHECKSUMS);
-    client.download_asset(release_tag, checksums_asset, &checksums_path, None)?;
+    if !client.download_asset(
+        release_tag,
+        RELEASE_CHECKSUMS,
+        &checksums_path,
+        None,
+        None,
+        MAX_RELEASE_FILE_BYTES,
+    )? {
+        return Ok(None);
+    }
     let checksums =
         parse_checksums(&fs::read(&checksums_path).map_err(|error| {
             ManagerError::io("read downloaded compatibility checksums", error)
         })?)?;
-    let release_asset_names: BTreeSet<_> = assets
-        .keys()
-        .filter(|name| name.as_str() != RELEASE_CHECKSUMS)
-        .cloned()
-        .collect();
-    if checksums.keys().cloned().collect::<BTreeSet<_>>() != release_asset_names {
-        return Err(ManagerError::new(
-            "invalid_compatibility_release",
-            "SHA256SUMS must cover every release asset except itself",
-        ));
-    }
-    let descriptor_asset = assets.get(RELEASE_DESCRIPTOR).ok_or_else(|| {
+    let descriptor_sha256 = checksums.get(RELEASE_DESCRIPTOR).ok_or_else(|| {
         ManagerError::new(
             "invalid_compatibility_release",
             "compatibility release is missing its provenance descriptor",
         )
     })?;
     let descriptor_path = destination.join(RELEASE_DESCRIPTOR);
-    client.download_asset(
+    if !client.download_asset(
         release_tag,
-        descriptor_asset,
+        RELEASE_DESCRIPTOR,
         &descriptor_path,
-        checksums.get(RELEASE_DESCRIPTOR).map(String::as_str),
-    )?;
-    let descriptor: CompatibilityRelease = read_json_file(&descriptor_path)?;
-    let declared_assets = descriptor_assets(&descriptor)?;
-    let expected_assets: BTreeSet<_> = declared_assets
-        .keys()
-        .cloned()
-        .chain([RELEASE_DESCRIPTOR.to_owned(), RELEASE_CHECKSUMS.to_owned()])
-        .collect();
-    if assets.keys().cloned().collect::<BTreeSet<_>>() != expected_assets {
+        None,
+        Some(descriptor_sha256),
+        MAX_RELEASE_FILE_BYTES,
+    )? {
         return Err(ManagerError::new(
             "invalid_compatibility_release",
-            "release assets differ from the reviewed compatibility descriptor",
+            "compatibility release is missing its provenance descriptor",
+        ));
+    }
+    let descriptor: CompatibilityRelease = read_json_file(&descriptor_path)?;
+    let declared_assets = descriptor_assets(&descriptor)?;
+    let expected_checksums: BTreeSet<_> = declared_assets
+        .keys()
+        .cloned()
+        .chain([RELEASE_DESCRIPTOR.to_owned()])
+        .collect();
+    if checksums.keys().cloned().collect::<BTreeSet<_>>() != expected_checksums {
+        return Err(ManagerError::new(
+            "invalid_compatibility_release",
+            "SHA256SUMS differs from the reviewed compatibility descriptor",
         ));
     }
     for file in declared_assets.values() {
-        validate_declared_asset(file, &assets, &checksums)?;
+        validate_declared_asset(file, &checksums)?;
     }
-    Ok((descriptor, checksums))
-}
-
-fn require_formal_compatibility_release(release: &GitHubRelease, release_tag: &str) -> Result<()> {
-    if release.draft || release.prerelease || release.tag_name != release_tag {
-        return Err(ManagerError::new(
-            "invalid_compatibility_release",
-            "compatibility release must be formal and use the exact compatibility tag",
-        ));
-    }
-    Ok(())
+    Ok(Some((descriptor, checksums)))
 }
 
 fn require_selection_mode(
@@ -483,171 +466,110 @@ fn version_key(version: &str) -> Result<(u64, u64, u64)> {
 
 struct GitHubClient {
     agent: Agent,
-    token: Option<String>,
+    route: Cell<GitHubRoute>,
+}
+
+#[derive(Clone, Copy, Debug, Eq, PartialEq)]
+enum GitHubRoute {
+    Direct,
+    Proxy,
 }
 
 impl GitHubClient {
     fn new() -> Self {
+        Self::with_route(detect_github_route().unwrap_or(GitHubRoute::Direct))
+    }
+
+    fn with_route(route: GitHubRoute) -> Self {
         let config = Agent::config_builder()
             .https_only(true)
             .max_redirects(5)
             .timeout_global(Some(Duration::from_secs(15 * 60)))
             .timeout_connect(Some(Duration::from_secs(15)))
+            .timeout_recv_response(Some(Duration::from_secs(30)))
             .build();
         Self {
             agent: Agent::new_with_config(config),
-            token: ["GITHUB_TOKEN", "GH_TOKEN"]
-                .into_iter()
-                .find_map(|name| std::env::var(name).ok().filter(|value| !value.is_empty())),
+            route: Cell::new(route),
         }
-    }
-
-    fn get_json<T: DeserializeOwned>(&self, url: &str) -> Result<T> {
-        self.get_json_optional(url)?.ok_or_else(|| {
-            ManagerError::new(
-                "github_api_not_found",
-                format!("GitHub resource not found: {url}"),
-            )
-        })
-    }
-
-    fn get_json_optional<T: DeserializeOwned>(&self, url: &str) -> Result<Option<T>> {
-        let mut request = self
-            .agent
-            .get(url)
-            .header("Accept", "application/vnd.github+json")
-            .header("X-GitHub-Api-Version", "2022-11-28")
-            .header("User-Agent", concat!("csa/", env!("CARGO_PKG_VERSION")));
-        if let Some(token) = &self.token {
-            request = request.header("Authorization", format!("Bearer {token}"));
-        }
-        let mut response = match request.call() {
-            Ok(response) => response,
-            Err(ureq::Error::StatusCode(404)) => return Ok(None),
-            Err(ureq::Error::StatusCode(401)) => {
-                return Err(ManagerError::new(
-                    "github_auth_failed",
-                    "GitHub rejected GITHUB_TOKEN or GH_TOKEN",
-                ));
-            }
-            Err(ureq::Error::StatusCode(403)) => {
-                return Err(ManagerError::new(
-                    "github_api_forbidden",
-                    "GitHub denied the API request; the public rate limit may be exhausted, so set GITHUB_TOKEN or GH_TOKEN and retry",
-                ));
-            }
-            Err(error) => return Err(network_error("query GitHub API", error)),
-        };
-        require_response_host(&response, &["api.github.com"])?;
-        let bytes = response
-            .body_mut()
-            .with_config()
-            .limit(MAX_JSON_BYTES + 1)
-            .read_to_vec()
-            .map_err(|error| network_error("read GitHub API response", error))?;
-        if bytes.len() as u64 > MAX_JSON_BYTES {
-            return Err(ManagerError::new(
-                "github_response_too_large",
-                "GitHub API response exceeds the supported size",
-            ));
-        }
-        serde_json::from_slice(&bytes)
-            .map(Some)
-            .map_err(|error| ManagerError::new("invalid_github_response", error.to_string()))
     }
 
     fn peel_tag(&self, repository: &str, tag: &str) -> Result<String> {
-        let reference: GitReference =
-            self.get_json(&format!("{API_ROOT}/{repository}/git/ref/tags/{tag}"))?;
-        if reference.reference != format!("refs/tags/{tag}") {
+        peel_tag_from_refs(&self.repository_refs(repository)?, tag)
+    }
+
+    fn repository_refs(&self, repository: &str) -> Result<BTreeMap<String, String>> {
+        let url = format!("https://github.com/{repository}.git/info/refs?service=git-upload-pack");
+        let mut response = self
+            .get_response(
+                &url,
+                "application/x-git-upload-pack-advertisement",
+                true,
+                &["github.com"],
+                "query GitHub repository refs",
+            )?
+            .ok_or_else(|| {
+                ManagerError::new(
+                    "github_repository_not_found",
+                    format!("GitHub repository not found: {repository}"),
+                )
+            })?;
+        let bytes = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_GIT_REFS_BYTES + 1)
+            .read_to_vec()
+            .map_err(|error| network_error("read GitHub repository refs", error))?;
+        if bytes.len() as u64 > MAX_GIT_REFS_BYTES {
             return Err(ManagerError::new(
-                "invalid_release_tag",
-                "GitHub tag reference differs from the requested release tag",
+                "github_response_too_large",
+                "GitHub repository refs exceed the supported size",
             ));
         }
-        let mut object = reference.object;
-        for depth in 0..5 {
-            validate_sha(&object.sha)?;
-            match object.kind.as_str() {
-                "commit" => return Ok(object.sha),
-                "tag" => {
-                    let annotated: GitTag =
-                        self.get_json(&format!("{API_ROOT}/{repository}/git/tags/{}", object.sha))?;
-                    if depth == 0 && annotated.tag != tag {
-                        return Err(ManagerError::new(
-                            "invalid_release_tag",
-                            "annotated tag name differs from the release tag",
-                        ));
-                    }
-                    object = annotated.object;
-                }
-                _ => {
-                    return Err(ManagerError::new(
-                        "invalid_release_tag",
-                        "release tag does not resolve to a commit",
-                    ));
-                }
-            }
-        }
-        Err(ManagerError::new(
-            "invalid_release_tag",
-            "release tag indirection is too deep",
-        ))
+        parse_git_refs(&bytes)
     }
 
     fn download_asset(
         &self,
         release_tag: &str,
-        asset: &GitHubAsset,
+        asset_name: &str,
         destination: &Path,
+        expected_size: Option<u64>,
         expected_sha256: Option<&str>,
-    ) -> Result<()> {
-        validate_release_asset_url(release_tag, &asset.name, &asset.browser_download_url)?;
-        let max_size = if destination
-            .parent()
-            .and_then(Path::file_name)
-            .is_some_and(|name| name == "artifact")
-        {
-            MAX_ARTIFACT_BYTES
-        } else {
-            MAX_RELEASE_FILE_BYTES
-        };
-        if asset.size == 0 || asset.size > max_size {
+        max_size: u64,
+    ) -> Result<bool> {
+        validate_asset_name(release_tag)?;
+        validate_asset_name(asset_name)?;
+        if expected_size.is_some_and(|size| size == 0 || size > max_size) {
             return Err(ManagerError::new(
                 "invalid_release_asset_size",
-                format!("release asset has an invalid size: {}", asset.name),
+                format!("release asset has an invalid size: {asset_name}"),
             ));
         }
-        let api_sha256 = github_sha256(&asset.digest)?;
-        if expected_sha256.is_some_and(|expected| expected != api_sha256) {
-            return Err(ManagerError::new(
-                "release_asset_digest_mismatch",
-                format!("GitHub asset digest differs: {}", asset.name),
-            ));
+        if let Some(expected) = expected_sha256 {
+            validate_sha256(expected)?;
         }
-        let mut response = self
-            .agent
-            .get(&asset.browser_download_url)
-            .header("Accept", "application/octet-stream")
-            .header("User-Agent", concat!("csa/", env!("CARGO_PKG_VERSION")))
-            .call()
-            .map_err(|error| network_error("download compatibility release asset", error))?;
-        require_response_host(
-            &response,
+        let url = release_asset_url(release_tag, asset_name);
+        let Some(mut response) = self.get_response(
+            &url,
+            "application/octet-stream",
+            false,
             &[
                 "github.com",
                 "objects.githubusercontent.com",
                 "release-assets.githubusercontent.com",
             ],
-        )?;
-        if response
-            .body()
-            .content_length()
-            .is_some_and(|length| length != asset.size)
-        {
+            "download compatibility release asset",
+        )?
+        else {
+            return Ok(false);
+        };
+        if response.body().content_length().is_some_and(|length| {
+            length == 0 || length > max_size || expected_size.is_some_and(|size| size != length)
+        }) {
             return Err(ManagerError::new(
                 "release_asset_size_mismatch",
-                format!("Content-Length differs for release asset: {}", asset.name),
+                format!("Content-Length differs for release asset: {asset_name}"),
             ));
         }
         let mut output = OpenOptions::new()
@@ -664,7 +586,7 @@ impl GitHubClient {
             let mut reader = response
                 .body_mut()
                 .with_config()
-                .limit(asset.size + 1)
+                .limit(expected_size.unwrap_or(max_size) + 1)
                 .reader();
             io::copy(&mut reader, &mut output)
         };
@@ -682,63 +604,314 @@ impl GitHubClient {
             return Err(ManagerError::io("sync release asset", error));
         }
         drop(output);
-        if copied != asset.size {
+        if copied == 0 || copied > max_size || expected_size.is_some_and(|size| copied != size) {
             let _ = fs::remove_file(destination);
             return Err(ManagerError::new(
                 "release_asset_size_mismatch",
-                format!(
-                    "release asset {} expected {} bytes, received {copied}",
-                    asset.name, asset.size
-                ),
+                format!("release asset {asset_name} has an unexpected size: {copied} bytes"),
             ));
         }
         let (actual, size) = sha256_file(destination)?;
-        if actual != api_sha256 || size != asset.size {
+        if size != copied || expected_sha256.is_some_and(|expected| actual != expected) {
             let _ = fs::remove_file(destination);
             return Err(ManagerError::new(
                 "release_asset_hash_mismatch",
-                format!("release asset failed SHA-256 verification: {}", asset.name),
+                format!("release asset failed SHA-256 verification: {asset_name}"),
             ));
         }
-        Ok(())
+        Ok(true)
+    }
+
+    fn get_response(
+        &self,
+        direct_url: &str,
+        accept: &str,
+        git_protocol: bool,
+        direct_hosts: &[&str],
+        context: &str,
+    ) -> Result<Option<ureq::http::Response<ureq::Body>>> {
+        let route = self.route.get();
+        match self.request_on_route(route, direct_url, accept, git_protocol) {
+            Ok(response) => {
+                require_route_host(&response, route, direct_hosts)?;
+                Ok(Some(response))
+            }
+            Err(ureq::Error::StatusCode(404)) => Ok(None),
+            Err(error) if route == GitHubRoute::Direct && should_try_proxy(&error) => {
+                let direct_error = error.to_string();
+                self.route.set(GitHubRoute::Proxy);
+                match self.request_on_route(GitHubRoute::Proxy, direct_url, accept, git_protocol) {
+                    Ok(response) => {
+                        require_route_host(&response, GitHubRoute::Proxy, direct_hosts)?;
+                        Ok(Some(response))
+                    }
+                    Err(ureq::Error::StatusCode(404)) => Ok(None),
+                    Err(proxy_error) => Err(ManagerError::new(
+                        "network_error",
+                        format!(
+                            "{context}: GitHub direct failed ({direct_error}); gh-proxy.com failed ({proxy_error})"
+                        ),
+                    )),
+                }
+            }
+            Err(error) => Err(network_error(context, error)),
+        }
+    }
+
+    fn request_on_route(
+        &self,
+        route: GitHubRoute,
+        direct_url: &str,
+        accept: &str,
+        git_protocol: bool,
+    ) -> std::result::Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+        let url = routed_url(route, direct_url);
+        let mut request = self
+            .agent
+            .get(&url)
+            .header("Accept", accept)
+            .header("User-Agent", concat!("csa/", env!("CARGO_PKG_VERSION")));
+        if git_protocol {
+            request = request.header("Git-Protocol", "version=1");
+        }
+        request.call()
     }
 }
 
-#[derive(Deserialize)]
-struct GitHubRelease {
-    tag_name: String,
-    draft: bool,
-    prerelease: bool,
-    assets: Vec<GitHubAsset>,
+fn detect_github_route() -> Option<GitHubRoute> {
+    let probes = std::thread::scope(|scope| {
+        let cloudflare = scope.spawn(detect_cloudflare_country);
+        let alibaba = scope.spawn(detect_alibaba_country);
+        [
+            cloudflare.join().ok().flatten(),
+            alibaba.join().ok().flatten(),
+        ]
+    });
+    route_from_region_probes(probes)
+}
+
+fn detect_cloudflare_country() -> Option<bool> {
+    let bytes = read_region_response(CLOUDFLARE_TRACE_URL, "text/plain", &["www.cloudflare.com"])?;
+    country_from_cloudflare_trace(&bytes)
+}
+
+fn detect_alibaba_country() -> Option<bool> {
+    let bytes = read_region_response(ALIBABA_REGION_URL, "application/json", &["ip.taobao.com"])?;
+    country_from_alibaba_region(&bytes)
+}
+
+fn read_region_response(url: &str, accept: &str, allowed_hosts: &[&str]) -> Option<Vec<u8>> {
+    let config = Agent::config_builder()
+        .https_only(true)
+        .max_redirects(0)
+        .timeout_global(Some(Duration::from_secs(5)))
+        .timeout_connect(Some(Duration::from_secs(3)))
+        .timeout_recv_response(Some(Duration::from_secs(3)))
+        .timeout_recv_body(Some(Duration::from_secs(3)))
+        .build();
+    let agent = Agent::new_with_config(config);
+    let mut response = agent
+        .get(url)
+        .header("Accept", accept)
+        .header("User-Agent", concat!("csa/", env!("CARGO_PKG_VERSION")))
+        .call()
+        .ok()?;
+    require_response_host(&response, allowed_hosts).ok()?;
+    let bytes = response
+        .body_mut()
+        .with_config()
+        .limit(MAX_REGION_TRACE_BYTES + 1)
+        .read_to_vec()
+        .ok()?;
+    if bytes.len() as u64 > MAX_REGION_TRACE_BYTES {
+        return None;
+    }
+    Some(bytes)
+}
+
+fn country_from_cloudflare_trace(bytes: &[u8]) -> Option<bool> {
+    let text = std::str::from_utf8(bytes).ok()?;
+    let mut country = None;
+    for line in text.lines() {
+        let Some(value) = line.strip_prefix("loc=") else {
+            continue;
+        };
+        if country.replace(value).is_some() {
+            return None;
+        }
+    }
+    country_code_is_cn(country?)
 }
 
 #[derive(Deserialize)]
-struct GitHubAsset {
-    name: String,
-    state: String,
-    size: u64,
-    browser_download_url: String,
-    digest: String,
+struct AlibabaRegionResponse {
+    code: u8,
+    data: Option<AlibabaRegionData>,
 }
 
 #[derive(Deserialize)]
-struct GitReference {
-    #[serde(rename = "ref")]
-    reference: String,
-    object: GitObject,
+struct AlibabaRegionData {
+    country_id: String,
 }
 
-#[derive(Deserialize)]
-struct GitTag {
-    tag: String,
-    object: GitObject,
+fn country_from_alibaba_region(bytes: &[u8]) -> Option<bool> {
+    let response: AlibabaRegionResponse = serde_json::from_slice(bytes).ok()?;
+    if response.code != 0 {
+        return None;
+    }
+    country_code_is_cn(&response.data?.country_id)
 }
 
-#[derive(Deserialize)]
-struct GitObject {
-    #[serde(rename = "type")]
-    kind: String,
-    sha: String,
+fn country_code_is_cn(country: &str) -> Option<bool> {
+    if country.len() != 2 || !country.bytes().all(|byte| byte.is_ascii_uppercase()) {
+        return None;
+    }
+    Some(country == "CN")
+}
+
+fn route_from_region_probes(probes: [Option<bool>; 2]) -> Option<GitHubRoute> {
+    if probes.contains(&Some(true)) {
+        Some(GitHubRoute::Proxy)
+    } else if probes.iter().any(Option::is_some) {
+        Some(GitHubRoute::Direct)
+    } else {
+        None
+    }
+}
+
+fn routed_url(route: GitHubRoute, direct_url: &str) -> String {
+    match route {
+        GitHubRoute::Direct => direct_url.to_owned(),
+        GitHubRoute::Proxy => format!("{GH_PROXY_ROOT}{direct_url}"),
+    }
+}
+
+fn release_asset_url(release_tag: &str, asset_name: &str) -> String {
+    format!("https://github.com/{CSA_REPOSITORY}/releases/download/{release_tag}/{asset_name}")
+}
+
+fn should_try_proxy(error: &ureq::Error) -> bool {
+    matches!(
+        error,
+        ureq::Error::StatusCode(403 | 408 | 429 | 500..=599)
+            | ureq::Error::Protocol(_)
+            | ureq::Error::Io(_)
+            | ureq::Error::Timeout(_)
+            | ureq::Error::HostNotFound
+            | ureq::Error::ConnectionFailed
+            | ureq::Error::ConnectProxyFailed(_)
+    )
+}
+
+fn require_route_host(
+    response: &ureq::http::Response<ureq::Body>,
+    route: GitHubRoute,
+    direct_hosts: &[&str],
+) -> Result<()> {
+    if route == GitHubRoute::Proxy {
+        require_response_host(response, &["gh-proxy.com"])
+    } else {
+        require_response_host(response, direct_hosts)
+    }
+}
+
+fn compatibility_tags(refs: &BTreeMap<String, String>) -> Result<Vec<String>> {
+    let mut tags = Vec::new();
+    for reference in refs.keys() {
+        let Some(tag) = reference.strip_prefix("refs/tags/compat-") else {
+            continue;
+        };
+        if tag.ends_with("^{}") {
+            continue;
+        }
+        validate_asset_name(tag)?;
+        tags.push(format!("compat-{tag}"));
+    }
+    if tags.len() > MAX_COMPATIBILITY_TAGS {
+        return Err(ManagerError::new(
+            "compatibility_catalog_too_large",
+            "compatibility catalog reached the 1,000-tag safety limit",
+        ));
+    }
+    Ok(tags)
+}
+
+fn peel_tag_from_refs(refs: &BTreeMap<String, String>, tag: &str) -> Result<String> {
+    validate_asset_name(tag)?;
+    let reference = format!("refs/tags/{tag}");
+    let commit = refs
+        .get(&format!("{reference}^{{}}"))
+        .or_else(|| refs.get(&reference))
+        .ok_or_else(|| {
+            ManagerError::new(
+                "invalid_release_tag",
+                format!("GitHub tag does not exist: {tag}"),
+            )
+        })?
+        .clone();
+    validate_sha(&commit)?;
+    Ok(commit)
+}
+
+fn parse_git_refs(bytes: &[u8]) -> Result<BTreeMap<String, String>> {
+    let mut refs = BTreeMap::new();
+    let mut offset = 0;
+    while offset < bytes.len() {
+        if bytes.len() - offset < 4 {
+            return Err(invalid_git_refs());
+        }
+        let length = std::str::from_utf8(&bytes[offset..offset + 4])
+            .ok()
+            .and_then(|value| usize::from_str_radix(value, 16).ok())
+            .ok_or_else(invalid_git_refs)?;
+        offset += 4;
+        if length <= 2 {
+            continue;
+        }
+        if length < 4 || offset + length - 4 > bytes.len() {
+            return Err(invalid_git_refs());
+        }
+        let payload = &bytes[offset..offset + length - 4];
+        offset += length - 4;
+        let payload = payload
+            .strip_suffix(b"\n")
+            .unwrap_or(payload)
+            .split(|byte| *byte == 0)
+            .next()
+            .unwrap_or_default();
+        if payload.is_empty() || payload.starts_with(b"# service=") || payload == b"version 1" {
+            continue;
+        }
+        let Some(separator) = payload.iter().position(|byte| *byte == b' ') else {
+            return Err(invalid_git_refs());
+        };
+        let sha = std::str::from_utf8(&payload[..separator]).map_err(|_| invalid_git_refs())?;
+        let reference =
+            std::str::from_utf8(&payload[separator + 1..]).map_err(|_| invalid_git_refs())?;
+        validate_sha(sha)?;
+        if !reference.starts_with("refs/") {
+            continue;
+        }
+        if reference.is_empty()
+            || reference
+                .bytes()
+                .any(|byte| byte.is_ascii_whitespace() || byte == 0)
+            || refs.insert(reference.to_owned(), sha.to_owned()).is_some()
+        {
+            return Err(invalid_git_refs());
+        }
+    }
+    if refs.is_empty() {
+        return Err(invalid_git_refs());
+    }
+    Ok(refs)
+}
+
+fn invalid_git_refs() -> ManagerError {
+    ManagerError::new(
+        "invalid_github_response",
+        "GitHub returned an invalid Git ref advertisement",
+    )
 }
 
 #[derive(Deserialize)]
@@ -773,14 +946,8 @@ struct ReleaseFile {
     sha256: String,
 }
 
-fn stable_release_version(release: &GitHubRelease) -> Result<String> {
-    if release.draft || release.prerelease {
-        return Err(ManagerError::new(
-            "invalid_upstream_release",
-            "selected upstream release must be formal",
-        ));
-    }
-    let version = release.tag_name.strip_prefix("rust-v").ok_or_else(|| {
+fn stable_release_version(tag: &str) -> Result<String> {
+    let version = tag.strip_prefix("rust-v").ok_or_else(|| {
         ManagerError::new(
             "invalid_upstream_release",
             "official stable tag must use rust-vX.Y.Z",
@@ -792,26 +959,6 @@ fn stable_release_version(release: &GitHubRelease) -> Result<String> {
             "official tag is not rust-vX.Y.Z",
         )
     })
-}
-
-fn release_assets(release: &GitHubRelease) -> Result<BTreeMap<String, &GitHubAsset>> {
-    let mut assets = BTreeMap::new();
-    for asset in &release.assets {
-        validate_asset_name(&asset.name)?;
-        if asset.state != "uploaded" {
-            return Err(ManagerError::new(
-                "invalid_compatibility_release",
-                format!("release asset is not fully uploaded: {}", asset.name),
-            ));
-        }
-        if assets.insert(asset.name.clone(), asset).is_some() {
-            return Err(ManagerError::new(
-                "invalid_compatibility_release",
-                format!("duplicate release asset: {}", asset.name),
-            ));
-        }
-    }
-    Ok(assets)
 }
 
 fn parse_checksums(bytes: &[u8]) -> Result<BTreeMap<String, String>> {
@@ -948,27 +1095,14 @@ fn descriptor_assets(descriptor: &CompatibilityRelease) -> Result<BTreeMap<Strin
     Ok(assets)
 }
 
-fn validate_declared_asset<'a>(
-    file: &ReleaseFile,
-    assets: &'a BTreeMap<String, &GitHubAsset>,
-    checksums: &BTreeMap<String, String>,
-) -> Result<&'a GitHubAsset> {
-    let asset = assets.get(&file.asset).copied().ok_or_else(|| {
-        ManagerError::new(
-            "invalid_compatibility_release",
-            format!("declared release asset is missing: {}", file.asset),
-        )
-    })?;
-    if asset.size != file.size
-        || checksums.get(&file.asset) != Some(&file.sha256)
-        || asset.digest != format!("sha256:{}", file.sha256)
-    {
+fn validate_declared_asset(file: &ReleaseFile, checksums: &BTreeMap<String, String>) -> Result<()> {
+    if checksums.get(&file.asset) != Some(&file.sha256) {
         return Err(ManagerError::new(
             "invalid_compatibility_release",
-            format!("release metadata differs for asset: {}", file.asset),
+            format!("release checksum differs for asset: {}", file.asset),
         ));
     }
-    Ok(asset)
+    Ok(())
 }
 
 fn validate_downloaded_compatibility(
@@ -1004,34 +1138,6 @@ fn validate_downloaded_compatibility(
         return Err(ManagerError::new(
             "invalid_compatibility_release",
             "release payload files do not exactly match the manifest",
-        ));
-    }
-    Ok(())
-}
-
-fn validate_release_asset_url(release_tag: &str, asset_name: &str, url: &str) -> Result<()> {
-    let uri: ureq::http::Uri = url.parse().map_err(|_| {
-        ManagerError::new(
-            "invalid_release_asset_url",
-            format!("release asset URL is invalid: {asset_name}"),
-        )
-    })?;
-    let suffix = format!("/releases/download/{release_tag}/{asset_name}");
-    let repository = uri
-        .path()
-        .strip_suffix(&suffix)
-        .and_then(|prefix| prefix.strip_prefix('/'));
-    if uri.scheme_str() != Some("https")
-        || !uri
-            .host()
-            .is_some_and(|host| host.eq_ignore_ascii_case("github.com"))
-        || uri.port_u16().is_some()
-        || uri.query().is_some()
-        || !repository.is_some_and(|value| value.eq_ignore_ascii_case(CSA_REPOSITORY))
-    {
-        return Err(ManagerError::new(
-            "invalid_release_asset_url",
-            format!("release asset URL is outside {CSA_REPOSITORY}: {asset_name}"),
         ));
     }
     Ok(())
@@ -1100,58 +1206,31 @@ fn validate_sha256(value: &str) -> Result<()> {
     Ok(())
 }
 
-fn github_sha256(value: &str) -> Result<&str> {
-    let digest = value.strip_prefix("sha256:").ok_or_else(|| {
-        ManagerError::new(
-            "invalid_release_asset_digest",
-            "GitHub release asset digest must use sha256",
-        )
-    })?;
-    validate_sha256(digest)?;
-    Ok(digest)
-}
-
-fn network_error(context: &str, error: ureq::Error) -> ManagerError {
+fn network_error(context: &str, error: impl std::fmt::Display) -> ManagerError {
     ManagerError::new("network_error", format!("{context}: {error}"))
 }
 
 #[cfg(test)]
 mod tests {
     use super::{
-        BUILD_TARGET, CSA_REPOSITORY, CompatibilityEntry, CompatibilityRelease, GitHubAsset,
-        GitHubClient, GitHubRelease, MAX_ARTIFACT_BYTES, OPENAI_REPOSITORY, ReleaseFile,
-        UpstreamRelease, descriptor_assets, github_sha256, incompatibility_reason, parse_checksums,
-        prompt_catalog, release_assets, require_selection_mode, require_uri_host, select_requested,
+        BUILD_TARGET, CSA_REPOSITORY, CompatibilityEntry, CompatibilityRelease, GitHubClient,
+        GitHubRoute, MAX_ARTIFACT_BYTES, OPENAI_REPOSITORY, ReleaseFile, UpstreamRelease,
+        compatibility_tags, country_from_alibaba_region, country_from_cloudflare_trace,
+        descriptor_assets, incompatibility_reason, parse_checksums, parse_git_refs,
+        peel_tag_from_refs, prompt_catalog, release_asset_url, require_selection_mode,
+        require_uri_host, route_from_region_probes, routed_url, select_requested, should_try_proxy,
         sort_catalog, stable_release_version, validate_declared_asset, validate_descriptor,
-        validate_release_asset_url, version_key,
+        version_key,
     };
     use std::collections::BTreeMap;
     use std::io::Cursor;
     use std::time::Duration;
 
-    fn release(tag: &str, draft: bool, prerelease: bool) -> GitHubRelease {
-        GitHubRelease {
-            tag_name: tag.to_owned(),
-            draft,
-            prerelease,
-            assets: Vec::new(),
-        }
-    }
-
     #[test]
     fn only_exact_formal_rust_release_tags_are_stable() {
-        assert_eq!(
-            stable_release_version(&release("rust-v0.147.0", false, false)).unwrap(),
-            "0.147.0"
-        );
-        for value in [
-            release("rust-v0.148.0-rc.1", false, false),
-            release("rust-v0.148", false, false),
-            release("v0.148.0", false, false),
-            release("rust-v0.148.0", true, false),
-            release("rust-v0.148.0", false, true),
-        ] {
-            assert!(stable_release_version(&value).is_err());
+        assert_eq!(stable_release_version("rust-v0.147.0").unwrap(), "0.147.0");
+        for tag in ["rust-v0.148.0-rc.1", "rust-v0.148", "v0.148.0"] {
+            assert!(stable_release_version(tag).is_err());
         }
     }
 
@@ -1162,6 +1241,7 @@ mod tests {
             codex_version: version.to_owned(),
             build_target: target.to_owned(),
             version_key: version_key(version).unwrap(),
+            csa_commit: "a".repeat(40),
             unavailable: incompatibility_reason(version, target, "0.10.0"),
         };
         let mut catalog = vec![
@@ -1202,14 +1282,6 @@ mod tests {
         assert_eq!(checksums["asset.bin"], digest);
         assert!(parse_checksums(format!("{digest} asset.bin\n").as_bytes()).is_err());
         assert!(parse_checksums(format!("{digest}  ../asset.bin\n").as_bytes()).is_err());
-    }
-
-    #[test]
-    fn github_asset_digest_must_be_lowercase_sha256() {
-        let digest = "a".repeat(64);
-        assert_eq!(github_sha256(&format!("sha256:{digest}")).unwrap(), digest);
-        assert!(github_sha256(&format!("sha512:{digest}")).is_err());
-        assert!(github_sha256(&format!("sha256:{}", digest.to_uppercase())).is_err());
     }
 
     #[test]
@@ -1271,34 +1343,12 @@ mod tests {
             .is_err()
         );
 
-        let asset = GitHubAsset {
-            name: "payload--codex.exe".to_owned(),
-            state: "uploaded".to_owned(),
-            size: 3,
-            browser_download_url: "https://example.invalid/asset".to_owned(),
-            digest: format!("sha256:{sha}"),
-        };
-        let duplicate = GitHubRelease {
-            tag_name: "compat-rust-v1.2.3-native-join-p1".to_owned(),
-            draft: false,
-            prerelease: false,
-            assets: vec![
-                asset,
-                GitHubAsset {
-                    name: "payload--codex.exe".to_owned(),
-                    state: "uploaded".to_owned(),
-                    size: 3,
-                    browser_download_url: "https://example.invalid/asset".to_owned(),
-                    digest: format!("sha256:{sha}"),
-                },
-            ],
-        };
-        assert!(release_assets(&duplicate).is_err());
         assert!(descriptor_assets(&descriptor).is_ok());
-        assert!(
-            validate_declared_asset(&descriptor.artifact, &BTreeMap::new(), &BTreeMap::new(),)
-                .is_err()
-        );
+        let mut checksums = BTreeMap::new();
+        checksums.insert(descriptor.artifact.asset.clone(), sha);
+        assert!(validate_declared_asset(&descriptor.artifact, &checksums).is_ok());
+        checksums.clear();
+        assert!(validate_declared_asset(&descriptor.artifact, &checksums).is_err());
 
         let allowed = "https://release-assets.githubusercontent.com/asset"
             .parse()
@@ -1309,64 +1359,93 @@ mod tests {
     }
 
     #[test]
-    fn download_preflight_rejects_untrusted_asset_metadata() {
-        let client = GitHubClient::new();
+    fn git_refs_drive_no_login_catalog_and_proxy_urls() {
         let tag = "compat-rust-v1.2.3-native-join-p1";
+        let raw = "a".repeat(40);
+        let commit = "b".repeat(40);
+        let mut advertisement = packet("# service=git-upload-pack\n");
+        advertisement.extend_from_slice(b"0000");
+        advertisement.extend(packet("version 1\n"));
+        advertisement.extend(packet(&format!("{raw} refs/tags/{tag}\0peeled\n")));
+        advertisement.extend(packet(&format!("{commit} refs/tags/{tag}^{{}}\n")));
+        advertisement.extend_from_slice(b"0000");
+
+        let refs = parse_git_refs(&advertisement).unwrap();
+        assert_eq!(compatibility_tags(&refs).unwrap(), [tag]);
+        assert_eq!(peel_tag_from_refs(&refs, tag).unwrap(), commit);
+        let direct = release_asset_url(tag, "SHA256SUMS");
+        assert_eq!(routed_url(GitHubRoute::Direct, &direct), direct);
+        assert_eq!(
+            routed_url(GitHubRoute::Proxy, &direct),
+            format!("https://gh-proxy.com/{direct}")
+        );
+        assert_eq!(country_from_cloudflare_trace(b"loc=CN\n"), Some(true));
+        assert_eq!(country_from_cloudflare_trace(b"loc=US\n"), Some(false));
+        assert_eq!(country_from_cloudflare_trace(b"loc=cn\n"), None);
+        assert_eq!(country_from_cloudflare_trace(b"loc=CN\nloc=US\n"), None);
+        assert_eq!(country_from_cloudflare_trace(b"colo=HKG\n"), None);
+        assert_eq!(
+            country_from_alibaba_region(br#"{"code":0,"data":{"country_id":"CN"}}"#),
+            Some(true)
+        );
+        assert_eq!(
+            country_from_alibaba_region(br#"{"code":0,"data":{"country_id":"US"}}"#),
+            Some(false)
+        );
+        assert_eq!(
+            country_from_alibaba_region(br#"{"code":1,"data":null}"#),
+            None
+        );
+        assert_eq!(
+            route_from_region_probes([Some(false), Some(true)]),
+            Some(GitHubRoute::Proxy)
+        );
+        assert_eq!(
+            route_from_region_probes([Some(true), Some(false)]),
+            Some(GitHubRoute::Proxy)
+        );
+        assert_eq!(
+            route_from_region_probes([Some(false), None]),
+            Some(GitHubRoute::Direct)
+        );
+        assert_eq!(route_from_region_probes([None, None]), None);
+        assert!(parse_git_refs(b"0005x").is_err());
+        assert!(should_try_proxy(&ureq::Error::StatusCode(403)));
+        assert!(should_try_proxy(&ureq::Error::StatusCode(429)));
+        assert!(should_try_proxy(&ureq::Error::StatusCode(503)));
+        assert!(!should_try_proxy(&ureq::Error::StatusCode(404)));
+        assert!(!should_try_proxy(&ureq::Error::Tls("certificate rejected")));
+
+        let client = GitHubClient::with_route(GitHubRoute::Direct);
+        let destination = std::env::temp_dir().join("artifact").join("codex.exe");
         let digest = "a".repeat(64);
         assert!(
-            validate_release_asset_url(
-                tag,
-                "payload--codex.exe",
-                &format!("https://github.com/DSLZL/CSA/releases/download/{tag}/payload--codex.exe"),
-            )
-            .is_ok()
-        );
-        assert!(
-            validate_release_asset_url(
-                tag,
-                "payload--codex.exe",
-                &format!("https://github.com/other/CSA/releases/download/{tag}/payload--codex.exe"),
-            )
-            .is_err()
-        );
-        let destination = std::env::temp_dir().join("artifact").join("codex.exe");
-        let mut asset = GitHubAsset {
-            name: "payload--codex.exe".to_owned(),
-            state: "uploaded".to_owned(),
-            size: 3,
-            browser_download_url: "https://example.invalid/asset".to_owned(),
-            digest: format!("sha256:{digest}"),
-        };
-        assert!(
             client
-                .download_asset(tag, &asset, &destination, Some(&digest))
-                .is_err()
-        );
-        asset.browser_download_url = format!(
-            "https://github.com/{CSA_REPOSITORY}/releases/download/{tag}/{}",
-            asset.name
-        );
-        asset.size = MAX_ARTIFACT_BYTES + 1;
-        assert!(
-            client
-                .download_asset(tag, &asset, &destination, Some(&digest))
-                .is_err()
-        );
-        asset.size = 3;
-        asset.digest = format!("sha256:{}", "b".repeat(64));
-        assert!(
-            client
-                .download_asset(tag, &asset, &destination, Some(&digest))
+                .download_asset(
+                    tag,
+                    "payload--codex.exe",
+                    &destination,
+                    Some(MAX_ARTIFACT_BYTES + 1),
+                    Some(&digest),
+                    MAX_ARTIFACT_BYTES,
+                )
                 .is_err()
         );
     }
 
+    fn packet(payload: &str) -> Vec<u8> {
+        format!("{:04x}{payload}", payload.len() + 4).into_bytes()
+    }
+
     #[test]
     fn github_client_allows_large_release_bodies_within_global_timeout() {
-        let timeouts = GitHubClient::new().agent.config().timeouts();
+        let timeouts = GitHubClient::with_route(GitHubRoute::Direct)
+            .agent
+            .config()
+            .timeouts();
         assert_eq!(timeouts.global, Some(Duration::from_secs(15 * 60)));
         assert_eq!(timeouts.connect, Some(Duration::from_secs(15)));
-        assert_eq!(timeouts.recv_response, None);
+        assert_eq!(timeouts.recv_response, Some(Duration::from_secs(30)));
         assert_eq!(timeouts.recv_body, None);
     }
 }

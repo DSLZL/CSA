@@ -28,7 +28,7 @@ CSA 让这些补丁可用，同时避免把官方安装当作可以直接修改�
 - Patched executable 复用经过验证的官方 Codex runtime 和 companion tools。
 - 绑定 checksum 的 shim 在 prepared binding 失效时回退到官方 Codex。
 
-管理器不会覆盖官方 Codex 文件、复制默认 `CODEX_HOME`、修改 shell profile 或改写 `PATH`。
+管理器不会覆盖官方 Codex 文件、复制默认 `CODEX_HOME` 或修改 shell profile。在 Windows 上，只有用户明确执行 `csa install` 才会修改当前用户的 `PATH`；安装 npm package 本身不会修改。
 
 ## 当前支持范围
 
@@ -79,7 +79,7 @@ csa install
 csa status
 ```
 
-`csa install` 会按版本顺序列出正式、非草稿、非预发布的 patched Release。无法安装的条目会标出原因，然后让你选择可安装版本。
+`csa install` 会按版本顺序列出固定元数据完整的公开 `compat-*` Release。无法安装的条目会标出原因，然后让你选择可安装版本。无需登录 GitHub：CSA 会并行运行五秒上限的 Cloudflare 与阿里系淘宝 IP 国家探测，任意一个明确返回中国大陆（`CN`）就从 `gh-proxy.com` 开始下载；没有 `CN` 时默认直连 GitHub，并保留直连到镜像的兜底。
 
 自动化环境必须传入完整的 compatibility ID：
 
@@ -92,11 +92,13 @@ csa install --compat rust-v0.150.1-native-join-p8
 
 ### 使用受管 shim
 
-`install` 会创建经过验证的 shim，但不会修改 `PATH`。在 Windows 上，先只在当前 PowerShell 进程中测试：
+在 Windows 上，`install` 会创建经过验证的 shim，把受管目录移到当前用户持久化 `PATH` 的首位，并用系统 `where.exe` 静默复验。已经运行的 VS Code 窗口仍保留旧环境，需要完全退出后重新打开。若要在当前 PowerShell 进程中立即使用 shim：
 
 ```powershell
 $Status = csa status | ConvertFrom-Json
-$env:PATH = $Status.activation.managed_bin + [IO.Path]::PathSeparator + $env:PATH
+$ManagedBin = [string]$Status.activation.managed_bin
+$OtherEntries = @($env:PATH -split ';' | Where-Object { $_ -and $_ -ine $ManagedBin })
+$env:PATH = (@($ManagedBin) + $OtherEntries) -join ';'
 
 Get-Command codex -All
 codex --version
@@ -115,7 +117,7 @@ codex --version
 npm uninstall --global @dslzl/csa
 ```
 
-`uninstall` 会撤回 shim 并删除 Manager 自己的 prepared data。它不会删除官方 Codex、用户配置、认证信息、npm 状态或用户手动添加的 `PATH` 项。
+`uninstall` 会撤回 shim、删除 Manager 自己的 prepared data，并移除 CSA 精确添加的受管用户 `PATH` 项。它不会删除官方 Codex、用户配置、认证信息、npm 状态或其他 `PATH` 项。
 
 ## Native Join 与 TUI
 

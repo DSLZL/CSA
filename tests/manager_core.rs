@@ -1,5 +1,9 @@
 use csa::BUILD_TARGET;
 use csa::activation::{forward_shim, plug, purge, select_shim_target, shim_path, unplug};
+#[cfg(windows)]
+use csa::activation::{
+    inspect as inspect_activation, inspect_command_resolution, prioritize_windows_user_path,
+};
 use csa::compat::LoadedCompatibility;
 use csa::error::Result;
 use csa::hash::sha256_bytes;
@@ -301,6 +305,10 @@ impl ProcessRunner for FakeRunner {
                 "codex-cli {}\n",
                 self.version.lock().unwrap()
             )));
+        }
+        #[cfg(windows)]
+        if command.env.contains_key(&OsString::from("CSA_PATH_MODE")) {
+            return Ok(CommandResult::success("changed"));
         }
         if self.source_build && args == ["run", TOOLCHAIN, "rustc", "--version", "--verbose"] {
             return Ok(CommandResult::success(format!(
@@ -967,6 +975,37 @@ fn activation_lifecycle_is_reversible_and_drift_falls_back_without_recursion() {
         .unwrap(),
         b"bin/codex-code-mode-host.exe"
     );
+}
+
+#[cfg(windows)]
+#[test]
+fn windows_user_path_activation_prioritizes_and_verifies_codex() {
+    let temp = TempDir::new();
+    let paths = ManagerPaths::resolve(Some(temp.join("manager"))).unwrap();
+    fs::create_dir_all(&paths.bin).unwrap();
+    let managed = shim_path(&paths);
+    write_executable(&managed, b"managed");
+    let official_bin = temp.join("official-bin");
+    fs::create_dir_all(&official_bin).unwrap();
+    write_executable(&official_bin.join("codex.exe"), b"official");
+    let official_first = std::env::join_paths([&official_bin, &paths.bin]).unwrap();
+    assert!(!inspect_command_resolution(&paths, Some(&official_first)).resolves_to_managed_shim);
+    let activation = inspect_activation(&paths, None);
+    let runner = FakeRunner::new(b"");
+
+    let report = prioritize_windows_user_path(&activation, &runner).unwrap();
+    assert!(report.changed);
+    assert!(report.command_resolution.resolves_to_managed_shim);
+
+    let commands = runner.commands();
+    assert_eq!(commands.len(), 2);
+    assert_eq!(
+        commands[0].env.get(&OsString::from("CSA_PATH_MODE")),
+        Some(&OsString::from("prepend"))
+    );
+    assert_eq!(commands[1].args, [OsString::from("codex")]);
+    let verified_path = commands[1].env.get(&OsString::from("PATH")).unwrap();
+    assert_eq!(std::env::split_paths(verified_path).next(), Some(paths.bin));
 }
 
 #[test]

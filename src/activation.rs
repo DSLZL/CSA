@@ -68,10 +68,26 @@ pub struct ActivationState {
 #[derive(Clone, Debug, Serialize)]
 pub struct ActivationReport {
     pub status: &'static str,
+    pub effective: bool,
     pub managed_bin: PathBuf,
     pub shim_path: PathBuf,
+    pub command_resolution: CommandResolution,
     pub state: Option<ActivationState>,
     pub reason: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct CommandResolution {
+    pub managed_bin_on_path: bool,
+    pub resolved_codex: Option<PathBuf>,
+    pub resolves_to_managed_shim: bool,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, Serialize)]
+pub struct UserPathReport {
+    pub status: &'static str,
+    pub changed: bool,
+    pub command_resolution: CommandResolution,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -80,6 +96,8 @@ pub struct PlugReport {
     pub status: &'static str,
     pub changed: bool,
     pub managed_bin_on_path: bool,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub user_path: Option<UserPathReport>,
     pub activation: ActivationReport,
 }
 
@@ -145,12 +163,14 @@ pub fn plug(
             && fingerprint(&final_shim)
                 .is_ok_and(|shim| shim.sha256 == source.sha256 && shim.size == source.size)
         {
+            let activation = inspect(&paths, Some(&prepared));
             return Ok(PlugReport {
                 schema: 1,
                 status: "plugged",
                 changed: false,
-                managed_bin_on_path: path_contains(&paths.bin),
-                activation: inspect(&paths, Some(&prepared)),
+                managed_bin_on_path: activation.command_resolution.managed_bin_on_path,
+                user_path: None,
+                activation,
             });
         }
     }
@@ -208,7 +228,8 @@ pub fn plug(
         schema: 1,
         status: "plugged",
         changed: true,
-        managed_bin_on_path: path_contains(&paths.bin),
+        managed_bin_on_path: activation.command_resolution.managed_bin_on_path,
+        user_path: None,
         activation,
     })
 }
@@ -274,13 +295,17 @@ pub fn purge(manager_root: Option<PathBuf>) -> Result<PurgeReport> {
 
 pub fn inspect(paths: &ManagerPaths, prepared: Option<&PreparedState>) -> ActivationReport {
     let final_shim = shim_path(paths);
+    let path_value = std::env::var_os("PATH");
+    let command_resolution = inspect_command_resolution(paths, path_value.as_deref());
     let active_exists = fs::symlink_metadata(&paths.active).is_ok();
     let shim_exists = fs::symlink_metadata(&final_shim).is_ok();
     if !active_exists && !shim_exists {
         return ActivationReport {
             status: "unplugged",
+            effective: false,
             managed_bin: paths.bin.clone(),
             shim_path: final_shim,
+            command_resolution,
             state: None,
             reason: None,
         };
@@ -309,20 +334,212 @@ pub fn inspect(paths: &ManagerPaths, prepared: Option<&PreparedState>) -> Activa
     match checked {
         Ok(active) => ActivationReport {
             status: "plugged",
+            effective: command_resolution.resolves_to_managed_shim,
             managed_bin: paths.bin.clone(),
             shim_path: final_shim,
+            command_resolution,
             state: Some(active),
             reason: None,
         },
         Err(error) => ActivationReport {
             status: "fallback",
+            effective: false,
             managed_bin: paths.bin.clone(),
             shim_path: final_shim,
+            command_resolution,
             state: read_active(&paths.active).ok(),
             reason: Some(error.to_string()),
         },
     }
 }
+
+pub fn inspect_command_resolution(
+    paths: &ManagerPaths,
+    path_value: Option<&OsStr>,
+) -> CommandResolution {
+    let resolved_codex = find_codex_launcher(path_value, &[]).ok();
+    let managed_shim = shim_path(paths).canonicalize().ok();
+    CommandResolution {
+        managed_bin_on_path: path_contains(&paths.bin, path_value),
+        resolves_to_managed_shim: resolved_codex
+            .as_ref()
+            .zip(managed_shim.as_ref())
+            .is_some_and(|(actual, expected)| actual == expected),
+        resolved_codex,
+    }
+}
+
+#[cfg(windows)]
+pub fn prioritize_windows_user_path(
+    activation: &ActivationReport,
+    runner: &dyn ProcessRunner,
+) -> Result<UserPathReport> {
+    let where_exe = windows_system_executable("System32/where.exe")?;
+    let powershell = windows_system_executable("System32/WindowsPowerShell/v1.0/powershell.exe")?;
+    let update = runner
+        .run(
+            &CommandSpec::captured(&powershell)
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    WINDOWS_USER_PATH_SCRIPT,
+                ])
+                .env("CSA_MANAGED_BIN", activation.managed_bin.as_os_str())
+                .env("CSA_PATH_MODE", "prepend"),
+        )?
+        .require_success("put the CSA managed bin first in the Windows user PATH")?;
+    let changed = match std::str::from_utf8(&update.stdout).map(str::trim) {
+        Ok("changed") => true,
+        Ok("unchanged") => false,
+        _ => {
+            return Err(ManagerError::new(
+                "path_activation_failed",
+                "Windows user PATH update returned an unexpected result",
+            ));
+        }
+    };
+
+    let verification_path =
+        path_with_precedence(&activation.managed_bin, std::env::var_os("PATH").as_deref())?;
+    runner
+        .run(
+            &CommandSpec::captured(&where_exe)
+                .arg("codex")
+                .env("PATH", &verification_path),
+        )?
+        .require_success("verify the CSA Codex command with where.exe")?;
+    let root = activation.managed_bin.parent().ok_or_else(|| {
+        ManagerError::new("unsafe_manager_root", "managed bin has no manager root")
+    })?;
+    let paths = ManagerPaths::resolve(Some(root.to_path_buf()))?;
+    let command_resolution =
+        inspect_command_resolution(&paths, Some(verification_path.as_os_str()));
+    if !command_resolution.resolves_to_managed_shim {
+        return Err(ManagerError::new(
+            "path_activation_failed",
+            "where.exe verification did not resolve Codex to the CSA managed shim",
+        ));
+    }
+    Ok(UserPathReport {
+        status: "verified",
+        changed,
+        command_resolution,
+    })
+}
+
+#[cfg(windows)]
+pub fn remove_windows_user_path(managed_bin: &Path, runner: &dyn ProcessRunner) -> Result<bool> {
+    let powershell = windows_system_executable("System32/WindowsPowerShell/v1.0/powershell.exe")?;
+    let update = runner
+        .run(
+            &CommandSpec::captured(&powershell)
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    WINDOWS_USER_PATH_SCRIPT,
+                ])
+                .env("CSA_MANAGED_BIN", managed_bin.as_os_str())
+                .env("CSA_PATH_MODE", "remove"),
+        )?
+        .require_success("remove the CSA managed bin from the Windows user PATH")?;
+    match std::str::from_utf8(&update.stdout).map(str::trim) {
+        Ok("changed") => Ok(true),
+        Ok("unchanged") => Ok(false),
+        _ => Err(ManagerError::new(
+            "path_deactivation_failed",
+            "Windows user PATH removal returned an unexpected result",
+        )),
+    }
+}
+
+#[cfg(windows)]
+fn path_with_precedence(directory: &Path, path_value: Option<&OsStr>) -> Result<OsString> {
+    let canonical = directory.canonicalize().ok();
+    let mut entries = vec![directory.to_path_buf()];
+    if let Some(value) = path_value {
+        entries.extend(std::env::split_paths(value).filter(|entry| {
+            entry != directory
+                && !canonical.as_ref().is_some_and(|expected| {
+                    entry.canonicalize().is_ok_and(|actual| &actual == expected)
+                })
+        }));
+    }
+    std::env::join_paths(entries).map_err(|error| {
+        ManagerError::new(
+            "invalid_path",
+            format!("construct PATH with CSA precedence: {error}"),
+        )
+    })
+}
+
+#[cfg(windows)]
+fn windows_system_executable(relative: &str) -> Result<PathBuf> {
+    let root = std::env::var_os("SystemRoot")
+        .map(PathBuf::from)
+        .filter(|path| path.is_absolute())
+        .ok_or_else(|| ManagerError::new("windows_system_root_missing", "SystemRoot is invalid"))?;
+    let executable = root.join(relative).canonicalize().map_err(|error| {
+        ManagerError::io(
+            &format!("resolve Windows system executable {relative}"),
+            error,
+        )
+    })?;
+    if !executable.is_file() {
+        return Err(ManagerError::new(
+            "windows_system_tool_missing",
+            format!(
+                "Windows system executable is missing: {}",
+                executable.display()
+            ),
+        ));
+    }
+    Ok(executable)
+}
+
+#[cfg(windows)]
+const WINDOWS_USER_PATH_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$managed = $env:CSA_MANAGED_BIN
+$mode = $env:CSA_PATH_MODE
+$key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
+if ($null -eq $key) { throw 'cannot open HKCU\Environment' }
+try {
+  $current = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+  try { $kind = $key.GetValueKind('Path') }
+  catch { $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString }
+  $entries = @($current -split ';' | Where-Object { $_ -and $_ -ine $managed })
+  if ($mode -eq 'prepend') { $updated = (@($managed) + $entries) -join ';' }
+  elseif ($mode -eq 'remove') { $updated = $entries -join ';' }
+  else { throw 'invalid CSA_PATH_MODE' }
+  $changed = $updated -cne $current
+  if ($changed) {
+    $key.SetValue('Path', $updated, $kind)
+    try {
+      $member = '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);'
+      $native = Add-Type -MemberDefinition $member -Name NativeMethods -Namespace CSA -PassThru
+      $result = [UIntPtr]::Zero
+      [void]$native::SendMessageTimeout([IntPtr]0xffff, 0x1a, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
+    } catch {}
+  }
+  $saved = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+  $savedEntries = @($saved -split ';' | Where-Object { $_ })
+  $managedMatches = @($savedEntries | Where-Object { $_ -ieq $managed })
+  if ($mode -eq 'prepend' -and ($savedEntries.Count -eq 0 -or $savedEntries[0] -ine $managed)) {
+    throw 'managed bin is not first in the saved user PATH'
+  }
+  if ($mode -eq 'remove' -and $managedMatches.Count -ne 0) {
+    throw 'managed bin remains in the saved user PATH'
+  }
+  if ($changed) { [Console]::Out.Write('changed') }
+  else { [Console]::Out.Write('unchanged') }
+}
+finally { $key.Dispose() }
+"#;
 
 pub fn forward_current_shim(args: Vec<OsString>, runner: &dyn ProcessRunner) -> Result<i32> {
     let current = std::env::current_exe()
@@ -715,10 +932,10 @@ fn managed_data_exists(paths: &ManagerPaths) -> Result<bool> {
     Ok(false)
 }
 
-fn path_contains(directory: &Path) -> bool {
+fn path_contains(directory: &Path, path_value: Option<&OsStr>) -> bool {
     let canonical = directory.canonicalize().ok();
-    std::env::var_os("PATH").is_some_and(|value| {
-        std::env::split_paths(&value).any(|entry| {
+    path_value.is_some_and(|value| {
+        std::env::split_paths(value).any(|entry| {
             entry == directory
                 || canonical.as_ref().is_some_and(|expected| {
                     entry.canonicalize().is_ok_and(|actual| &actual == expected)

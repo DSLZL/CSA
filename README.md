@@ -28,7 +28,7 @@ CSA keeps the patch useful without turning the official installation into a muta
 - The patched executable reuses the verified official Codex runtime and companion tools.
 - A checksum-bound shim falls back to official Codex if the prepared binding is no longer valid.
 
-The Manager does not overwrite official Codex files, copy the default `CODEX_HOME`, edit shell profiles, or change `PATH`.
+The Manager does not overwrite official Codex files, copy the default `CODEX_HOME`, or edit shell profiles. On Windows, an explicit `csa install` changes only the current user's `PATH`; installing the npm package does not.
 
 ## Current support
 
@@ -79,7 +79,7 @@ csa install
 csa status
 ```
 
-`csa install` lists formal, non-draft, non-prerelease patched Releases in version order. It marks incompatible entries as unavailable and asks you to select an installable version.
+`csa install` lists public `compat-*` Releases with complete fixed metadata in version order. It marks incompatible entries as unavailable and asks you to select an installable version. No GitHub login is required: five-second Cloudflare and Alibaba/Taobao country probes run in parallel, and either one reporting mainland China (`CN`) starts with `gh-proxy.com`; otherwise CSA starts with GitHub directly and keeps the direct-to-mirror fallback.
 
 Automation must provide the exact compatibility ID:
 
@@ -92,11 +92,13 @@ csa install --compat rust-v0.150.1-native-join-p8
 
 ### Use the managed shim
 
-`install` creates a verified shim but does not edit `PATH`. On Windows, test it in the current PowerShell process first:
+On Windows, `install` creates a verified shim, moves its managed directory to the front of the current user's persistent `PATH`, and silently verifies it with the system `where.exe`. A running VS Code window keeps its old environment, so fully quit and reopen it. To use the shim immediately in the current PowerShell process:
 
 ```powershell
 $Status = csa status | ConvertFrom-Json
-$env:PATH = $Status.activation.managed_bin + [IO.Path]::PathSeparator + $env:PATH
+$ManagedBin = [string]$Status.activation.managed_bin
+$OtherEntries = @($env:PATH -split ';' | Where-Object { $_ -and $_ -ine $ManagedBin })
+$env:PATH = (@($ManagedBin) + $OtherEntries) -join ';'
 
 Get-Command codex -All
 codex --version
@@ -115,7 +117,7 @@ codex --version
 npm uninstall --global @dslzl/csa
 ```
 
-`uninstall` withdraws the shim and removes Manager-owned preparation data. It leaves official Codex, user configuration, authentication, npm state, and manually edited `PATH` entries alone.
+`uninstall` withdraws the shim, removes Manager-owned preparation data, and removes CSA's exact managed user-`PATH` entry. It leaves official Codex, user configuration, authentication, npm state, and all other `PATH` entries alone.
 
 ## Native Join and TUI
 
