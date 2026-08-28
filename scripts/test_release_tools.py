@@ -844,6 +844,11 @@ def test_release_stream_contracts() -> None:
     assert 'echo "CARGO_HOME=$root/cache/cargo-home"' in patched_workflow
     assert "CARGO_HOME: ${{ runner.temp }}" not in validation_workflow
     assert 'echo "CARGO_HOME=$root/cache/cargo-home"' in validation_workflow
+    shared_xwin_cache = (
+        'echo "XWIN_CACHE_DIR=$RUNNER_TEMP/csa-patched-codex-cache/xwin"'
+    )
+    assert patched_workflow.count(shared_xwin_cache) == 1
+    assert validation_workflow.count(shared_xwin_cache) == 1
     assert 'tmp="$RUNNER_TEMP/csa-tmp"' in validation_workflow
     assert 'echo "TMPDIR=$tmp"' in validation_workflow
     assert 'chmod 0700 "$tmp"' in validation_workflow

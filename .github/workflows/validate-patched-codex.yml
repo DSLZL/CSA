@@ -81,7 +81,7 @@ jobs:
             echo "CSA_RUNTIME_CACHE=$root/cache/official-runtime"
             echo "RUSTUP_HOME=$root/cache/rustup"
             echo "SCCACHE_DIR=$root/cache/sccache-test"
-            echo "XWIN_CACHE_DIR=$root/cache/xwin"
+            echo "XWIN_CACHE_DIR=$RUNNER_TEMP/csa-patched-codex-cache/xwin"
             echo "TMPDIR=$tmp"
             echo "HOME=$root/home"
             echo "CODEX_HOME=$root/codex-home"

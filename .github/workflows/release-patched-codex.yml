@@ -71,7 +71,7 @@ jobs:
             echo "SCCACHE_DIR=$root/cache/sccache-bootstrap"
             echo "SCCACHE_RELEASE_DIR=$root/cache/sccache"
             echo "TMPDIR=$root/tmp"
-            echo "XWIN_CACHE_DIR=$root/cache/xwin"
+            echo "XWIN_CACHE_DIR=$RUNNER_TEMP/csa-patched-codex-cache/xwin"
             echo "HOME=$root/home"
             echo "CODEX_HOME=$root/codex-home"
             echo "RESOLUTION_JSON=$root/resolution.json"
