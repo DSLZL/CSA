@@ -1278,9 +1278,9 @@ fn bundled_p7_contract_requires_lossless_orbit_gate() {
 }
 
 #[test]
-fn bundled_p8_contract_keeps_lossless_orbit_gate() {
+fn bundled_current_p8_contract_keeps_lossless_orbit_gate() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("payload/codex/rust-v0.149.1-native-join-p8/manifest.toml")
+        .join("payload/codex/rust-v0.150.1-native-join-p8/manifest.toml")
         .canonicalize()
         .unwrap();
     let loaded = LoadedCompatibility::load(&manifest).unwrap();

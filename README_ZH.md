@@ -6,7 +6,7 @@
 
 [![CI](https://github.com/DSLZL/CSA/actions/workflows/ci.yml/badge.svg)](https://github.com/DSLZL/CSA/actions/workflows/ci.yml)
 [![CSA release](https://img.shields.io/github/v/release/DSLZL/CSA?filter=v%2A&label=CSA)](https://github.com/DSLZL/CSA/releases)
-[![Patched Codex](https://img.shields.io/badge/patched%20Codex-0.149.0%20accepted-white)](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.149.0-native-join-p3)
+[![Patched Codex](https://img.shields.io/badge/patched%20Codex-0.150.1%20accepted-white)](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.150.1-native-join-p8)
 
 [快速开始](#快速开始) · [工作原理](#工作原理) · [兼容状态](#兼容状态) · [命令](#命令) · [开发](#开发) · [English](README.md)
 
@@ -15,7 +15,7 @@
 CSA 为 Codex 加入原生子代理 Join 和实时子代理视图，但不会替换官方 CLI。管理器会找到本机的 Codex 安装，校验 runtime 文件，并把 patched executable 放进独立的受管目录。
 
 > [!IMPORTANT]
-> CSA 管理器 `0.1.2` 通过 `@dslzl/csa` 和 GitHub `v0.1.2` Release 分发。Patched Codex `0.149.0` p3 是当前已接受并发布的 Windows x64 版本；`0.149.1` p6 和 p7 仍是只开放构建的候选版本。
+> CSA 管理器 `0.1.3` 通过 `@dslzl/csa` 和 GitHub `v0.1.3` Release 分发。Patched Codex `0.150.1` p8 是当前已接受并发布的 Windows x64 版本。
 
 ## 补丁改了什么
 
@@ -25,7 +25,7 @@ CSA 为 Codex 加入原生子代理 Join 和实时子代理视图，但不会替
 - TUI 可以显示子代理的实时进度和完成状态，并支持跳转到对应的子会话。
 - Patched executable 复用官方 Codex runtime package 和 companion tools，不携带第二套副本。
 
-`0.149.1` p7 候选版本还包含最新的子代理面板和终端无损 Orbit 动画。它目前不是正式的 compatibility release。
+当前 `0.150.1` p8 正式版本包含最新的子代理面板和终端无损 Orbit 动画。
 
 ## 工作原理
 
@@ -61,6 +61,7 @@ CSA 把四个部分分开管理：
 | `rust-v0.149.1-native-join-p6` | `0.149.1` | Windows x64 | 候选，未开放发布 |
 | `rust-v0.149.1-native-join-p7` | `0.149.1` | Windows x64 | 候选，未开放发布 |
 | `rust-v0.149.1-native-join-p8` | `0.149.1` | Windows x64 | 候选，未开放发布 |
+| [`rust-v0.150.1-native-join-p8`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.150.1-native-join-p8) | `0.150.1` | Windows x64 | 已接受并发布 |
 
 [兼容索引](release/compatibility-index.json)是仓库 payload 的权威来源。正常在线安装会发现所有正式 `compat-*` GitHub Release；只开放构建的候选版本不会出现在列表里。
 
@@ -117,7 +118,7 @@ csa status --manager-root $ManagerRoot
 在交互式终端中，直接运行 `csa install` 会拉取正式兼容目录，列出 patched Codex 版本及可安装状态，并让用户输入编号。自动化环境必须显式指定完整 ID：
 
 ```powershell
-csa install --compat rust-v0.149.0-native-join-p3
+csa install --compat rust-v0.150.1-native-join-p8
 ```
 
 > [!WARNING]
@@ -126,7 +127,7 @@ csa install --compat rust-v0.149.0-native-join-p3
 开发本地 payload 时，需要传入 manifest，以及一个本地 artifact 或 source 目录：
 
 ```powershell
-$CompatId = 'rust-v0.149.0-native-join-p3'
+$CompatId = 'rust-v0.150.1-native-join-p8'
 $Manifest = Join-Path 'C:\absolute\payload' "$CompatId\manifest.toml"
 $Artifact = 'C:\absolute\patched\codex.exe'
 
