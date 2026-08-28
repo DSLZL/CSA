@@ -1,0 +1,1825 @@
+diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
+index 6ab4d1b3b..a2f0d54d3 100644
+--- a/codex-rs/tui/src/app.rs
++++ b/codex-rs/tui/src/app.rs
+@@ -894,6 +894,7 @@ impl App {
+     }
+ 
+     fn render_chat_widget_frame(&mut self, tui: &mut tui::Tui, screen_size: Size) -> Result<Rect> {
++        let csa_graphics_enabled = tui.csa_graphics_available(self.config.animations, screen_size);
+         let dashboard_visible = self
+             .chat_widget
+             .selected_index_for_present_view(AGENTS_OVERVIEW_VIEW_ID)
+@@ -906,43 +907,76 @@ impl App {
+             self.schedule_immediate_resize_reflow(tui);
+             self.maybe_run_resize_reflow(tui, screen_size)?;
+         }
+-        self.with_chat_widget_frame(screen_size, |desired_height, chat_widget| {
+-            let desired_height = if dashboard_visible {
+-                screen_size.height
+-            } else {
+-                desired_height
+-            };
+-            let mut rendered_area = Rect::default();
+-            tui.draw_with_resize_reflow(desired_height, screen_size, |frame| {
+-                let area = frame.area();
+-                rendered_area = area;
+-                chat_widget.render(area, frame.buffer);
+-                self.chat_widget.note_rendered_width(area.width);
+-                if let Some((x, y)) = chat_widget.cursor_pos(area) {
+-                    frame.set_cursor_style(chat_widget.cursor_style(area));
+-                    frame.set_cursor_position((x, y));
+-                }
+-            })?;
+-            Ok(rendered_area)
+-        })
++        self.with_chat_widget_frame(
++            screen_size,
++            csa_graphics_enabled,
++            |desired_height, chat_widget| {
++                let desired_height = if dashboard_visible {
++                    screen_size.height
++                } else {
++                    desired_height
++                };
++                let mut rendered_area = Rect::default();
++                tui.draw_with_resize_reflow(
++                    desired_height,
++                    screen_size,
++                    |frame| {
++                        let area = frame.area();
++                        rendered_area = area;
++                        chat_widget.render(area, frame.buffer);
++                        self.chat_widget.note_rendered_width(area.width);
++                        if let Some((x, y)) = chat_widget.cursor_pos(area) {
++                            frame.set_cursor_style(chat_widget.cursor_style(area));
++                            frame.set_cursor_position((x, y));
++                        }
++                    },
++                    || {
++                        self.subagent_live_panel_frame
++                            .borrow()
++                            .csa_orbit_placements()
++                            .to_vec()
++                    },
++                )?;
++                Ok(rendered_area)
++            },
++        )
+     }
+ 
+     fn with_chat_widget_frame<T>(
+         &self,
+         screen_size: Size,
++        csa_graphics_enabled: bool,
+         render: impl FnOnce(u16, &dyn Renderable) -> T,
+     ) -> T {
+-        let panel = self.subagent_live_panel_renderable(screen_size, Instant::now());
++        let panel = self.subagent_live_panel_renderable_with_graphics(
++            screen_size,
++            Instant::now(),
++            csa_graphics_enabled,
++        );
+         let chat_widget = self.chat_widget.as_renderable_with_live_panel(
+             panel.map(|panel| RenderableItem::Owned(Box::new(panel))),
+         );
+         render(chat_widget.desired_height(screen_size.width), &chat_widget)
+     }
+ 
++    #[cfg(test)]
+     fn subagent_live_panel_renderable(
+         &self,
+         screen_size: Size,
+         now: Instant,
++    ) -> Option<SubagentLivePanelRenderable<'_>> {
++        self.subagent_live_panel_renderable_with_graphics(
++            screen_size,
++            now,
++            /*csa_graphics_enabled*/ false,
++        )
++    }
++
++    fn subagent_live_panel_renderable_with_graphics(
++        &self,
++        screen_size: Size,
++        now: Instant,
++        csa_graphics_enabled: bool,
+     ) -> Option<SubagentLivePanelRenderable<'_>> {
+         let Some(primary_thread_id) = self.primary_thread_id else {
+             self.subagent_live_panel_frame.borrow_mut().clear();
+@@ -976,7 +1010,10 @@ impl App {
+             })
+             .collect::<Vec<_>>();
+         let animations_enabled = self.config.animations;
+-        if animations_enabled && agents.iter().any(LivePanelAgent::is_animating) {
++        if animations_enabled
++            && csa_graphics_enabled
++            && agents.iter().any(LivePanelAgent::is_animating)
++        {
+             self.chat_widget
+                 .frame_requester
+                 .schedule_frame_in(ORBIT_RENDER_INTERVAL);
+@@ -997,6 +1034,7 @@ impl App {
+             bottom_pane_height,
+             color_enabled,
+             animations_enabled,
++            csa_graphics_enabled,
+             &self.subagent_live_panel_frame,
+         ))
+     }
+diff --git a/codex-rs/tui/src/app/resize_reflow.rs b/codex-rs/tui/src/app/resize_reflow.rs
+index c85c93ace..b2fc7e60a 100644
+--- a/codex-rs/tui/src/app/resize_reflow.rs
++++ b/codex-rs/tui/src/app/resize_reflow.rs
+@@ -261,7 +261,11 @@ impl App {
+         let width = screen_size.width.max(/*other*/ 1);
+         let screen_size = Size::new(width, screen_size.height);
+         let viewport_height = self
+-            .with_chat_widget_frame(screen_size, |desired_height, _| desired_height)
++            .with_chat_widget_frame(
++                screen_size,
++                /*csa_graphics_enabled*/ false,
++                |desired_height, _| desired_height,
++            )
+             .min(screen_size.height);
+         self.transcript_reflow.set_visible_history_rows(
+             screen_size
+diff --git a/codex-rs/tui/src/app/resize_reflow_tests.rs b/codex-rs/tui/src/app/resize_reflow_tests.rs
+index ee1ea1f83..6737e3a47 100644
+--- a/codex-rs/tui/src/app/resize_reflow_tests.rs
++++ b/codex-rs/tui/src/app/resize_reflow_tests.rs
+@@ -28,7 +28,11 @@ async fn resize_reflow_preserves_configured_scrollback_beyond_the_visible_viewpo
+     app.config.terminal_resize_reflow.max_rows = TerminalResizeReflowMaxRows::Limit(32);
+     app.transcript_cells = plain_history_cells(/*count*/ 64);
+     let screen_size = Size::new(/*width*/ 80, /*height*/ 24);
+-    let chat_height = app.with_chat_widget_frame(screen_size, |height, _| height);
++    let chat_height = app.with_chat_widget_frame(
++        screen_size,
++        /*csa_graphics_enabled*/ false,
++        |height, _| height,
++    );
+     let visible_history_rows = screen_size
+         .height
+         .saturating_sub(chat_height)
+diff --git a/codex-rs/tui/src/app/tests.rs b/codex-rs/tui/src/app/tests.rs
+index daaa85f96..f5a032df5 100644
+--- a/codex-rs/tui/src/app/tests.rs
++++ b/codex-rs/tui/src/app/tests.rs
+@@ -213,14 +213,18 @@ async fn chat_widget_frame_reuses_active_cell_height_across_frame_passes() {
+         }),
+     );
+     let width = 80;
+-    app.with_chat_widget_frame(Size::new(width, 24), |desired_height, chat_widget| {
+-        let area = Rect::new(/*x*/ 0, /*y*/ 0, width, desired_height);
+-        let mut buffer = Buffer::empty(area);
+-
+-        chat_widget.render(area, &mut buffer);
+-        assert!(chat_widget.cursor_pos(area).is_some());
+-        let _ = chat_widget.cursor_style(area);
+-    });
++    app.with_chat_widget_frame(
++        Size::new(width, 24),
++        /*csa_graphics_enabled*/ false,
++        |desired_height, chat_widget| {
++            let area = Rect::new(/*x*/ 0, /*y*/ 0, width, desired_height);
++            let mut buffer = Buffer::empty(area);
++
++            chat_widget.render(area, &mut buffer);
++            assert!(chat_widget.cursor_pos(area).is_some());
++            let _ = chat_widget.cursor_style(area);
++        },
++    );
+ 
+     assert_eq!(desired_height_calls.load(Ordering::Relaxed), 1);
+ }
+diff --git a/codex-rs/tui/src/csa_graphics.rs b/codex-rs/tui/src/csa_graphics.rs
+new file mode 100644
+index 000000000..e0f8df1f5
+--- /dev/null
++++ b/codex-rs/tui/src/csa_graphics.rs
+@@ -0,0 +1,407 @@
++//! Terminal graphics pass for CSA's one-cell sub-agent Orbit.
++
++use std::collections::HashMap;
++use std::io;
++use std::io::Write;
++use std::time::Instant;
++
++use codex_protocol::ThreadId;
++use crossterm::cursor::MoveTo;
++use crossterm::cursor::RestorePosition;
++use crossterm::cursor::SavePosition;
++use crossterm::queue;
++use ratatui::backend::Backend;
++use ratatui::layout::Size;
++
++use crate::csa_orbit::CsaOrbitFrame;
++use crate::csa_orbit::CsaOrbitFrameIndex;
++use crate::csa_orbit::csa_orbit_frame_cache;
++use crate::csa_orbit::rasterize_csa_orbit;
++use crate::pets::image_protocol::ImageProtocol;
++
++const CSA_KITTY_IMAGE_ID_START: u32 = 0x4353_4100;
++const CSA_KITTY_FALLBACK_RASTER_SIZE: u16 = 12;
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) struct CsaOrbitPlacement {
++    pub(crate) thread_id: ThreadId,
++    pub(crate) x: u16,
++    pub(crate) y: u16,
++    pub(crate) animation_started_at: Instant,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++struct CsaGraphicsKey {
++    protocol: ImageProtocol,
++    width: u16,
++    height: u16,
++    foreground: (u8, u8, u8),
++    background: (u8, u8, u8),
++}
++
++#[derive(Debug)]
++enum CsaEncodedFrame {
++    Kitty(String),
++    Sixel(Vec<u8>),
++}
++
++#[derive(Debug)]
++struct CsaEncodedFrameCache {
++    key: CsaGraphicsKey,
++    warmup: Vec<CsaEncodedFrame>,
++    steady: Vec<CsaEncodedFrame>,
++}
++
++impl CsaEncodedFrameCache {
++    fn new(key: CsaGraphicsKey) -> io::Result<Self> {
++        let source = csa_orbit_frame_cache();
++        Ok(Self {
++            key,
++            warmup: source
++                .warmup()
++                .iter()
++                .map(|frame| encode_csa_frame(key, frame))
++                .collect::<io::Result<_>>()?,
++            steady: source
++                .steady()
++                .iter()
++                .map(|frame| encode_csa_frame(key, frame))
++                .collect::<io::Result<_>>()?,
++        })
++    }
++
++    fn frame_at(&self, started_at: Instant, now: Instant) -> &CsaEncodedFrame {
++        match csa_orbit_frame_cache().frame_index_at(started_at, now) {
++            CsaOrbitFrameIndex::Warmup(index) => &self.warmup[index],
++            CsaOrbitFrameIndex::Steady(index) => &self.steady[index],
++        }
++    }
++}
++
++#[derive(Clone, Debug)]
++struct CsaActivePlacement {
++    protocol: ImageProtocol,
++    image_id: u32,
++    x: u16,
++    y: u16,
++}
++
++#[derive(Debug)]
++pub(crate) struct CsaGraphicsState {
++    protocol: Option<ImageProtocol>,
++    disabled: bool,
++    screen_size: Option<Size>,
++    cell_pixels: Option<(u16, u16)>,
++    cache: Option<CsaEncodedFrameCache>,
++    image_ids: HashMap<ThreadId, u32>,
++    next_image_id: u32,
++    active: Vec<CsaActivePlacement>,
++}
++
++impl Default for CsaGraphicsState {
++    fn default() -> Self {
++        let protocol = match crate::pets::image_protocol::detect_pet_image_support().protocol() {
++            Some(ImageProtocol::Kitty) => Some(ImageProtocol::Kitty),
++            Some(ImageProtocol::Sixel) => Some(ImageProtocol::Sixel),
++            Some(ImageProtocol::KittyLocalFile) | None => None,
++        };
++        Self {
++            protocol,
++            disabled: false,
++            screen_size: None,
++            cell_pixels: None,
++            cache: None,
++            image_ids: HashMap::new(),
++            next_image_id: CSA_KITTY_IMAGE_ID_START,
++            active: Vec::new(),
++        }
++    }
++}
++
++impl CsaGraphicsState {
++    pub(crate) fn prepare<B>(&mut self, backend: &mut B, screen_size: Size) -> io::Result<bool>
++    where
++        B: Backend<Error = io::Error>,
++    {
++        if self.disabled {
++            return Ok(false);
++        }
++        let Some(protocol) = self.protocol else {
++            return Ok(false);
++        };
++        let Some(foreground) = crate::terminal_palette::default_fg() else {
++            return Ok(false);
++        };
++        let Some(background) = crate::terminal_palette::default_bg() else {
++            return Ok(false);
++        };
++
++        if self.screen_size != Some(screen_size) {
++            self.screen_size = Some(screen_size);
++            self.cell_pixels = cell_pixels(backend, protocol);
++            self.cache = None;
++        }
++        let Some((width, height)) = self.cell_pixels else {
++            return Ok(false);
++        };
++        let key = CsaGraphicsKey {
++            protocol,
++            width,
++            height,
++            foreground,
++            background,
++        };
++        if self.cache.as_ref().is_none_or(|cache| cache.key != key) {
++            self.cache = Some(CsaEncodedFrameCache::new(key)?);
++        }
++        Ok(true)
++    }
++
++    pub(crate) fn clear(&mut self, writer: &mut impl Write) -> io::Result<()> {
++        if self.active.is_empty() {
++            return Ok(());
++        }
++
++        let needs_cursor = self
++            .active
++            .iter()
++            .any(|placement| placement.protocol == ImageProtocol::Sixel);
++        if needs_cursor {
++            queue!(writer, SavePosition)?;
++        }
++        for placement in &self.active {
++            match placement.protocol {
++                ImageProtocol::Kitty => writer.write_all(
++                    crate::pets::image_protocol::kitty_delete_image(placement.image_id).as_bytes(),
++                )?,
++                ImageProtocol::Sixel => {
++                    queue!(writer, MoveTo(placement.x, placement.y))?;
++                    writer.write_all(b" ")?;
++                }
++                ImageProtocol::KittyLocalFile => {}
++            }
++        }
++        if needs_cursor {
++            queue!(writer, RestorePosition)?;
++        }
++        self.active.clear();
++        writer.flush()
++    }
++
++    pub(crate) fn draw(
++        &mut self,
++        writer: &mut impl Write,
++        placements: &[CsaOrbitPlacement],
++        now: Instant,
++    ) -> io::Result<()> {
++        let Some(cache) = self.cache.as_ref() else {
++            return Ok(());
++        };
++        if placements.is_empty() {
++            return Ok(());
++        }
++
++        queue!(writer, SavePosition)?;
++        let image_ids = &mut self.image_ids;
++        let next_image_id = &mut self.next_image_id;
++        let active = &mut self.active;
++        for placement in placements {
++            let image_id = match image_ids.get(&placement.thread_id).copied() {
++                Some(image_id) => image_id,
++                None => {
++                    let image_id = *next_image_id;
++                    *next_image_id = next_image_id
++                        .checked_add(1)
++                        .ok_or_else(|| io::Error::other("CSA Kitty image IDs exhausted"))?;
++                    image_ids.insert(placement.thread_id, image_id);
++                    image_id
++                }
++            };
++            queue!(writer, MoveTo(placement.x, placement.y))?;
++            match cache.frame_at(placement.animation_started_at, now) {
++                CsaEncodedFrame::Kitty(payload) => writer.write_all(
++                    crate::pets::image_protocol::kitty_transmit_csa_rgba_with_id(
++                        payload,
++                        cache.key.width,
++                        cache.key.height,
++                        image_id,
++                    )
++                    .as_bytes(),
++                )?,
++                CsaEncodedFrame::Sixel(payload) => writer.write_all(payload)?,
++            }
++            active.push(CsaActivePlacement {
++                protocol: cache.key.protocol,
++                image_id,
++                x: placement.x,
++                y: placement.y,
++            });
++        }
++        queue!(writer, RestorePosition)?;
++        writer.flush()
++    }
++
++    pub(crate) fn disable(&mut self) {
++        self.disabled = true;
++        self.cache = None;
++    }
++
++    #[cfg(test)]
++    fn prepared_for_test(key: CsaGraphicsKey) -> Self {
++        Self {
++            protocol: Some(key.protocol),
++            disabled: false,
++            screen_size: Some(Size::new(80, 24)),
++            cell_pixels: Some((key.width, key.height)),
++            cache: Some(CsaEncodedFrameCache::new(key).unwrap()),
++            image_ids: HashMap::new(),
++            next_image_id: CSA_KITTY_IMAGE_ID_START,
++            active: Vec::new(),
++        }
++    }
++}
++
++fn cell_pixels<B>(backend: &mut B, protocol: ImageProtocol) -> Option<(u16, u16)>
++where
++    B: Backend<Error = io::Error>,
++{
++    let measured = backend.window_size().ok().and_then(|window| {
++        let columns = window.columns_rows.width;
++        let rows = window.columns_rows.height;
++        (columns > 0 && rows > 0 && window.pixels.width > 0 && window.pixels.height > 0).then(
++            || {
++                (
++                    (window.pixels.width / columns).max(1),
++                    (window.pixels.height / rows).max(1),
++                )
++            },
++        )
++    });
++    let windows_console = windows_console_cell_pixels();
++    match protocol {
++        ImageProtocol::Kitty => measured.or(Some((
++            CSA_KITTY_FALLBACK_RASTER_SIZE,
++            CSA_KITTY_FALLBACK_RASTER_SIZE,
++        ))),
++        ImageProtocol::Sixel => measured.or(windows_console),
++        ImageProtocol::KittyLocalFile => None,
++    }
++}
++
++#[cfg(windows)]
++fn windows_console_cell_pixels() -> Option<(u16, u16)> {
++    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
++    use windows_sys::Win32::System::Console::CONSOLE_FONT_INFOEX;
++    use windows_sys::Win32::System::Console::GetCurrentConsoleFontEx;
++    use windows_sys::Win32::System::Console::GetStdHandle;
++    use windows_sys::Win32::System::Console::STD_OUTPUT_HANDLE;
++
++    let output = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
++    if output == 0 || output == INVALID_HANDLE_VALUE {
++        return None;
++    }
++    let mut info = unsafe { std::mem::zeroed::<CONSOLE_FONT_INFOEX>() };
++    info.cbSize = std::mem::size_of::<CONSOLE_FONT_INFOEX>() as u32;
++    if unsafe { GetCurrentConsoleFontEx(output, 0, &mut info) } == 0 {
++        return None;
++    }
++    Some((
++        u16::try_from(info.dwFontSize.X)
++            .ok()
++            .filter(|value| *value > 0)?,
++        u16::try_from(info.dwFontSize.Y)
++            .ok()
++            .filter(|value| *value > 0)?,
++    ))
++}
++
++#[cfg(not(windows))]
++fn windows_console_cell_pixels() -> Option<(u16, u16)> {
++    None
++}
++
++fn encode_csa_frame(key: CsaGraphicsKey, frame: &CsaOrbitFrame) -> io::Result<CsaEncodedFrame> {
++    let raster = rasterize_csa_orbit(
++        frame.intensities,
++        key.width,
++        key.height,
++        key.foreground,
++        key.background,
++    );
++    match key.protocol {
++        ImageProtocol::Kitty => Ok(CsaEncodedFrame::Kitty(
++            crate::pets::image_protocol::kitty_encode_csa_rgba(&raster.rgba),
++        )),
++        ImageProtocol::Sixel => crate::pets::sixel::encode_rgba(
++            &raster.rgba,
++            u32::from(raster.width),
++            u32::from(raster.height),
++        )
++        .map(CsaEncodedFrame::Sixel)
++        .map_err(io::Error::other),
++        ImageProtocol::KittyLocalFile => Err(io::Error::other(
++            "CSA Orbit does not support Kitty local-file graphics",
++        )),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn test_key(protocol: ImageProtocol) -> CsaGraphicsKey {
++        CsaGraphicsKey {
++            protocol,
++            width: 12,
++            height: 12,
++            foreground: (255, 255, 255),
++            background: (0, 0, 0),
++        }
++    }
++
++    #[test]
++    fn shared_cache_draws_and_clears_multiple_agents() {
++        let mut state = CsaGraphicsState::prepared_for_test(test_key(ImageProtocol::Kitty));
++        let started_at = Instant::now();
++        let placements = [
++            CsaOrbitPlacement {
++                thread_id: ThreadId::new(),
++                x: 0,
++                y: 1,
++                animation_started_at: started_at,
++            },
++            CsaOrbitPlacement {
++                thread_id: ThreadId::new(),
++                x: 0,
++                y: 3,
++                animation_started_at: started_at - std::time::Duration::from_millis(110),
++            },
++            CsaOrbitPlacement {
++                thread_id: ThreadId::new(),
++                x: 0,
++                y: 5,
++                animation_started_at: started_at - std::time::Duration::from_millis(220),
++            },
++        ];
++        let mut output = Vec::new();
++
++        state.draw(&mut output, &placements, started_at).unwrap();
++        assert_eq!(state.active.len(), 3);
++        assert_eq!(state.image_ids.len(), 3);
++        assert_eq!(state.cache.as_ref().unwrap().warmup.len(), 20);
++        assert_eq!(state.cache.as_ref().unwrap().steady.len(), 24);
++
++        state.clear(&mut output).unwrap();
++        assert!(state.active.is_empty());
++        let output = String::from_utf8(output).unwrap();
++        assert_eq!(output.matches("a=d,d=I").count(), 3);
++    }
++
++    #[test]
++    fn sixel_cache_encodes_the_same_shared_samples() {
++        let cache = CsaEncodedFrameCache::new(test_key(ImageProtocol::Sixel)).unwrap();
++        assert_eq!(cache.warmup.len(), csa_orbit_frame_cache().warmup().len());
++        assert_eq!(cache.steady.len(), csa_orbit_frame_cache().steady().len());
++        assert!(matches!(cache.steady[0], CsaEncodedFrame::Sixel(_)));
++    }
++}
+diff --git a/codex-rs/tui/src/csa_orbit.rs b/codex-rs/tui/src/csa_orbit.rs
+new file mode 100644
+index 000000000..206f4c123
+--- /dev/null
++++ b/codex-rs/tui/src/csa_orbit.rs
+@@ -0,0 +1,217 @@
++//! CSA's one-cell raster form of the existing BeautifulUI Orbit motion model.
++
++use std::sync::OnceLock;
++use std::time::Duration;
++use std::time::Instant;
++
++use crate::motion::ORBIT_DURATION;
++use crate::motion::ORBIT_PIXEL_STAGGER;
++use crate::motion::ORBIT_RENDER_INTERVAL;
++use crate::motion::orbit_intensities_at;
++
++const CSA_ORBIT_WARMUP: Duration = ORBIT_PIXEL_STAGGER.saturating_mul(7);
++
++#[derive(Clone, Debug, PartialEq)]
++pub(crate) struct CsaOrbitFrame {
++    pub(crate) intensities: [f32; 9],
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(crate) struct CsaOrbitRaster {
++    pub(crate) width: u16,
++    pub(crate) height: u16,
++    pub(crate) rgba: Vec<u8>,
++}
++
++#[derive(Debug)]
++pub(crate) struct CsaOrbitFrameCache {
++    warmup: Vec<CsaOrbitFrame>,
++    steady: Vec<CsaOrbitFrame>,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum CsaOrbitFrameIndex {
++    Warmup(usize),
++    Steady(usize),
++}
++
++impl CsaOrbitFrameCache {
++    fn new() -> Self {
++        let origin = Instant::now();
++        Self {
++            warmup: sampled_frames(origin, CSA_ORBIT_WARMUP, Duration::ZERO),
++            steady: sampled_frames(origin, ORBIT_DURATION, CSA_ORBIT_WARMUP),
++        }
++    }
++
++    pub(crate) fn warmup(&self) -> &[CsaOrbitFrame] {
++        &self.warmup
++    }
++
++    pub(crate) fn steady(&self) -> &[CsaOrbitFrame] {
++        &self.steady
++    }
++
++    pub(crate) fn frame_index_at(&self, started_at: Instant, now: Instant) -> CsaOrbitFrameIndex {
++        let elapsed = now.saturating_duration_since(started_at);
++        if elapsed < CSA_ORBIT_WARMUP {
++            return CsaOrbitFrameIndex::Warmup(sample_index(elapsed, self.warmup.len()));
++        }
++
++        let phase_ms = (elapsed - CSA_ORBIT_WARMUP).as_millis() % ORBIT_DURATION.as_millis();
++        CsaOrbitFrameIndex::Steady(sample_index(
++            Duration::from_millis(phase_ms as u64),
++            self.steady.len(),
++        ))
++    }
++}
++
++pub(crate) fn csa_orbit_frame_cache() -> &'static CsaOrbitFrameCache {
++    static CACHE: OnceLock<CsaOrbitFrameCache> = OnceLock::new();
++    CACHE.get_or_init(CsaOrbitFrameCache::new)
++}
++
++pub(crate) fn rasterize_csa_orbit(
++    intensities: [f32; 9],
++    width: u16,
++    height: u16,
++    foreground: (u8, u8, u8),
++    background: (u8, u8, u8),
++) -> CsaOrbitRaster {
++    let width = width.max(1);
++    let height = height.max(1);
++    let mut rgba = vec![0; usize::from(width) * usize::from(height) * 4];
++    for pixel in rgba.chunks_exact_mut(4) {
++        pixel.copy_from_slice(&[background.0, background.1, background.2, u8::MAX]);
++    }
++
++    let side = width.min(height);
++    let x_offset = (width - side) / 2;
++    let y_offset = (height - side) / 2;
++    let dot_size = (side / 4).max(1);
++    for row in 0..3u16 {
++        for column in 0..3u16 {
++            let logical_index = usize::from(row * 3 + column);
++            if logical_index == 4 {
++                continue;
++            }
++            let intensity = intensities[logical_index].clamp(0.0, 1.0);
++            let color = blend_rgb(background, foreground, intensity);
++            let center_x = x_offset + ((2 * column + 1) * side) / 6;
++            let center_y = y_offset + ((2 * row + 1) * side) / 6;
++            let start_x = center_x.saturating_sub(dot_size / 2).min(width - dot_size);
++            let start_y = center_y.saturating_sub(dot_size / 2).min(height - dot_size);
++            for y in start_y..start_y + dot_size {
++                for x in start_x..start_x + dot_size {
++                    let offset = (usize::from(y) * usize::from(width) + usize::from(x)) * 4;
++                    rgba[offset..offset + 4].copy_from_slice(&[color.0, color.1, color.2, u8::MAX]);
++                }
++            }
++        }
++    }
++
++    CsaOrbitRaster {
++        width,
++        height,
++        rgba,
++    }
++}
++
++fn sampled_frames(origin: Instant, duration: Duration, offset: Duration) -> Vec<CsaOrbitFrame> {
++    let count = duration
++        .as_millis()
++        .div_ceil(ORBIT_RENDER_INTERVAL.as_millis()) as usize;
++    (0..count)
++        .map(|index| {
++            let elapsed = offset + ORBIT_RENDER_INTERVAL.saturating_mul(index as u32);
++            CsaOrbitFrame {
++                intensities: orbit_intensities_at(origin, origin + elapsed),
++            }
++        })
++        .collect()
++}
++
++fn sample_index(elapsed: Duration, frame_count: usize) -> usize {
++    ((elapsed.as_millis() / ORBIT_RENDER_INTERVAL.as_millis()) as usize)
++        .min(frame_count.saturating_sub(1))
++}
++
++fn blend_rgb(from: (u8, u8, u8), to: (u8, u8, u8), intensity: f32) -> (u8, u8, u8) {
++    let blend = |from: u8, to: u8| {
++        (f32::from(from) + (f32::from(to) - f32::from(from)) * intensity).round() as u8
++    };
++    (
++        blend(from.0, to.0),
++        blend(from.1, to.1),
++        blend(from.2, to.2),
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn logical_pixel(raster: &CsaOrbitRaster, row: u16, column: u16) -> [u8; 4] {
++        let side = raster.width.min(raster.height);
++        let x = (raster.width - side) / 2 + ((2 * column + 1) * side) / 6;
++        let y = (raster.height - side) / 2 + ((2 * row + 1) * side) / 6;
++        let offset = (usize::from(y) * usize::from(raster.width) + usize::from(x)) * 4;
++        raster.rgba[offset..offset + 4].try_into().unwrap()
++    }
++
++    #[test]
++    fn raster_preserves_all_perimeter_inputs_and_blank_center() {
++        let intensities = [0.1, 0.2, 0.3, 0.4, 1.0, 0.5, 0.6, 0.7, 0.8];
++        let raster = rasterize_csa_orbit(intensities, 12, 12, (255, 255, 255), (0, 0, 0));
++
++        for row in 0..3 {
++            for column in 0..3 {
++                let pixel = logical_pixel(&raster, row, column);
++                if (row, column) == (1, 1) {
++                    assert_eq!(pixel, [0, 0, 0, 255]);
++                } else {
++                    let expected =
++                        (intensities[usize::from(row * 3 + column)] * 255.0).round() as u8;
++                    assert_eq!(pixel, [expected, expected, expected, 255]);
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn raster_keeps_continuous_brightness_levels_distinct() {
++        let raster = rasterize_csa_orbit(
++            [0.2, 0.4, 0.7, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
++            12,
++            12,
++            (255, 255, 255),
++            (0, 0, 0),
++        );
++        assert_eq!(
++            [
++                logical_pixel(&raster, 0, 0)[0],
++                logical_pixel(&raster, 0, 1)[0],
++                logical_pixel(&raster, 0, 2)[0],
++                logical_pixel(&raster, 1, 0)[0],
++            ],
++            [51, 102, 179, 255]
++        );
++    }
++
++    #[test]
++    fn frame_cache_samples_the_shared_motion_model() {
++        let cache = CsaOrbitFrameCache::new();
++        let origin = Instant::now();
++        assert_eq!(cache.warmup.len(), 20);
++        assert_eq!(cache.steady.len(), 24);
++        for (index, frame) in cache.warmup.iter().enumerate() {
++            assert_eq!(
++                frame.intensities,
++                orbit_intensities_at(
++                    origin,
++                    origin + ORBIT_RENDER_INTERVAL.saturating_mul(index as u32)
++                )
++            );
++        }
++    }
++}
+diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
+index d4c510916..5066dac5e 100644
+--- a/codex-rs/tui/src/lib.rs
++++ b/codex-rs/tui/src/lib.rs
+@@ -112,6 +112,8 @@ mod clipboard_paste;
+ mod collaboration_modes;
+ mod color;
+ mod config_update;
++mod csa_graphics;
++mod csa_orbit;
+ pub(crate) mod custom_terminal;
+ mod pets;
+ pub use custom_terminal::Terminal;
+@@ -964,7 +966,7 @@ async fn run_ratatui_app(
+     strict_config: bool,
+     app_server_target: AppServerTarget,
+     remote_cwd_override: Option<PathBuf>,
+-    initial_config: Config,
++    mut initial_config: Config,
+     manually_selected_oss_provider: Option<String>,
+     overrides: ConfigOverrides,
+     cli_kv_overrides: Vec<(String, toml::Value)>,
+@@ -979,6 +981,16 @@ async fn run_ratatui_app(
+     let workload_identity_selected = is_workload_identity_selected();
+     color_eyre::install()?;
+ 
++    if matches!(
++        codex_terminal_detection::terminal_info().name,
++        codex_terminal_detection::TerminalName::VsCode
++    ) {
++        initial_config.startup_warnings.push(
++            "CSA Orbit graphics in VS Code require `terminal.integrated.enableImages: true`; restart the integrated terminal after enabling it."
++                .to_string(),
++        );
++    }
++
+     tooltips::announcement::prewarm(initial_config.http_client_factory());
+ 
+     // Forward panic reports through tracing so they appear in the UI status
+diff --git a/codex-rs/tui/src/pets/image_protocol.rs b/codex-rs/tui/src/pets/image_protocol.rs
+index 06b6fc77b..0fd189497 100644
+--- a/codex-rs/tui/src/pets/image_protocol.rs
++++ b/codex-rs/tui/src/pets/image_protocol.rs
+@@ -178,7 +178,7 @@ fn is_iterm2_terminal(info: &TerminalInfo) -> bool {
+ fn supports_kitty_graphics(info: &TerminalInfo) -> bool {
+     matches!(
+         info.name,
+-        TerminalName::Ghostty | TerminalName::Kitty | TerminalName::WezTerm
++        TerminalName::Ghostty | TerminalName::Kitty | TerminalName::VsCode | TerminalName::WezTerm
+     ) || terminal_field_contains(info.term.as_deref(), "kitty")
+         || terminal_field_contains(info.term.as_deref(), "ghostty")
+         || terminal_field_contains(info.term.as_deref(), "wezterm")
+@@ -228,27 +228,27 @@ pub fn kitty_transmit_png_with_id(
+ ) -> Result<String> {
+     let png = fs::read(path).with_context(|| format!("read {}", path.display()))?;
+     let payload = general_purpose::STANDARD.encode(png);
+-    let chunks = payload
+-        .as_bytes()
+-        .chunks(KITTY_CHUNK_SIZE)
+-        .collect::<Vec<_>>();
++    let image_id = kitty_image_id_arg(image_id);
++    Ok(kitty_transmit_base64(
++        &payload,
++        &format!("a=T,t=d,f=100,c={columns},r={rows},q=2{image_id}"),
++    ))
++}
+ 
+-    let mut command = String::new();
+-    for (index, chunk) in chunks.iter().enumerate() {
+-        let chunk = std::str::from_utf8(chunk).context("base64 payload is not valid UTF-8")?;
+-        let has_more = index + 1 < chunks.len();
+-        let more_flag = u8::from(has_more);
+-        if index == 0 {
+-            let image_id = kitty_image_id_arg(image_id);
+-            command.push_str(&format!(
+-                "{ESC}_Ga=T,t=d,f=100,c={columns},r={rows},q=2{image_id},m={more_flag};{chunk}{ST}",
+-            ));
+-        } else {
+-            command.push_str(&format!("{ESC}_Gm={more_flag};{chunk}{ST}"));
+-        }
+-    }
++pub(crate) fn kitty_encode_csa_rgba(rgba: &[u8]) -> String {
++    general_purpose::STANDARD.encode(rgba)
++}
+ 
+-    Ok(wrap_for_tmux_if_needed(&command))
++pub(crate) fn kitty_transmit_csa_rgba_with_id(
++    payload: &str,
++    width: u16,
++    height: u16,
++    image_id: u32,
++) -> String {
++    kitty_transmit_base64(
++        payload,
++        &format!("a=T,t=d,f=32,s={width},v={height},c=1,r=1,q=2,i={image_id}"),
++    )
+ }
+ 
+ pub fn kitty_transmit_png_file_with_id(
+@@ -273,6 +273,24 @@ fn kitty_image_id_arg(image_id: Option<u32>) -> String {
+         .unwrap_or_default()
+ }
+ 
++fn kitty_transmit_base64(payload: &str, first_control: &str) -> String {
++    let chunks = payload
++        .as_bytes()
++        .chunks(KITTY_CHUNK_SIZE)
++        .collect::<Vec<_>>();
++    let mut command = String::new();
++    for (index, chunk) in chunks.iter().enumerate() {
++        let chunk = String::from_utf8_lossy(chunk);
++        let more_flag = u8::from(index + 1 < chunks.len());
++        if index == 0 {
++            command.push_str(&format!("{ESC}_G{first_control},m={more_flag};{chunk}{ST}"));
++        } else {
++            command.push_str(&format!("{ESC}_Gm={more_flag};{chunk}{ST}"));
++        }
++    }
++    wrap_for_tmux_if_needed(&command)
++}
++
+ fn wrap_for_tmux_if_needed(command: &str) -> String {
+     if env::var_os("TMUX").is_none() {
+         return command.to_string();
+@@ -358,6 +376,18 @@ mod tests {
+         assert!(command.ends_with("\x1b\\"));
+     }
+ 
++    #[test]
++    #[serial]
++    fn kitty_csa_rgba_transmission_keeps_raw_frame_dimensions() {
++        let _guard = EnvVarGuard::new("TMUX", /*value*/ None);
++        let payload = kitty_encode_csa_rgba(&[1, 2, 3, 4]);
++        let command = kitty_transmit_csa_rgba_with_id(&payload, 12, 16, 7);
++
++        assert!(command.starts_with("\x1b_Ga=T,t=d,f=32,s=12,v=16,c=1,r=1,q=2,i=7,m=0;"));
++        assert!(command.contains("AQIDBA=="));
++        assert!(command.ends_with("\x1b\\"));
++    }
++
+     #[test]
+     #[serial]
+     fn tmux_passthrough_wraps_and_escapes_control_sequence() {
+@@ -521,6 +551,12 @@ mod tests {
+                 Some("WezTerm"),
+                 /*term*/ None,
+             ),
++            terminal_info_for_test(
++                TerminalName::VsCode,
++                /*multiplexer*/ None,
++                Some("vscode"),
++                Some("xterm-256color"),
++            ),
+             terminal_info_for_test(
+                 TerminalName::Unknown,
+                 /*multiplexer*/ None,
+diff --git a/codex-rs/tui/src/pets/mod.rs b/codex-rs/tui/src/pets/mod.rs
+index 79f620b47..5ff830299 100644
+--- a/codex-rs/tui/src/pets/mod.rs
++++ b/codex-rs/tui/src/pets/mod.rs
+@@ -19,11 +19,11 @@ mod ambient;
+ mod asset_pack;
+ mod catalog;
+ mod frames;
+-mod image_protocol;
++pub(crate) mod image_protocol;
+ mod model;
+ mod picker;
+ mod preview;
+-mod sixel;
++pub(crate) mod sixel;
+ 
+ use anyhow::Context;
+ use anyhow::Result;
+diff --git a/codex-rs/tui/src/startup_draft.rs b/codex-rs/tui/src/startup_draft.rs
+index aefed5d87..f62f83925 100644
+--- a/codex-rs/tui/src/startup_draft.rs
++++ b/codex-rs/tui/src/startup_draft.rs
+@@ -378,14 +378,19 @@ impl StartupDraftPump {
+         let renderable =
+             startup_draft_renderable(&self.header, &self.bottom_pane, self.session_action);
+         let desired_height = renderable.desired_height(screen_size.width);
+-        tui.draw_with_resize_reflow(desired_height, screen_size, |frame| {
+-            let area = frame.area();
+-            renderable.render(area, frame.buffer);
+-            if let Some((x, y)) = renderable.cursor_pos(area) {
+-                frame.set_cursor_style(renderable.cursor_style(area));
+-                frame.set_cursor_position((x, y));
+-            }
+-        })
++        tui.draw_with_resize_reflow(
++            desired_height,
++            screen_size,
++            |frame| {
++                let area = frame.area();
++                renderable.render(area, frame.buffer);
++                if let Some((x, y)) = renderable.cursor_pos(area) {
++                    frame.set_cursor_style(renderable.cursor_style(area));
++                    frame.set_cursor_position((x, y));
++                }
++            },
++            Vec::new,
++        )
+     }
+ }
+ 
+diff --git a/codex-rs/tui/src/subagent_live_panel.rs b/codex-rs/tui/src/subagent_live_panel.rs
+index c447f5135..7c9a0a643 100644
+--- a/codex-rs/tui/src/subagent_live_panel.rs
++++ b/codex-rs/tui/src/subagent_live_panel.rs
+@@ -3,12 +3,13 @@
+ use crate::app::ActivityStatus;
+ use crate::app::LiveAgentState;
+ use crate::app::LiveAgentStatus;
++use crate::csa_graphics::CsaOrbitPlacement;
+ use crate::history_cell::sanitize_user_text;
+ use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
+-use crate::motion::orbit_intensities_at;
+ use crate::render::renderable::Renderable;
+ use codex_protocol::ThreadId;
+ use ratatui::buffer::Buffer;
++use ratatui::buffer::CellDiffOption;
+ use ratatui::layout::Rect;
+ use ratatui::layout::Size;
+ use ratatui::style::Stylize;
+@@ -18,14 +19,11 @@ use ratatui::widgets::Clear;
+ use ratatui::widgets::Widget;
+ use std::borrow::Cow;
+ use std::cell::RefCell;
+-use std::time::Instant;
+ 
+ const MIN_CONVERSATION_HEIGHT: u16 = 8;
+ const PANEL_HARD_CAP: u16 = 12;
+ const FULL_MODE_MIN_WIDTH: u16 = 96;
+ const COMPACT_MODE_MIN_WIDTH: u16 = 72;
+-const ORBIT_GRID_HEIGHT: u16 = 3;
+-const ORBIT_VISIBLE_THRESHOLD: f32 = 0.08;
+ 
+ #[derive(Clone, Copy, Debug, Eq, PartialEq)]
+ pub(crate) enum LivePanelMode {
+@@ -92,6 +90,7 @@ pub(crate) struct LivePanelFrame {
+     mode: Option<LivePanelMode>,
+     hidden_count: usize,
+     hit_regions: Vec<LiveAgentHitRegion>,
++    csa_orbit_placements: Vec<CsaOrbitPlacement>,
+ }
+ 
+ #[allow(dead_code)] // TUI-06 consumes revisioned hit testing; TUI-05 verifies the contract.
+@@ -120,6 +119,10 @@ impl LivePanelFrame {
+         &self.hit_regions
+     }
+ 
++    pub(crate) fn csa_orbit_placements(&self) -> &[CsaOrbitPlacement] {
++        &self.csa_orbit_placements
++    }
++
+     pub(crate) fn prepare_resize(&mut self, screen_size: Size) {
+         if self.screen_size != Some(screen_size) {
+             self.clear_visible_frame();
+@@ -153,7 +156,10 @@ impl LivePanelFrame {
+     }
+ 
+     fn clear_visible_frame(&mut self) {
+-        if self.panel_rect.is_some() || !self.hit_regions.is_empty() {
++        if self.panel_rect.is_some()
++            || !self.hit_regions.is_empty()
++            || !self.csa_orbit_placements.is_empty()
++        {
+             self.render_revision = self.render_revision.wrapping_add(1);
+         }
+         self.state_revision = 0;
+@@ -161,8 +167,10 @@ impl LivePanelFrame {
+         self.mode = None;
+         self.hidden_count = 0;
+         self.hit_regions.clear();
++        self.csa_orbit_placements.clear();
+     }
+ 
++    #[allow(clippy::too_many_arguments)]
+     fn publish(
+         &mut self,
+         screen_size: Size,
+@@ -171,6 +179,7 @@ impl LivePanelFrame {
+         mode: LivePanelMode,
+         hidden_count: usize,
+         regions: Vec<(ThreadId, Rect)>,
++        csa_orbit_placements: Vec<CsaOrbitPlacement>,
+     ) {
+         self.render_revision = self.render_revision.wrapping_add(1);
+         self.state_revision = state_revision;
+@@ -187,6 +196,7 @@ impl LivePanelFrame {
+                 state_revision,
+             })
+             .collect();
++        self.csa_orbit_placements = csa_orbit_placements;
+     }
+ }
+ 
+@@ -196,6 +206,7 @@ pub(crate) struct SubagentLivePanelRenderable<'a> {
+     bottom_pane_height: u16,
+     color_enabled: bool,
+     animations_enabled: bool,
++    csa_graphics_enabled: bool,
+     frame: &'a RefCell<LivePanelFrame>,
+ }
+ 
+@@ -206,6 +217,7 @@ impl<'a> SubagentLivePanelRenderable<'a> {
+         bottom_pane_height: u16,
+         color_enabled: bool,
+         animations_enabled: bool,
++        csa_graphics_enabled: bool,
+         frame: &'a RefCell<LivePanelFrame>,
+     ) -> Self {
+         Self {
+@@ -214,6 +226,7 @@ impl<'a> SubagentLivePanelRenderable<'a> {
+             bottom_pane_height,
+             color_enabled,
+             animations_enabled,
++            csa_graphics_enabled,
+             frame,
+         }
+     }
+@@ -235,11 +248,7 @@ impl<'a> SubagentLivePanelRenderable<'a> {
+         }
+ 
+         let full_height = self.snapshot.agents.iter().fold(0u16, |height, agent| {
+-            height.saturating_add(agent_block_height(
+-                agent,
+-                /*recent_limit*/ 3,
+-                self.animations_enabled,
+-            ))
++            height.saturating_add(agent_block_height(agent, /*recent_limit*/ 3))
+         });
+         if width >= FULL_MODE_MIN_WIDTH && panel_cap >= 4 && full_height <= panel_cap {
+             return Some(PanelPlan {
+@@ -255,8 +264,7 @@ impl<'a> SubagentLivePanelRenderable<'a> {
+             let mut height = 0u16;
+             let mut visible_count = 0usize;
+             for (index, agent) in self.snapshot.agents.iter().enumerate() {
+-                let block_height =
+-                    agent_block_height(agent, /*recent_limit*/ 1, self.animations_enabled);
++                let block_height = agent_block_height(agent, /*recent_limit*/ 1);
+                 let footer_height = u16::from(index + 1 < self.snapshot.agents.len());
+                 if height
+                     .saturating_add(block_height)
+@@ -296,17 +304,46 @@ impl<'a> SubagentLivePanelRenderable<'a> {
+         line.render(Rect::new(area.x, y, area.width, 1), buf);
+     }
+ 
+-    fn render_full(&self, plan: PanelPlan, area: Rect, buf: &mut Buffer) -> Vec<(ThreadId, Rect)> {
++    fn render_agent_header(
++        &self,
++        agent: &LivePanelAgent<'_>,
++        y: u16,
++        area: Rect,
++        buf: &mut Buffer,
++        placements: &mut Vec<CsaOrbitPlacement>,
++    ) {
++        let use_csa_graphics =
++            self.animations_enabled && self.csa_graphics_enabled && agent.is_animating();
++        self.render_line(
++            agent_header_line(agent, self.color_enabled, use_csa_graphics),
++            y,
++            area,
++            buf,
++        );
++        if use_csa_graphics && area.width > 0 && y < area.bottom() {
++            buf[(area.x, y)].set_diff_option(CellDiffOption::Skip);
++            placements.push(CsaOrbitPlacement {
++                thread_id: agent.thread_id,
++                x: area.x,
++                y,
++                animation_started_at: agent.state.animation_started_at(),
++            });
++        }
++    }
++
++    fn render_full(
++        &self,
++        plan: PanelPlan,
++        area: Rect,
++        buf: &mut Buffer,
++    ) -> (Vec<(ThreadId, Rect)>, Vec<CsaOrbitPlacement>) {
+         let mut y = area.y;
+         let mut regions = Vec::with_capacity(plan.visible_count);
+-        let now = Instant::now();
++        let mut placements = Vec::with_capacity(plan.visible_count);
+         for agent in self.snapshot.agents.iter().take(plan.visible_count) {
+             let block_start = y;
+-            for line in agent_header_lines(agent, self.color_enabled, self.animations_enabled, now)
+-            {
+-                self.render_line(line, y, area, buf);
+-                y = y.saturating_add(1);
+-            }
++            self.render_agent_header(agent, y, area, buf, &mut placements);
++            y = y.saturating_add(1);
+             if let Some(line) = terminal_line(agent.state, self.color_enabled) {
+                 self.render_line(line, y, area, buf);
+                 y = y.saturating_add(1);
+@@ -337,7 +374,7 @@ impl<'a> SubagentLivePanelRenderable<'a> {
+                 ),
+             ));
+         }
+-        regions
++        (regions, placements)
+     }
+ 
+     fn render_compact(
+@@ -345,17 +382,14 @@ impl<'a> SubagentLivePanelRenderable<'a> {
+         plan: PanelPlan,
+         area: Rect,
+         buf: &mut Buffer,
+-    ) -> Vec<(ThreadId, Rect)> {
++    ) -> (Vec<(ThreadId, Rect)>, Vec<CsaOrbitPlacement>) {
+         let mut y = area.y;
+         let mut regions = Vec::with_capacity(plan.visible_count);
+-        let now = Instant::now();
++        let mut placements = Vec::with_capacity(plan.visible_count);
+         for agent in self.snapshot.agents.iter().take(plan.visible_count) {
+             let block_start = y;
+-            for line in agent_header_lines(agent, self.color_enabled, self.animations_enabled, now)
+-            {
+-                self.render_line(line, y, area, buf);
+-                y = y.saturating_add(1);
+-            }
++            self.render_agent_header(agent, y, area, buf, &mut placements);
++            y = y.saturating_add(1);
+             if let Some(line) = terminal_line(agent.state, self.color_enabled) {
+                 self.render_line(line, y, area, buf);
+                 y = y.saturating_add(1);
+@@ -389,7 +423,7 @@ impl<'a> SubagentLivePanelRenderable<'a> {
+                 buf,
+             );
+         }
+-        regions
++        (regions, placements)
+     }
+ 
+     fn render_minimal(&self, area: Rect, buf: &mut Buffer) -> Vec<(ThreadId, Rect)> {
+@@ -418,10 +452,10 @@ impl Renderable for SubagentLivePanelRenderable<'_> {
+ 
+         let panel_rect = Rect::new(area.x, area.y, area.width, area.height.min(plan.height));
+         Clear.render(panel_rect, buf);
+-        let regions = match plan.mode {
++        let (regions, csa_orbit_placements) = match plan.mode {
+             LivePanelMode::Full => self.render_full(plan, panel_rect, buf),
+             LivePanelMode::Compact => self.render_compact(plan, panel_rect, buf),
+-            LivePanelMode::Minimal => self.render_minimal(panel_rect, buf),
++            LivePanelMode::Minimal => (self.render_minimal(panel_rect, buf), Vec::new()),
+         };
+         self.frame.borrow_mut().publish(
+             self.screen_size,
+@@ -430,6 +464,7 @@ impl Renderable for SubagentLivePanelRenderable<'_> {
+             plan.mode,
+             plan.hidden_count,
+             regions,
++            csa_orbit_placements,
+         );
+     }
+ 
+@@ -447,11 +482,7 @@ struct PanelPlan {
+     show_footer: bool,
+ }
+ 
+-fn agent_block_height(
+-    agent: &LivePanelAgent<'_>,
+-    recent_limit: usize,
+-    animations_enabled: bool,
+-) -> u16 {
++fn agent_block_height(agent: &LivePanelAgent<'_>, recent_limit: usize) -> u16 {
+     let details = if matches!(
+         agent.state.lifecycle(),
+         LiveAgentStatus::Failed | LiveAgentStatus::Cancelled | LiveAgentStatus::Completed
+@@ -460,41 +491,26 @@ fn agent_block_height(
+     } else {
+         agent.state.recent().len().min(recent_limit)
+     };
+-    agent_header_height(agent, animations_enabled)
+-        .saturating_add(u16::try_from(details).unwrap_or(u16::MAX))
++    1u16.saturating_add(u16::try_from(details).unwrap_or(u16::MAX))
+ }
+ 
+-fn agent_header_height(agent: &LivePanelAgent<'_>, animations_enabled: bool) -> u16 {
+-    if animations_enabled && agent.is_animating() {
+-        ORBIT_GRID_HEIGHT
+-    } else {
+-        1
+-    }
+-}
+-
+-fn agent_header_lines(
++fn agent_header_line(
+     agent: &LivePanelAgent<'_>,
+     color_enabled: bool,
+-    animations_enabled: bool,
+-    now: Instant,
+-) -> Vec<Line<'static>> {
++    use_csa_graphics: bool,
++) -> Line<'static> {
+     let lifecycle = agent.state.lifecycle();
+-    if animations_enabled
+-        && matches!(
+-            lifecycle,
+-            LiveAgentStatus::Starting | LiveAgentStatus::Running
+-        )
+-    {
+-        return animated_agent_header_lines(agent, color_enabled, now);
+-    }
+-
+-    let mut symbol: Span<'static> = match lifecycle {
+-        LiveAgentStatus::Starting | LiveAgentStatus::Running => "◌".dim(),
+-        LiveAgentStatus::WaitingApproval => "!".into(),
+-        LiveAgentStatus::Waiting => "◌".into(),
+-        LiveAgentStatus::Failed => "✗".into(),
+-        LiveAgentStatus::Cancelled => "×".into(),
+-        LiveAgentStatus::Completed => "✓".into(),
++    let mut symbol: Span<'static> = if use_csa_graphics {
++        " ".into()
++    } else {
++        match lifecycle {
++            LiveAgentStatus::Starting | LiveAgentStatus::Running => "◌".dim(),
++            LiveAgentStatus::WaitingApproval => "!".into(),
++            LiveAgentStatus::Waiting => "◌".into(),
++            LiveAgentStatus::Failed => "✗".into(),
++            LiveAgentStatus::Cancelled => "×".into(),
++            LiveAgentStatus::Completed => "✓".into(),
++        }
+     };
+     if color_enabled {
+         symbol = match lifecycle {
+@@ -522,54 +538,7 @@ fn agent_header_lines(
+         spans.push("  ".into());
+         spans.push(status_span(state_word, lifecycle, color_enabled));
+     }
+-    vec![Line::from(spans)]
+-}
+-
+-fn animated_agent_header_lines(
+-    agent: &LivePanelAgent<'_>,
+-    color_enabled: bool,
+-    now: Instant,
+-) -> Vec<Line<'static>> {
+-    let intensities = orbit_intensities_at(agent.state.animation_started_at(), now);
+-    let label = match sanitized_single_line(&agent.label) {
+-        label if label.is_empty() => "Agent".to_string(),
+-        label => label,
+-    };
+-
+-    (0..3)
+-        .map(|row| {
+-            let mut spans = Vec::with_capacity(7);
+-            for column in 0..3 {
+-                spans.push(orbit_pixel_span(
+-                    intensities[row * 3 + column],
+-                    color_enabled,
+-                ));
+-                if column < 2 {
+-                    spans.push(" ".into());
+-                }
+-            }
+-            if row == 1 {
+-                spans.push("  ".into());
+-                spans.push(label.clone().bold());
+-            }
+-            Line::from(spans)
+-        })
+-        .collect()
+-}
+-
+-fn orbit_pixel_span(intensity: f32, _color_enabled: bool) -> Span<'static> {
+-    if intensity < ORBIT_VISIBLE_THRESHOLD {
+-        return " ".into();
+-    }
+-
+-    let pixel = Span::raw("▪");
+-    if intensity < 0.55 {
+-        pixel.dim()
+-    } else if intensity > 0.90 {
+-        pixel.bold()
+-    } else {
+-        pixel
+-    }
++    Line::from(spans)
+ }
+ 
+ fn activity_line(
+@@ -878,6 +847,23 @@ mod tests {
+             bottom_pane_height: u16,
+             color_enabled: bool,
+             animations_enabled: bool,
++        ) -> Rendered {
++            self.render_with_options(
++                screen_size,
++                bottom_pane_height,
++                color_enabled,
++                animations_enabled,
++                /*csa_graphics_enabled*/ animations_enabled,
++            )
++        }
++
++        fn render_with_options(
++            &self,
++            screen_size: Size,
++            bottom_pane_height: u16,
++            color_enabled: bool,
++            animations_enabled: bool,
++            csa_graphics_enabled: bool,
+         ) -> Rendered {
+             let frame = RefCell::new(LivePanelFrame::default());
+             let (text, buffer, desired_height) = self.render_with_frame_and_animations(
+@@ -885,6 +871,7 @@ mod tests {
+                 bottom_pane_height,
+                 color_enabled,
+                 animations_enabled,
++                csa_graphics_enabled,
+                 &frame,
+             );
+             Rendered {
+@@ -895,28 +882,13 @@ mod tests {
+             }
+         }
+ 
+-        fn render_with_frame(
+-            &self,
+-            screen_size: Size,
+-            bottom_pane_height: u16,
+-            color_enabled: bool,
+-            frame: &RefCell<LivePanelFrame>,
+-        ) -> (String, Buffer, u16) {
+-            self.render_with_frame_and_animations(
+-                screen_size,
+-                bottom_pane_height,
+-                color_enabled,
+-                /*animations_enabled*/ false,
+-                frame,
+-            )
+-        }
+-
+         fn render_with_frame_and_animations(
+             &self,
+             screen_size: Size,
+             bottom_pane_height: u16,
+             color_enabled: bool,
+             animations_enabled: bool,
++            csa_graphics_enabled: bool,
+             frame: &RefCell<LivePanelFrame>,
+         ) -> (String, Buffer, u16) {
+             let now = Instant::now();
+@@ -937,6 +909,7 @@ mod tests {
+                 bottom_pane_height,
+                 color_enabled,
+                 animations_enabled,
++                csa_graphics_enabled,
+                 frame,
+             );
+             let desired_height = panel.desired_height(screen_size.width);
+@@ -1136,30 +1109,23 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn animated_orbit_uses_three_rows_and_terminal_reflows() {
++    fn animated_orbit_reserves_one_cell_without_moving_the_label() {
+         let mut fixture = Fixture::new();
+         let id = fixture.add_agent("Orbit agent", LiveAgentStatus::Running);
+         let running = fixture.render_animated(Size::new(120, 40), 4, false);
+ 
+-        assert_eq!(running.desired_height, 3);
+-        assert_eq!(running.frame.hit_regions()[0].rect, Rect::new(0, 0, 120, 3));
+-        assert_eq!(running.buffer[(2, 1)].symbol(), " ", "center stays empty");
+-        assert_eq!(running.buffer[(7, 1)].symbol(), "O", "label stays centered");
+-        let pixels = running
+-            .buffer
+-            .content
+-            .iter()
+-            .filter(|cell| cell.symbol() == "▪")
+-            .collect::<Vec<_>>();
+-        assert!(
+-            pixels.len() > 1,
+-            "one frame must show a fading multi-pixel comet"
+-        );
+-        assert!(
+-            pixels
+-                .windows(2)
+-                .any(|pair| pair[0].style() != pair[1].style()),
+-            "simultaneous pixels must retain different brightness styles"
++        assert_eq!(running.desired_height, 1);
++        assert_eq!(running.frame.hit_regions()[0].rect, Rect::new(0, 0, 120, 1));
++        assert_eq!(running.buffer[(2, 0)].symbol(), "O");
++        assert_eq!(running.buffer[(0, 0)].diff_option, CellDiffOption::Skip);
++        assert_eq!(
++            running.frame.csa_orbit_placements(),
++            &[CsaOrbitPlacement {
++                thread_id: id,
++                x: 0,
++                y: 0,
++                animation_started_at: fixture.state.agent(id).unwrap().animation_started_at(),
++            }]
+         );
+ 
+         fixture.complete_with_stats(
+@@ -1176,30 +1142,48 @@ mod tests {
+             completed.frame.hit_regions()[0].rect,
+             Rect::new(0, 0, 120, 2)
+         );
+-        assert!(!completed.text.contains('▪'));
++        assert!(completed.frame.csa_orbit_placements().is_empty());
++        assert_ne!(completed.buffer[(0, 0)].diff_option, CellDiffOption::Skip);
++        assert_eq!(completed.buffer[(2, 0)].symbol(), "O");
+         assert!(completed.text.contains("└─ Done"));
+     }
+ 
+     #[test]
+-    fn orbit_brightness_uses_theme_foreground_modifiers() {
+-        let tail = orbit_pixel_span(0.25, true);
+-        let body = orbit_pixel_span(0.70, true);
+-        let head = orbit_pixel_span(0.95, true);
++    fn animated_orbit_uses_one_shared_placement_per_running_agent() {
++        let mut fixture = Fixture::new();
++        fixture.add_agent("A", LiveAgentStatus::Running);
++        fixture.add_agent("B", LiveAgentStatus::Running);
++        fixture.add_agent("C", LiveAgentStatus::Running);
+ 
+-        assert_eq!(tail.style.fg, None);
+-        assert!(
+-            tail.style
+-                .add_modifier
+-                .contains(ratatui::style::Modifier::DIM)
++        let rendered = fixture.render_animated(Size::new(120, 40), 4, false);
++        assert_eq!(rendered.desired_height, 3);
++        assert_eq!(rendered.frame.csa_orbit_placements().len(), 3);
++        assert_eq!(
++            rendered
++                .frame
++                .csa_orbit_placements()
++                .iter()
++                .map(|placement| (placement.x, placement.y))
++                .collect::<Vec<_>>(),
++            vec![(0, 0), (0, 1), (0, 2)]
+         );
+-        assert_eq!(body.style.fg, None);
+-        assert!(body.style.add_modifier.is_empty());
+-        assert_eq!(head.style.fg, None);
+-        assert!(
+-            head.style
+-                .add_modifier
+-                .contains(ratatui::style::Modifier::BOLD)
++    }
++
++    #[test]
++    fn animated_orbit_falls_back_without_terminal_graphics() {
++        let mut fixture = Fixture::new();
++        fixture.add_agent("Fallback", LiveAgentStatus::Running);
++
++        let rendered = fixture.render_with_options(
++            Size::new(120, 40),
++            4,
++            false,
++            /*animations_enabled*/ true,
++            /*csa_graphics_enabled*/ false,
+         );
++        assert_eq!(rendered.text, "◌ Fallback");
++        assert!(rendered.frame.csa_orbit_placements().is_empty());
++        assert_ne!(rendered.buffer[(0, 0)].diff_option, CellDiffOption::Skip);
+     }
+ 
+     #[test]
+@@ -1257,12 +1241,27 @@ mod tests {
+         fixture.add_activity(id, "work", "cargo test", ActivityStatus::Running);
+         let frame = RefCell::new(LivePanelFrame::default());
+ 
+-        fixture.render_with_frame(Size::new(120, 40), 4, false, &frame);
++        fixture.render_with_frame_and_animations(
++            Size::new(120, 40),
++            4,
++            false,
++            /*animations_enabled*/ true,
++            /*csa_graphics_enabled*/ true,
++            &frame,
++        );
+         let first_revision = frame.borrow().render_revision();
+         assert_eq!(frame.borrow().hit_test(4, 1, first_revision), Some(id));
+         assert_eq!(frame.borrow().state_revision(), fixture.state.revision());
+-
+-        fixture.render_with_frame(Size::new(120, 40), 4, false, &frame);
++        assert_eq!(frame.borrow().csa_orbit_placements().len(), 1);
++
++        fixture.render_with_frame_and_animations(
++            Size::new(120, 40),
++            4,
++            false,
++            /*animations_enabled*/ true,
++            /*csa_graphics_enabled*/ true,
++            &frame,
++        );
+         let second_revision = frame.borrow().render_revision();
+         assert!(second_revision > first_revision);
+         assert_eq!(frame.borrow().hit_test(4, 1, first_revision), None);
+@@ -1271,9 +1270,18 @@ mod tests {
+         frame.borrow_mut().prepare_resize(Size::new(80, 24));
+         assert_eq!(frame.borrow().panel_rect(), None);
+         assert_eq!(frame.borrow().hit_test(4, 1, second_revision), None);
+-
+-        fixture.render_with_frame(Size::new(80, 24), 4, false, &frame);
++        assert!(frame.borrow().csa_orbit_placements().is_empty());
++
++        fixture.render_with_frame_and_animations(
++            Size::new(80, 24),
++            4,
++            false,
++            /*animations_enabled*/ true,
++            /*csa_graphics_enabled*/ true,
++            &frame,
++        );
+         assert_eq!(frame.borrow().mode(), Some(LivePanelMode::Compact));
+         assert_eq!(frame.borrow().panel_rect(), Some(Rect::new(0, 0, 80, 2)));
++        assert_eq!(frame.borrow().csa_orbit_placements().len(), 1);
+     }
+ }
+diff --git a/codex-rs/tui/src/tui.rs b/codex-rs/tui/src/tui.rs
+index b17926a66..9759177e4 100644
+--- a/codex-rs/tui/src/tui.rs
++++ b/codex-rs/tui/src/tui.rs
+@@ -13,6 +13,7 @@ use std::sync::Arc;
+ use std::sync::atomic::AtomicBool;
+ use std::sync::atomic::Ordering;
+ use std::time::Duration;
++use std::time::Instant;
+ 
+ use crossterm::Command;
+ use crossterm::SynchronizedUpdate;
+@@ -108,6 +109,9 @@ fn should_emit_notification(condition: NotificationCondition, terminal_focused:
+ 
+ impl Drop for Tui {
+     fn drop(&mut self) {
++        if let Err(err) = self.clear_csa_graphics() {
++            tracing::debug!(error = %err, "failed to clear CSA Orbit graphics on TUI drop");
++        }
+         if self.mouse_capture.active()
+             && let Err(err) = self.mouse_capture.force_off()
+         {
+@@ -602,6 +606,7 @@ pub struct Tui {
+     screen_size: ScreenSizePolicy,
+     ambient_pet_image_state: crate::pets::PetImageRenderState,
+     pet_picker_preview_image_state: crate::pets::PetImageRenderState,
++    csa_graphics_state: crate::csa_graphics::CsaGraphicsState,
+     alt_saved_viewport: Option<ratatui::layout::Rect>,
+     #[cfg(unix)]
+     suspend_context: SuspendContext,
+@@ -661,6 +666,7 @@ impl Tui {
+             screen_size: ScreenSizePolicy::default(),
+             ambient_pet_image_state: crate::pets::PetImageRenderState::default(),
+             pet_picker_preview_image_state: crate::pets::PetImageRenderState::default(),
++            csa_graphics_state: crate::csa_graphics::CsaGraphicsState::default(),
+             alt_saved_viewport: None,
+             #[cfg(unix)]
+             suspend_context: SuspendContext::new(),
+@@ -714,6 +720,31 @@ impl Tui {
+         self.frame_requester.clone()
+     }
+ 
++    pub(crate) fn csa_graphics_available(
++        &mut self,
++        animations_enabled: bool,
++        screen_size: Size,
++    ) -> bool {
++        if !animations_enabled {
++            return false;
++        }
++        match self
++            .csa_graphics_state
++            .prepare(self.terminal.backend_mut(), screen_size)
++        {
++            Ok(available) => available,
++            Err(err) => {
++                tracing::warn!(error = %err, "disabling CSA Orbit graphics after prepare failure");
++                self.csa_graphics_state.disable();
++                false
++            }
++        }
++    }
++
++    fn clear_csa_graphics(&mut self) -> io::Result<()> {
++        self.csa_graphics_state.clear(self.terminal.backend_mut())
++    }
++
+     pub fn enhanced_keys_supported(&self) -> bool {
+         self.enhanced_keys_supported
+     }
+@@ -737,6 +768,7 @@ impl Tui {
+     pub(crate) fn recover_after_caught_panic(&mut self) -> Result<()> {
+         let restore_mouse = self.mouse_capture.active();
+         let _ = self.mouse_capture.force_off();
++        let _ = self.clear_csa_graphics();
+         set_modes()?;
+         self._stderr_guard.recover_after_caught_panic()?;
+         if restore_mouse {
+@@ -777,6 +809,9 @@ impl Tui {
+         if let Err(err) = self.mouse_capture.force_off() {
+             tracing::warn!("failed to disable mouse capture before external program: {err}");
+         }
++        if let Err(err) = self.clear_csa_graphics() {
++            tracing::warn!("failed to clear CSA Orbit graphics before external program: {err}");
++        }
+ 
+         // Leave alt screen if active to avoid conflicts with external program `f`.
+         let was_alt_screen = self.is_alt_screen_active();
+@@ -872,6 +907,9 @@ impl Tui {
+         if let Err(err) = self.mouse_capture.force_off() {
+             tracing::warn!("failed to disable mouse capture before entering alt screen: {err}");
+         }
++        if let Err(err) = self.clear_csa_graphics() {
++            tracing::warn!("failed to clear CSA Orbit graphics before entering alt screen: {err}");
++        }
+         let _ = execute!(self.terminal.backend_mut(), EnterAlternateScreen);
+         // Enable "alternate scroll" so terminals may translate wheel to arrows
+         let _ = execute!(self.terminal.backend_mut(), EnableAlternateScroll);
+@@ -898,6 +936,9 @@ impl Tui {
+         if let Err(err) = self.mouse_capture.force_off() {
+             tracing::warn!("failed to disable mouse capture before leaving alt screen: {err}");
+         }
++        if let Err(err) = self.clear_csa_graphics() {
++            tracing::warn!("failed to clear CSA Orbit graphics before leaving alt screen: {err}");
++        }
+         // Disable alternate scroll when leaving alt-screen
+         let _ = execute!(self.terminal.backend_mut(), DisableAlternateScroll);
+         let _ = execute!(self.terminal.backend_mut(), LeaveAlternateScreen);
+@@ -1157,6 +1198,7 @@ impl Tui {
+         height: u16,
+         screen_size: Size,
+         draw_fn: impl FnOnce(&mut custom_terminal::Frame),
++        csa_orbit_placements: impl FnOnce() -> Vec<crate::csa_graphics::CsaOrbitPlacement>,
+     ) -> Result<()> {
+         // If we are resuming from ^Z, we need to prepare the resume action now so we can apply it
+         // in the synchronized update.
+@@ -1165,9 +1207,29 @@ impl Tui {
+             .suspend_context
+             .prepare_resume_action(&mut self.alt_saved_viewport);
+ 
++        let mut csa_graphics_ready = match self
++            .csa_graphics_state
++            .prepare(self.terminal.backend_mut(), screen_size)
++        {
++            Ok(available) => available,
++            Err(err) => {
++                tracing::warn!(error = %err, "disabling CSA Orbit graphics after prepare failure");
++                self.csa_graphics_state.disable();
++                false
++            }
++        };
++        let mut schedule_csa_fallback = false;
++
+         ensure_virtual_terminal_processing()?;
+ 
+-        stdout().sync_update(|_| {
++        let result = stdout().sync_update(|_| {
++            if let Err(err) = self.csa_graphics_state.clear(self.terminal.backend_mut()) {
++                tracing::warn!(error = %err, "disabling CSA Orbit graphics after cleanup failure");
++                self.csa_graphics_state.disable();
++                csa_graphics_ready = false;
++                schedule_csa_fallback = true;
++            }
++
+             #[cfg(unix)]
+             if let Some(prepared) = prepared_resume.take() {
+                 prepared.apply(&mut self.terminal, screen_size)?;
+@@ -1211,8 +1273,27 @@ impl Tui {
+ 
+             terminal.draw_with_size(screen_size, |frame| {
+                 draw_fn(frame);
+-            })
+-        })?
++            })?;
++
++            let placements = csa_orbit_placements();
++            if csa_graphics_ready
++                && let Err(err) = self.csa_graphics_state.draw(
++                    self.terminal.backend_mut(),
++                    &placements,
++                    Instant::now(),
++                )
++            {
++                tracing::warn!(error = %err, "disabling CSA Orbit graphics after draw failure");
++                let _ = self.csa_graphics_state.clear(self.terminal.backend_mut());
++                self.csa_graphics_state.disable();
++                schedule_csa_fallback = true;
++            }
++            Ok(())
++        })?;
++        if schedule_csa_fallback {
++            self.frame_requester().schedule_frame();
++        }
++        result
+     }
+ 
+     fn pending_viewport_area(&mut self, screen_size: Size) -> Result<Option<Rect>> {

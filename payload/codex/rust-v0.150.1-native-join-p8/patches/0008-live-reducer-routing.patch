@@ -1,0 +1,1053 @@
+diff --git a/codex-rs/tui/src/app/session_lifecycle.rs b/codex-rs/tui/src/app/session_lifecycle.rs
+index dde4a1d21..21842f120 100644
+--- a/codex-rs/tui/src/app/session_lifecycle.rs
++++ b/codex-rs/tui/src/app/session_lifecycle.rs
+@@ -610,6 +610,7 @@ impl App {
+         self.primary_session_configured = None;
+         self.pending_primary_events.clear();
+         self.pending_app_server_requests.clear();
++        self.subagent_live.reset();
+         self.pending_startup_thread_start = false;
+         self.chat_widget.set_pending_thread_approvals(Vec::new());
+         self.sync_active_agent_label();
+@@ -888,8 +889,10 @@ impl App {
+             }
+         }
+ 
++        let threads = find_loaded_subagent_threads_for_primary(threads, primary_thread_id);
++        self.reconcile_subagent_live_from_loaded_threads(&threads, !had_read_error);
+         let mut refreshed_thread_ids = HashSet::new();
+-        for thread in find_loaded_subagent_threads_for_primary(threads, primary_thread_id) {
++        for thread in threads {
+             let agent_path = thread.agent_path;
+             let has_live_channel = self
+                 .thread_event_channels
+@@ -927,6 +930,23 @@ impl App {
+         }
+     }
+ 
++    pub(super) fn reconcile_subagent_live_from_loaded_threads(
++        &mut self,
++        threads: &[LoadedSubagentThread],
++        completed: bool,
++    ) {
++        if !completed {
++            return;
++        }
++        let change = self.subagent_live.reconcile_live_agents(
++            threads
++                .iter()
++                .filter(|thread| thread.blocks_direct_input && thread.is_running)
++                .map(|thread| (thread.thread_id, subagent_live::LiveAgentStatus::Running)),
++        );
++        self.schedule_subagent_live_change(change);
++    }
++
+     /// Returns the adjacent thread id for keyboard navigation, backfilling from the server if the
+     /// local cache has no neighbor.
+     ///
+diff --git a/codex-rs/tui/src/app/subagent_live.rs b/codex-rs/tui/src/app/subagent_live.rs
+new file mode 100644
+index 000000000..51055d2d2
+--- /dev/null
++++ b/codex-rs/tui/src/app/subagent_live.rs
+@@ -0,0 +1,853 @@
++//! Pure, bounded projection of live sub-agent activity.
++//!
++//! Navigation order and display metadata remain owned by `AgentNavigationState`; this module
++//! stores only ephemeral lifecycle and compact activity records.
++
++use super::agent_status_feed::ActivityPhase;
++use super::agent_status_feed::ActivityStatus;
++use super::agent_status_feed::ActivitySummary;
++use super::agent_status_feed::WorkActivityInput;
++use super::agent_status_feed::classify_activity;
++use codex_app_server_protocol::ServerNotification;
++use codex_app_server_protocol::ServerRequest;
++use codex_app_server_protocol::TurnStatus;
++use codex_protocol::ThreadId;
++use std::collections::HashMap;
++use std::collections::VecDeque;
++use std::time::Duration;
++use std::time::Instant;
++
++pub(crate) const RECENT_ACTIVITY_LIMIT: usize = 3;
++pub(crate) const TERMINAL_GRACE: Duration = Duration::from_secs(5);
++
++pub(crate) type RecentActivity = WorkActivityInput;
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum LiveAgentStatus {
++    #[allow(dead_code)] // Authoritative hydration can expose this state as sources become richer.
++    Starting,
++    Running,
++    WaitingApproval,
++    #[allow(dead_code)] // Authoritative hydration can expose this state as sources become richer.
++    Waiting,
++    Failed,
++    Cancelled,
++    Completed,
++}
++
++impl LiveAgentStatus {
++    fn is_terminal(self) -> bool {
++        matches!(self, Self::Failed | Self::Cancelled | Self::Completed)
++    }
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++struct ApprovalRef {
++    request_id: String,
++    item_id: Option<String>,
++    previous_agent_status: LiveAgentStatus,
++    previous_activity_status: Option<ActivityStatus>,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) struct LiveAgentState {
++    lifecycle: LiveAgentStatus,
++    recent: VecDeque<RecentActivity>,
++    open_approval: Option<ApprovalRef>,
++    terminal_deadline: Option<Instant>,
++}
++
++impl LiveAgentState {
++    fn new(lifecycle: LiveAgentStatus) -> Self {
++        Self {
++            lifecycle,
++            recent: VecDeque::with_capacity(RECENT_ACTIVITY_LIMIT),
++            open_approval: None,
++            terminal_deadline: None,
++        }
++    }
++
++    pub(crate) fn lifecycle(&self) -> LiveAgentStatus {
++        self.lifecycle
++    }
++
++    pub(crate) fn recent(&self) -> &VecDeque<RecentActivity> {
++        &self.recent
++    }
++
++    pub(crate) fn is_renderable_at(&self, now: Instant) -> bool {
++        match self.lifecycle {
++            LiveAgentStatus::Completed => false,
++            LiveAgentStatus::Failed | LiveAgentStatus::Cancelled => self
++                .terminal_deadline
++                .is_some_and(|deadline| now < deadline),
++            LiveAgentStatus::Starting
++            | LiveAgentStatus::Running
++            | LiveAgentStatus::WaitingApproval
++            | LiveAgentStatus::Waiting => true,
++        }
++    }
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum LiveStateChange {
++    Unchanged,
++    Changed,
++    ChangedWithCleanupDeadline(Instant),
++}
++
++#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
++pub(crate) struct SubagentLiveTelemetry {
++    events_reduced: u64,
++    duplicate_events: u64,
++    conflicting_terminal_events: u64,
++}
++
++#[derive(Debug, Default)]
++pub(crate) struct SubagentLiveState {
++    agents: HashMap<ThreadId, LiveAgentState>,
++    revision: u64,
++    telemetry: SubagentLiveTelemetry,
++}
++
++impl SubagentLiveState {
++    pub(crate) fn revision(&self) -> u64 {
++        self.revision
++    }
++
++    pub(crate) fn agent(&self, thread_id: ThreadId) -> Option<&LiveAgentState> {
++        self.agents.get(&thread_id)
++    }
++
++    #[cfg(test)]
++    pub(crate) fn telemetry(&self) -> SubagentLiveTelemetry {
++        self.telemetry
++    }
++
++    pub(crate) fn has_renderable_rows_at(&self, now: Instant) -> bool {
++        self.agents
++            .values()
++            .any(|agent| agent.is_renderable_at(now))
++    }
++
++    #[cfg(test)]
++    pub(crate) fn nearest_cleanup_deadline(&self) -> Option<Instant> {
++        self.agents
++            .values()
++            .filter_map(|agent| agent.terminal_deadline)
++            .min()
++    }
++
++    #[cfg(test)]
++    pub(crate) fn retained_activity_count(&self) -> usize {
++        self.agents.values().map(|agent| agent.recent.len()).sum()
++    }
++
++    pub(super) fn reduce_notification(
++        &mut self,
++        thread_id: ThreadId,
++        notification: &ServerNotification,
++        now: Instant,
++    ) -> LiveStateChange {
++        match notification {
++            ServerNotification::ItemStarted(notification) => self.reduce_summary(
++                thread_id,
++                classify_activity(&notification.item, ActivityPhase::Started),
++            ),
++            ServerNotification::ItemCompleted(notification) => self.reduce_summary(
++                thread_id,
++                classify_activity(&notification.item, ActivityPhase::Completed),
++            ),
++            ServerNotification::TurnStarted(_) => {
++                self.set_agent_status(thread_id, LiveAgentStatus::Running, now)
++            }
++            ServerNotification::TurnCompleted(notification) => self.set_agent_status(
++                thread_id,
++                match notification.turn.status {
++                    TurnStatus::Completed => LiveAgentStatus::Completed,
++                    TurnStatus::Interrupted => LiveAgentStatus::Cancelled,
++                    TurnStatus::Failed => LiveAgentStatus::Failed,
++                    TurnStatus::InProgress => LiveAgentStatus::Running,
++                },
++                now,
++            ),
++            ServerNotification::ThreadClosed(_) => self.remove_agent(thread_id),
++            ServerNotification::ServerRequestResolved(notification) => {
++                self.resolve_approval(thread_id, &notification.request_id.to_string())
++            }
++            _ => LiveStateChange::Unchanged,
++        }
++    }
++
++    pub(super) fn reduce_request(
++        &mut self,
++        thread_id: ThreadId,
++        request: &ServerRequest,
++    ) -> LiveStateChange {
++        let item_id = match request {
++            ServerRequest::CommandExecutionRequestApproval { params, .. } => {
++                Some(params.item_id.clone())
++            }
++            ServerRequest::FileChangeRequestApproval { params, .. } => Some(params.item_id.clone()),
++            ServerRequest::McpServerElicitationRequest { .. } => None,
++            ServerRequest::PermissionsRequestApproval { params, .. } => {
++                Some(params.item_id.clone())
++            }
++            ServerRequest::ToolRequestUserInput { .. }
++            | ServerRequest::DynamicToolCall { .. }
++            | ServerRequest::ChatgptAuthTokensRefresh { .. }
++            | ServerRequest::AttestationGenerate { .. }
++            | ServerRequest::CurrentTimeRead { .. }
++            | ServerRequest::ApplyPatchApproval { .. }
++            | ServerRequest::ExecCommandApproval { .. } => return LiveStateChange::Unchanged,
++        };
++        self.mark_waiting_approval(thread_id, request.id().to_string(), item_id)
++    }
++
++    pub(super) fn reduce_summary(
++        &mut self,
++        thread_id: ThreadId,
++        summary: Option<ActivitySummary>,
++    ) -> LiveStateChange {
++        match summary {
++            Some(ActivitySummary::Work(activity)) => self.reduce_activity(thread_id, activity),
++            Some(ActivitySummary::Other(_)) | None => LiveStateChange::Unchanged,
++        }
++    }
++
++    pub(crate) fn reduce_activity(
++        &mut self,
++        thread_id: ThreadId,
++        activity: WorkActivityInput,
++    ) -> LiveStateChange {
++        self.telemetry.events_reduced = self.telemetry.events_reduced.saturating_add(1);
++
++        if self
++            .agents
++            .get(&thread_id)
++            .is_some_and(|agent| agent.lifecycle.is_terminal())
++        {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
++
++        let mut changed = false;
++        let mut duplicate = false;
++        let mut conflict = false;
++        let agent = self.agents.entry(thread_id).or_insert_with(|| {
++            changed = true;
++            LiveAgentState::new(LiveAgentStatus::Running)
++        });
++
++        if let Some(approval) = agent
++            .open_approval
++            .take_if(|approval| approval.item_id.as_deref() == Some(activity.id.as_str()))
++        {
++            if agent.lifecycle == LiveAgentStatus::WaitingApproval {
++                agent.lifecycle = approval.previous_agent_status;
++            }
++            changed = true;
++        }
++
++        if let Some(existing) = agent
++            .recent
++            .iter_mut()
++            .find(|existing| existing.id == activity.id)
++        {
++            if activity_status_is_terminal(existing.status) {
++                if activity_status_is_terminal(activity.status)
++                    && existing.status != activity.status
++                {
++                    conflict = true;
++                } else {
++                    duplicate = true;
++                }
++            } else if *existing == activity {
++                duplicate = true;
++            } else {
++                *existing = activity;
++                changed = true;
++            }
++        } else {
++            if agent.recent.len() == RECENT_ACTIVITY_LIMIT
++                && let Some(evicted) = agent.recent.pop_front()
++                && let Some(approval) = agent.open_approval.as_mut()
++                && approval.item_id.as_deref() == Some(evicted.id.as_str())
++            {
++                approval.previous_activity_status = None;
++            }
++            agent.recent.push_back(activity);
++            changed = true;
++        }
++
++        if agent.open_approval.is_none()
++            && matches!(
++                agent.lifecycle,
++                LiveAgentStatus::Starting
++                    | LiveAgentStatus::Waiting
++                    | LiveAgentStatus::WaitingApproval
++            )
++        {
++            agent.lifecycle = LiveAgentStatus::Running;
++            changed = true;
++        }
++
++        if duplicate {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++        }
++        if conflict {
++            self.telemetry.conflicting_terminal_events =
++                self.telemetry.conflicting_terminal_events.saturating_add(1);
++        }
++        self.finish_change(changed)
++    }
++
++    pub(crate) fn set_agent_status(
++        &mut self,
++        thread_id: ThreadId,
++        status: LiveAgentStatus,
++        now: Instant,
++    ) -> LiveStateChange {
++        self.telemetry.events_reduced = self.telemetry.events_reduced.saturating_add(1);
++        if status.is_terminal() {
++            return self.set_terminal(thread_id, status, now);
++        }
++
++        if let Some(agent) = self.agents.get_mut(&thread_id) {
++            if agent.lifecycle.is_terminal() {
++                self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++                return LiveStateChange::Unchanged;
++            }
++            let changed = if let Some(approval) = agent.open_approval.as_mut() {
++                let changed = approval.previous_agent_status != status;
++                approval.previous_agent_status = status;
++                changed
++            } else if agent.lifecycle != status {
++                agent.lifecycle = status;
++                true
++            } else {
++                self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++                false
++            };
++            return self.finish_change(changed);
++        }
++
++        self.agents.insert(thread_id, LiveAgentState::new(status));
++        self.finish_change(true)
++    }
++
++    pub(crate) fn mark_waiting_approval(
++        &mut self,
++        thread_id: ThreadId,
++        request_id: String,
++        item_id: Option<String>,
++    ) -> LiveStateChange {
++        self.telemetry.events_reduced = self.telemetry.events_reduced.saturating_add(1);
++        if self
++            .agents
++            .get(&thread_id)
++            .is_some_and(|agent| agent.lifecycle.is_terminal())
++        {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
++
++        let agent = self
++            .agents
++            .entry(thread_id)
++            .or_insert_with(|| LiveAgentState::new(LiveAgentStatus::Running));
++        if agent.open_approval.as_ref().is_some_and(|approval| {
++            approval.request_id == request_id && approval.item_id == item_id
++        }) {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
++
++        let previous_agent_status = if let Some(previous) = agent.open_approval.take() {
++            restore_approval_activity(agent, &previous);
++            previous.previous_agent_status
++        } else if agent.lifecycle == LiveAgentStatus::WaitingApproval {
++            LiveAgentStatus::Running
++        } else {
++            agent.lifecycle
++        };
++        let previous_activity_status = item_id.as_deref().and_then(|item_id| {
++            let activity = agent.recent.iter_mut().find(|activity| {
++                activity.id == item_id && !activity_status_is_terminal(activity.status)
++            })?;
++            let previous = activity.status;
++            activity.status = ActivityStatus::WaitingApproval;
++            Some(previous)
++        });
++        agent.lifecycle = LiveAgentStatus::WaitingApproval;
++        agent.open_approval = Some(ApprovalRef {
++            request_id,
++            item_id,
++            previous_agent_status,
++            previous_activity_status,
++        });
++        self.finish_change(true)
++    }
++
++    pub(crate) fn resolve_approval(
++        &mut self,
++        thread_id: ThreadId,
++        request_id: &str,
++    ) -> LiveStateChange {
++        self.telemetry.events_reduced = self.telemetry.events_reduced.saturating_add(1);
++        let Some(agent) = self.agents.get_mut(&thread_id) else {
++            return LiveStateChange::Unchanged;
++        };
++        let Some(approval) = agent
++            .open_approval
++            .take_if(|approval| approval.request_id == request_id)
++        else {
++            return LiveStateChange::Unchanged;
++        };
++        if agent.lifecycle == LiveAgentStatus::WaitingApproval {
++            agent.lifecycle = approval.previous_agent_status;
++        }
++        restore_approval_activity(agent, &approval);
++        self.finish_change(true)
++    }
++
++    pub(crate) fn remove_agent(&mut self, thread_id: ThreadId) -> LiveStateChange {
++        self.telemetry.events_reduced = self.telemetry.events_reduced.saturating_add(1);
++        let changed = self.agents.remove(&thread_id).is_some();
++        self.finish_change(changed)
++    }
++
++    pub(crate) fn cleanup_expired(&mut self, now: Instant) -> LiveStateChange {
++        let mut changed = false;
++        for agent in self.agents.values_mut() {
++            if agent
++                .terminal_deadline
++                .is_some_and(|deadline| deadline <= now)
++            {
++                agent.terminal_deadline = None;
++                changed = true;
++            }
++        }
++        self.finish_change(changed)
++    }
++
++    /// Authoritative one-shot hydration may begin a new live epoch for a terminal tombstone.
++    #[cfg(test)]
++    pub(crate) fn hydrate_live_agent(
++        &mut self,
++        thread_id: ThreadId,
++        status: LiveAgentStatus,
++    ) -> LiveStateChange {
++        if status.is_terminal() {
++            let changed = self.agents.remove(&thread_id).is_some();
++            return self.finish_change(changed);
++        }
++        let changed = hydrate_agent(&mut self.agents, thread_id, status);
++        self.finish_change(changed)
++    }
++
++    /// Reconciles once against authoritative live children; it performs no polling or replay.
++    pub(crate) fn reconcile_live_agents(
++        &mut self,
++        live_agents: impl IntoIterator<Item = (ThreadId, LiveAgentStatus)>,
++    ) -> LiveStateChange {
++        let authoritative = live_agents
++            .into_iter()
++            .filter(|(_, status)| !status.is_terminal())
++            .collect::<HashMap<_, _>>();
++        let original_len = self.agents.len();
++        self.agents
++            .retain(|thread_id, _| authoritative.contains_key(thread_id));
++        let mut changed = self.agents.len() != original_len;
++        for (thread_id, status) in authoritative {
++            changed |= hydrate_agent(&mut self.agents, thread_id, status);
++        }
++        self.finish_change(changed)
++    }
++
++    pub(crate) fn reset(&mut self) -> LiveStateChange {
++        let changed = !self.agents.is_empty();
++        self.agents.clear();
++        self.finish_change(changed)
++    }
++
++    fn set_terminal(
++        &mut self,
++        thread_id: ThreadId,
++        status: LiveAgentStatus,
++        now: Instant,
++    ) -> LiveStateChange {
++        if let Some(agent) = self.agents.get(&thread_id)
++            && agent.lifecycle.is_terminal()
++        {
++            if agent.lifecycle == status {
++                self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            } else {
++                self.telemetry.conflicting_terminal_events =
++                    self.telemetry.conflicting_terminal_events.saturating_add(1);
++            }
++            return LiveStateChange::Unchanged;
++        }
++
++        let agent = self
++            .agents
++            .entry(thread_id)
++            .or_insert_with(|| LiveAgentState::new(status));
++        agent.lifecycle = status;
++        agent.recent.clear();
++        agent.open_approval = None;
++        agent.terminal_deadline = match status {
++            LiveAgentStatus::Failed | LiveAgentStatus::Cancelled => Some(now + TERMINAL_GRACE),
++            LiveAgentStatus::Completed => None,
++            _ => unreachable!("set_terminal requires a terminal status"),
++        };
++        self.revision = self.revision.wrapping_add(1);
++        match agent.terminal_deadline {
++            Some(deadline) => LiveStateChange::ChangedWithCleanupDeadline(deadline),
++            None => LiveStateChange::Changed,
++        }
++    }
++
++    fn finish_change(&mut self, changed: bool) -> LiveStateChange {
++        if changed {
++            self.revision = self.revision.wrapping_add(1);
++            LiveStateChange::Changed
++        } else {
++            LiveStateChange::Unchanged
++        }
++    }
++}
++
++fn activity_status_is_terminal(status: ActivityStatus) -> bool {
++    matches!(
++        status,
++        ActivityStatus::Succeeded
++            | ActivityStatus::Failed
++            | ActivityStatus::Declined
++            | ActivityStatus::Cancelled
++    )
++}
++
++fn restore_approval_activity(agent: &mut LiveAgentState, approval: &ApprovalRef) {
++    let Some(previous_status) = approval.previous_activity_status else {
++        return;
++    };
++    let Some(item_id) = approval.item_id.as_deref() else {
++        return;
++    };
++    if let Some(activity) = agent.recent.iter_mut().find(|activity| {
++        activity.id == item_id && activity.status == ActivityStatus::WaitingApproval
++    }) {
++        activity.status = previous_status;
++    }
++}
++
++fn hydrate_agent(
++    agents: &mut HashMap<ThreadId, LiveAgentState>,
++    thread_id: ThreadId,
++    status: LiveAgentStatus,
++) -> bool {
++    let Some(agent) = agents.get_mut(&thread_id) else {
++        agents.insert(thread_id, LiveAgentState::new(status));
++        return true;
++    };
++    let was_terminal = agent.lifecycle.is_terminal();
++    let changed = agent.lifecycle != status
++        || agent.open_approval.is_some()
++        || agent.terminal_deadline.is_some();
++    agent.lifecycle = status;
++    agent.open_approval = None;
++    agent.terminal_deadline = None;
++    if was_terminal {
++        agent.recent.clear();
++    }
++    changed
++}
++
++#[cfg(test)]
++mod tests {
++    use super::super::agent_status_feed::WorkActivityKind;
++    use super::*;
++
++    fn work(id: &str, label: &str, status: ActivityStatus) -> WorkActivityInput {
++        WorkActivityInput {
++            id: id.to_string(),
++            kind: WorkActivityKind::Command,
++            label: label.to_string(),
++            status,
++        }
++    }
++
++    fn ids(state: &SubagentLiveState, thread_id: ThreadId) -> Vec<&str> {
++        state
++            .agent(thread_id)
++            .expect("agent exists")
++            .recent()
++            .iter()
++            .map(|activity| activity.id.as_str())
++            .collect()
++    }
++
++    #[test]
++    fn r01_r04_capacity_is_three_and_order_is_oldest_to_newest() {
++        let thread_id = ThreadId::new();
++        let mut state = SubagentLiveState::default();
++        let mut observed = Vec::new();
++
++        for id in ["1", "2", "3"] {
++            assert_eq!(
++                state.reduce_activity(thread_id, work(id, id, ActivityStatus::Running)),
++                LiveStateChange::Changed
++            );
++            observed.push(
++                ids(&state, thread_id)
++                    .into_iter()
++                    .map(str::to_owned)
++                    .collect::<Vec<_>>(),
++            );
++        }
++        assert_eq!(observed, [vec!["1"], vec!["1", "2"], vec!["1", "2", "3"]]);
++
++        state.reduce_activity(thread_id, work("4", "4", ActivityStatus::Running));
++        assert_eq!(ids(&state, thread_id), ["2", "3", "4"]);
++    }
++
++    #[test]
++    fn r05_r10_same_id_is_monotonic_across_duplicates_and_out_of_order_events() {
++        let thread_id = ThreadId::new();
++        let mut state = SubagentLiveState::default();
++
++        state.reduce_activity(thread_id, work("x", "run x", ActivityStatus::Running));
++        assert_eq!(
++            state.reduce_activity(thread_id, work("x", "run x", ActivityStatus::Running)),
++            LiveStateChange::Unchanged
++        );
++        state.reduce_activity(thread_id, work("x", "run x", ActivityStatus::Succeeded));
++        assert_eq!(ids(&state, thread_id), ["x"]);
++        assert_eq!(
++            state.reduce_activity(thread_id, work("x", "run x", ActivityStatus::Succeeded)),
++            LiveStateChange::Unchanged
++        );
++        assert_eq!(
++            state.reduce_activity(thread_id, work("x", "run x", ActivityStatus::Failed)),
++            LiveStateChange::Unchanged
++        );
++        assert_eq!(
++            state.reduce_activity(thread_id, work("x", "late", ActivityStatus::Running)),
++            LiveStateChange::Unchanged
++        );
++
++        state.reduce_activity(thread_id, work("y", "done first", ActivityStatus::Failed));
++        state.reduce_activity(thread_id, work("y", "late start", ActivityStatus::Running));
++        let y = state
++            .agent(thread_id)
++            .unwrap()
++            .recent()
++            .iter()
++            .find(|activity| activity.id == "y")
++            .unwrap();
++        assert_eq!(y.status, ActivityStatus::Failed);
++        assert_eq!(y.label, "done first");
++        assert_eq!(state.telemetry().duplicate_events, 4);
++        assert_eq!(state.telemetry().conflicting_terminal_events, 1);
++    }
++
++    #[test]
++    fn r11_excluded_summaries_do_not_create_agents_or_consume_slots() {
++        let thread_id = ThreadId::new();
++        let mut state = SubagentLiveState::default();
++
++        assert_eq!(
++            state.reduce_summary(
++                thread_id,
++                Some(ActivitySummary::Other("assistant prose".to_string()))
++            ),
++            LiveStateChange::Unchanged
++        );
++        assert!(state.agent(thread_id).is_none());
++        assert_eq!(state.retained_activity_count(), 0);
++    }
++
++    #[test]
++    fn r12_r14_approval_projection_updates_only_existing_rows_and_never_invents_success() {
++        let thread_id = ThreadId::new();
++        let mut state = SubagentLiveState::default();
++        state.reduce_activity(thread_id, work("x", "run x", ActivityStatus::Running));
++
++        state.mark_waiting_approval(thread_id, "req-1".to_string(), Some("x".to_string()));
++        let agent = state.agent(thread_id).unwrap();
++        assert_eq!(agent.lifecycle(), LiveAgentStatus::WaitingApproval);
++        assert_eq!(agent.recent()[0].status, ActivityStatus::WaitingApproval);
++
++        state.resolve_approval(thread_id, "req-1");
++        let agent = state.agent(thread_id).unwrap();
++        assert_eq!(agent.lifecycle(), LiveAgentStatus::Running);
++        assert_eq!(agent.recent()[0].status, ActivityStatus::Running);
++
++        state.mark_waiting_approval(
++            thread_id,
++            "req-2".to_string(),
++            Some("not-recent".to_string()),
++        );
++        assert_eq!(state.agent(thread_id).unwrap().recent().len(), 1);
++        state.resolve_approval(thread_id, "req-2");
++        assert_eq!(
++            state.agent(thread_id).unwrap().recent()[0].status,
++            ActivityStatus::Running
++        );
++    }
++
++    #[test]
++    fn r15_r16_activity_failure_is_independent_and_agent_terminal_is_bounded() {
++        let thread_id = ThreadId::new();
++        let failed_thread_id = ThreadId::new();
++        let now = Instant::now();
++        let mut state = SubagentLiveState::default();
++
++        state.reduce_activity(
++            thread_id,
++            work("test", "cargo test", ActivityStatus::Failed),
++        );
++        assert_eq!(
++            state.agent(thread_id).unwrap().lifecycle(),
++            LiveAgentStatus::Running
++        );
++
++        assert_eq!(
++            state.set_agent_status(thread_id, LiveAgentStatus::Completed, now),
++            LiveStateChange::Changed
++        );
++        assert!(!state.agent(thread_id).unwrap().is_renderable_at(now));
++        assert!(state.agent(thread_id).unwrap().recent().is_empty());
++
++        let deadline = now + TERMINAL_GRACE;
++        assert_eq!(
++            state.set_agent_status(failed_thread_id, LiveAgentStatus::Failed, now),
++            LiveStateChange::ChangedWithCleanupDeadline(deadline)
++        );
++        assert!(state.agent(failed_thread_id).unwrap().is_renderable_at(now));
++        assert_eq!(state.nearest_cleanup_deadline(), Some(deadline));
++        assert_eq!(
++            state.set_agent_status(failed_thread_id, LiveAgentStatus::Failed, now),
++            LiveStateChange::Unchanged
++        );
++        state.cleanup_expired(deadline);
++        assert!(
++            !state
++                .agent(failed_thread_id)
++                .unwrap()
++                .is_renderable_at(deadline)
++        );
++    }
++
++    #[test]
++    fn r17_r19_identity_is_id_plus_thread_and_changed_text_does_not_reorder() {
++        let a = ThreadId::new();
++        let b = ThreadId::new();
++        let mut state = SubagentLiveState::default();
++
++        state.reduce_activity(a, work("1", "same", ActivityStatus::Running));
++        state.reduce_activity(a, work("2", "same", ActivityStatus::Running));
++        state.reduce_activity(a, work("1", "updated", ActivityStatus::Running));
++        assert_eq!(ids(&state, a), ["1", "2"]);
++        assert_eq!(state.agent(a).unwrap().recent()[0].label, "updated");
++
++        state.reduce_activity(b, work("1", "other thread", ActivityStatus::Failed));
++        assert_eq!(
++            state.agent(a).unwrap().recent()[0].status,
++            ActivityStatus::Running
++        );
++        assert_eq!(
++            state.agent(b).unwrap().recent()[0].status,
++            ActivityStatus::Failed
++        );
++    }
++
++    #[test]
++    fn r20_eight_by_one_hundred_events_retain_at_most_twenty_four_rows() {
++        let threads = (0..8).map(|_| ThreadId::new()).collect::<Vec<_>>();
++        let mut state = SubagentLiveState::default();
++        let started_at = Instant::now();
++
++        for (thread_index, thread_id) in threads.iter().copied().enumerate() {
++            for item_index in 0..25 {
++                let id = format!("{thread_index}-{item_index}");
++                for status in [
++                    ActivityStatus::Running,
++                    ActivityStatus::Running,
++                    ActivityStatus::Succeeded,
++                    ActivityStatus::Running,
++                ] {
++                    state.reduce_activity(thread_id, work(&id, "bounded", status));
++                }
++            }
++            assert_eq!(state.agent(thread_id).unwrap().recent().len(), 3);
++        }
++        let elapsed = started_at.elapsed();
++
++        assert_eq!(state.telemetry().events_reduced, 800);
++        assert_eq!(state.telemetry().duplicate_events, 400);
++        assert_eq!(state.telemetry().conflicting_terminal_events, 0);
++        assert_eq!(state.retained_activity_count(), 24);
++        assert!(
++            elapsed < Duration::from_secs(1),
++            "800 reducer events took {elapsed:?}"
++        );
++    }
++
++    #[test]
++    fn first_agent_terminal_wins_until_authoritative_hydration_starts_a_new_epoch() {
++        let thread_id = ThreadId::new();
++        let now = Instant::now();
++        let mut state = SubagentLiveState::default();
++
++        state.set_agent_status(thread_id, LiveAgentStatus::Cancelled, now);
++        let deadline = state.nearest_cleanup_deadline();
++        assert_eq!(
++            state.set_agent_status(thread_id, LiveAgentStatus::Failed, now),
++            LiveStateChange::Unchanged
++        );
++        assert_eq!(
++            state.agent(thread_id).unwrap().lifecycle(),
++            LiveAgentStatus::Cancelled
++        );
++        assert_eq!(state.nearest_cleanup_deadline(), deadline);
++        assert_eq!(state.telemetry().conflicting_terminal_events, 1);
++
++        state.hydrate_live_agent(thread_id, LiveAgentStatus::Running);
++        assert_eq!(
++            state.agent(thread_id).unwrap().lifecycle(),
++            LiveAgentStatus::Running
++        );
++        assert!(state.nearest_cleanup_deadline().is_none());
++    }
++
++    #[test]
++    fn reconciliation_removes_ghosts_and_historical_empty_sessions_stay_empty() {
++        let live = ThreadId::new();
++        let ghost = ThreadId::new();
++        let hydrated = ThreadId::new();
++        let mut state = SubagentLiveState::default();
++        state.reduce_activity(live, work("a", "live", ActivityStatus::Running));
++        state.reduce_activity(ghost, work("b", "ghost", ActivityStatus::Running));
++
++        state.reconcile_live_agents([
++            (live, LiveAgentStatus::Waiting),
++            (hydrated, LiveAgentStatus::Starting),
++        ]);
++        assert_eq!(
++            state.agent(live).unwrap().lifecycle(),
++            LiveAgentStatus::Waiting
++        );
++        assert!(state.agent(ghost).is_none());
++        assert_eq!(
++            state.agent(hydrated).unwrap().lifecycle(),
++            LiveAgentStatus::Starting
++        );
++
++        state.reconcile_live_agents([]);
++        assert!(!state.has_renderable_rows_at(Instant::now()));
++        assert_eq!(state.retained_activity_count(), 0);
++        assert_eq!(state.reset(), LiveStateChange::Unchanged);
++    }
++}
+diff --git a/codex-rs/tui/src/app/thread_routing.rs b/codex-rs/tui/src/app/thread_routing.rs
+index ed7c5c355..1863d176e 100644
+--- a/codex-rs/tui/src/app/thread_routing.rs
++++ b/codex-rs/tui/src/app/thread_routing.rs
+@@ -7,6 +7,7 @@
+ use super::session_lifecycle::ThreadAttachPresentation;
+ use super::*;
+ use crate::app_event::ThreadTitleDestination;
++use crate::app_server_session::thread_blocks_direct_input;
+ use crate::chatwidget::ThreadInputStateRestoreMode;
+ use crate::session_resume::read_session_model;
+ use codex_app_server_protocol::ThreadStartedNotification;
+@@ -15,6 +16,56 @@ use codex_app_server_protocol::TurnInterruptResponse;
+ use codex_app_server_protocol::WarningNotification;
+ 
+ impl App {
++    fn tracks_live_subagent(&self, thread_id: ThreadId) -> bool {
++        self.primary_thread_id != Some(thread_id)
++            && self.agent_navigation.is_parent_owned(thread_id)
++    }
++
++    pub(super) fn schedule_subagent_live_change(&self, change: subagent_live::LiveStateChange) {
++        match change {
++            subagent_live::LiveStateChange::Unchanged => {}
++            subagent_live::LiveStateChange::Changed => {
++                self.chat_widget.frame_requester.schedule_frame();
++            }
++            subagent_live::LiveStateChange::ChangedWithCleanupDeadline(deadline) => {
++                self.chat_widget.frame_requester.schedule_frame();
++                self.chat_widget
++                    .frame_requester
++                    .schedule_frame_in(deadline.saturating_duration_since(Instant::now()));
++            }
++        }
++    }
++
++    fn reduce_subagent_notification(
++        &mut self,
++        thread_id: ThreadId,
++        notification: &ServerNotification,
++    ) {
++        if !self.tracks_live_subagent(thread_id) {
++            return;
++        }
++        let change =
++            self.subagent_live
++                .reduce_notification(thread_id, notification, Instant::now());
++        self.schedule_subagent_live_change(change);
++    }
++
++    fn reduce_subagent_request(&mut self, thread_id: ThreadId, request: &ServerRequest) {
++        if !self.tracks_live_subagent(thread_id) {
++            return;
++        }
++        let change = self.subagent_live.reduce_request(thread_id, request);
++        self.schedule_subagent_live_change(change);
++    }
++
++    fn resolve_subagent_approval(&mut self, thread_id: ThreadId, request_id: &str) {
++        if !self.tracks_live_subagent(thread_id) {
++            return;
++        }
++        let change = self.subagent_live.resolve_approval(thread_id, request_id);
++        self.schedule_subagent_live_change(change);
++    }
++
+     pub(super) async fn shutdown_current_thread(&mut self, app_server: &mut AppServerSession) {
+         let side_thread_ids: Vec<ThreadId> = self.side_threads.keys().copied().collect();
+         for side_thread_id in side_thread_ids {
+@@ -191,11 +242,20 @@ impl App {
+     /// intentionally hidden until there is more than one known thread so single-thread sessions do
+     /// not spend footer space restating that the user is already on the main conversation.
+     pub(super) fn sync_active_agent_label(&mut self) {
+-        let label = self
++        self.sync_active_agent_footer_label();
++        self.sync_side_thread_ui();
++    }
++
++    pub(super) fn sync_active_agent_footer_label(&mut self) {
++        let mut label = self
+             .agent_navigation
+             .active_agent_label(self.current_displayed_thread_id(), self.primary_thread_id);
++        if self.navigation_safe_primary_thread_id().is_some() {
++            label = Some(
++                label.map_or_else(|| "← Main".to_string(), |label| format!("{label} · ← Main")),
++            );
++        }
+         self.chat_widget.set_active_agent_label(label);
+-        self.sync_side_thread_ui();
+     }
+ 
+     pub(super) async fn thread_cwd(&self, thread_id: ThreadId) -> Option<AbsolutePathBuf> {
+@@ -883,12 +943,14 @@ impl App {
+         else {
+             return Ok(false);
+         };
++        let resolved_request_id = resolution.request_id.to_string();
+ 
+         match app_server
+             .resolve_server_request(resolution.request_id, resolution.result)
+             .await
+         {
+             Ok(()) => {
++                self.resolve_subagent_approval(thread_id, &resolved_request_id);
+                 if ThreadEventStore::op_can_change_pending_replay_state(op) {
+                     self.note_thread_outbound_op(thread_id, op).await;
+                     self.refresh_pending_thread_approvals().await;
+@@ -999,6 +1061,9 @@ impl App {
+                 started.thread.agent_role.clone(),
+                 /*is_closed*/ false,
+             );
++            if thread_blocks_direct_input(&started.thread) {
++                self.agent_navigation.mark_parent_owned(thread_id);
++            }
+ 
+             // Lifecycle responses already contain authoritative session state. Their rollout may
+             // not exist until the first turn, so inferring it again can wait through reader retries.
+@@ -1016,6 +1081,7 @@ impl App {
+         } else {
+             None
+         };
++        self.reduce_subagent_notification(thread_id, &notification);
+         let is_turn_started = matches!(notification, ServerNotification::TurnStarted(_));
+         let notification_status_change = SideParentStatusChange::for_notification(&notification);
+         let (sender, store) = {
+@@ -1164,6 +1230,7 @@ impl App {
+         } else {
+             None
+         };
++        self.reduce_subagent_request(thread_id, &request);
+         let (sender, store) = {
+             let channel = self.ensure_thread_channel(thread_id);
+             (channel.sender.clone(), Arc::clone(&channel.store))
+diff --git a/codex-rs/tui/src/chatwidget.rs b/codex-rs/tui/src/chatwidget.rs
+index 15c9b321e..a4d057dd4 100644
+--- a/codex-rs/tui/src/chatwidget.rs
++++ b/codex-rs/tui/src/chatwidget.rs
+@@ -676,7 +676,7 @@ pub(crate) struct ChatWidget {
+     side_placeholder_text: String,
+     forked_from: Option<ThreadId>,
+     interrupted_turn_notice_mode: InterruptedTurnNoticeMode,
+-    frame_requester: FrameRequester,
++    pub(crate) frame_requester: FrameRequester,
+     // Whether to include the initial welcome banner on session configured
+     show_welcome_banner: bool,
+     // One-shot tooltip override for the primary startup session.
