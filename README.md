@@ -6,7 +6,7 @@ A fail-closed manager for running a version-pinned, patched Codex CLI beside the
 
 [![CI](https://github.com/DSLZL/CSA/actions/workflows/ci.yml/badge.svg)](https://github.com/DSLZL/CSA/actions/workflows/ci.yml)
 [![CSA release](https://img.shields.io/github/v/release/DSLZL/CSA?filter=v%2A&label=CSA)](https://github.com/DSLZL/CSA/releases)
-[![Patched Codex](https://img.shields.io/badge/patched%20Codex-0.149.0%20accepted-white)](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.149.0-native-join-p3)
+[![Patched Codex](https://img.shields.io/badge/patched%20Codex-0.150.1%20accepted-white)](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.150.1-native-join-p8)
 
 [Getting started](#getting-started) · [How it works](#how-it-works) · [Compatibility](#compatibility) · [Commands](#commands) · [Development](#development) · [简体中文](README_ZH.md)
 
@@ -15,7 +15,7 @@ A fail-closed manager for running a version-pinned, patched Codex CLI beside the
 CSA adds native subagent joins and a live subagent view to Codex without replacing the official CLI. The manager discovers the installed Codex package, verifies its runtime files, and places the patched executable in a separate managed directory.
 
 > [!IMPORTANT]
-> CSA Manager `0.1.2` is distributed through `@dslzl/csa` and the `v0.1.2` GitHub Release. Patched Codex `0.149.0` p3 is the current accepted Windows x64 release; the `0.149.1` p6 and p7 payloads are build-only candidates.
+> CSA Manager `0.1.3` is distributed through `@dslzl/csa` and the `v0.1.3` GitHub Release. Patched Codex `0.150.1` p8 is the current accepted Windows x64 release.
 
 ## What the patch changes
 
@@ -25,7 +25,7 @@ CSA adds native subagent joins and a live subagent view to Codex without replaci
 - The TUI can show live child activity, completed work, and navigation back to a child session.
 - The patched executable uses the official Codex runtime package and companion tools instead of carrying a second copy.
 
-The `0.149.1` p7 candidate also contains the latest subagent panel and lossless terminal Orbit work. It is not a formal compatibility release yet.
+The current `0.150.1` p8 release includes the latest subagent panel and lossless terminal Orbit work.
 
 ## How it works
 
@@ -61,6 +61,7 @@ The manager does not overwrite official files, copy the user's Codex home, or ed
 | `rust-v0.149.1-native-join-p6` | `0.149.1` | Windows x64 | Candidate, release disabled |
 | `rust-v0.149.1-native-join-p7` | `0.149.1` | Windows x64 | Candidate, release disabled |
 | `rust-v0.149.1-native-join-p8` | `0.149.1` | Windows x64 | Candidate, release disabled |
+| [`rust-v0.150.1-native-join-p8`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.150.1-native-join-p8) | `0.150.1` | Windows x64 | Accepted and published |
 
 The [compatibility index](release/compatibility-index.json) is authoritative for repository payloads. Normal online installation discovers every formal `compat-*` GitHub Release; build-only candidates are not listed.
 
@@ -117,7 +118,7 @@ csa status --manager-root $ManagerRoot
 In an interactive terminal, bare `csa install` fetches the formal compatibility catalog, lists patched Codex versions and their installability, and asks for a number. Automation must select the exact ID explicitly:
 
 ```powershell
-csa install --compat rust-v0.149.0-native-join-p3
+csa install --compat rust-v0.150.1-native-join-p8
 ```
 
 > [!WARNING]
@@ -126,7 +127,7 @@ csa install --compat rust-v0.149.0-native-join-p3
 For local payload development, pass a manifest and exactly one local artifact or source directory:
 
 ```powershell
-$CompatId = 'rust-v0.149.0-native-join-p3'
+$CompatId = 'rust-v0.150.1-native-join-p8'
 $Manifest = Join-Path 'C:\absolute\payload' "$CompatId\manifest.toml"
 $Artifact = 'C:\absolute\patched\codex.exe'
 

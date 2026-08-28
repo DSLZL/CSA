@@ -739,8 +739,11 @@ impl TestContract {
         let transport_fallback = matches!(manifest.patch_set_version, 6..=8)
             && manifest.patches.iter().any(|patch| {
                 patch.path == "patches/0013-subagent-live-polish.patch"
-                    && patch.sha256
-                        == "37853b54b759412b4f10a942dc036a2ffb18a03091455617ea81cd832ace9ce4"
+                    && matches!(
+                        patch.sha256.as_str(),
+                        "37853b54b759412b4f10a942dc036a2ffb18a03091455617ea81cd832ace9ce4"
+                            | "764afeb0d0fb06b58ac42dabce9778c6065ed1b44b2b696d12e396d94affeb9b"
+                    )
             });
         let transport_fallback_offset = usize::from(transport_fallback);
         let csa_orbit = matches!(manifest.patch_set_version, 7..=8)

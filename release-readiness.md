@@ -61,7 +61,7 @@ real-manifest repository overlay: 52 / 52 passed
 - Bash syntax validation for `build_patched_codex_bundle.sh`;
 - workflow static guard: no compatibility ID, upstream commit, or npm SRI authority in GitHub Actions YAML;
 - workflow-dispatch selector/target values are passed as environment data rather than interpolated into shell source;
-- Manager platform CI discovers `npm pack --json` output paths instead of assuming version `0.1.2`;
+- Manager platform CI discovers `npm pack --json` output paths instead of assuming a fixed version;
 - resolver validation against the real p1/p2/p3 manifests from the fixed baseline;
 - current p3 resolution with acceptance and release authority required.
 

@@ -493,8 +493,6 @@ impl GitHubClient {
             .max_redirects(5)
             .timeout_global(Some(Duration::from_secs(15 * 60)))
             .timeout_connect(Some(Duration::from_secs(15)))
-            .timeout_recv_response(Some(Duration::from_secs(30)))
-            .timeout_recv_body(Some(Duration::from_secs(30)))
             .build();
         Self {
             agent: Agent::new_with_config(config),
@@ -1129,6 +1127,7 @@ mod tests {
     };
     use std::collections::BTreeMap;
     use std::io::Cursor;
+    use std::time::Duration;
 
     fn release(tag: &str, draft: bool, prerelease: bool) -> GitHubRelease {
         GitHubRelease {
@@ -1360,5 +1359,14 @@ mod tests {
                 .download_asset(tag, &asset, &destination, Some(&digest))
                 .is_err()
         );
+    }
+
+    #[test]
+    fn github_client_allows_large_release_bodies_within_global_timeout() {
+        let timeouts = GitHubClient::new().agent.config().timeouts();
+        assert_eq!(timeouts.global, Some(Duration::from_secs(15 * 60)));
+        assert_eq!(timeouts.connect, Some(Duration::from_secs(15)));
+        assert_eq!(timeouts.recv_response, None);
+        assert_eq!(timeouts.recv_body, None);
     }
 }
