@@ -1072,6 +1072,44 @@ def test_release_stream_contracts() -> None:
 
     assert 'branches: ["main"]' in ci_workflow
     assert "cancel-in-progress: true" in ci_workflow
+    ci_triggers = ci_workflow.split("\nconcurrency:", 1)[0]
+    assert "  workflow_dispatch:" in ci_triggers
+    assert ci_triggers.count('    branches: ["main"]') == 2
+    assert ci_triggers.count("    paths:") == 2
+    for ci_path in (
+        ".github/actions/**",
+        ".github/workflows/**",
+        "Cargo.toml",
+        "Cargo.lock",
+        "rust-toolchain.toml",
+        "build.rs",
+        "src/**",
+        "tests/**",
+        "npm/**",
+        "payload/codex/**",
+        "release/**",
+        "scripts/**",
+        "validation/**",
+    ):
+        assert ci_triggers.count(f'      - "{ci_path}"') == 2
+    for documentation_path in ("README.md", "README_ZH.md", "docs/**", ".trellis/**"):
+        assert documentation_path not in ci_triggers
+    validation_triggers = validation_workflow.split("\nconcurrency:", 1)[0]
+    assert "  workflow_dispatch:" in validation_triggers
+    assert validation_triggers.count('    branches: ["main"]') == 2
+    assert validation_triggers.count("    paths:") == 2
+    assert validation_triggers.count('      - "release/acceptance/**"') == 2
+    assert "docs/**" not in validation_triggers
+    for release_workflow in (manager_workflow, patched_workflow):
+        release_triggers = release_workflow.split("\nconcurrency:", 1)[0]
+        assert "  workflow_dispatch:" in release_triggers
+        assert "  push:" not in release_triggers
+        assert "  pull_request:" not in release_triggers
+    watcher_triggers = watcher.split("\nconcurrency:", 1)[0]
+    assert "  schedule:" in watcher_triggers
+    assert "  workflow_dispatch:" in watcher_triggers
+    assert "  push:" not in watcher_triggers
+    assert "  pull_request:" not in watcher_triggers
     for workflow, expected in (
         (ci_workflow, 1),
         (manager_workflow, 1),

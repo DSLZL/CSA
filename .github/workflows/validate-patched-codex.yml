@@ -7,6 +7,7 @@ on:
       - ".github/workflows/validate-patched-codex.yml"
       - ".github/workflows/release-patched-codex.yml"
       - "payload/codex/**"
+      - "release/acceptance/**"
       - "release/build-profiles/**"
       - "release/compatibility-index.json"
       - "release/runtime-locks/**"
@@ -17,10 +18,12 @@ on:
       - "scripts/validation_evidence.py"
       - "scripts/verify_patch_payload.py"
   pull_request:
+    branches: ["main"]
     paths:
       - ".github/workflows/validate-patched-codex.yml"
       - ".github/workflows/release-patched-codex.yml"
       - "payload/codex/**"
+      - "release/acceptance/**"
       - "release/build-profiles/**"
       - "release/compatibility-index.json"
       - "release/runtime-locks/**"
