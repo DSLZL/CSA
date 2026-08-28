@@ -1,0 +1,129 @@
+diff --git a/codex-rs/core/src/agent/control.rs b/codex-rs/core/src/agent/control.rs
+index d205f705aaa4bfe93eeda8148a039da196c0d66b..3ff86565d29fd37eef419a56960fd24f347f2140 100644
+--- a/codex-rs/core/src/agent/control.rs
++++ b/codex-rs/core/src/agent/control.rs
+@@ -86,6 +86,7 @@ pub(crate) struct SpawnAgentOptions {
+ #[derive(Clone, Debug)]
+ pub(crate) struct LiveAgent {
+     pub(crate) thread_id: ThreadId,
++    pub(crate) initial_run_id: String,
+     pub(crate) metadata: AgentMetadata,
+     pub(crate) status: AgentStatus,
+ }
+diff --git a/codex-rs/core/src/agent/control/spawn.rs b/codex-rs/core/src/agent/control/spawn.rs
+index 8b2955034ff42e7090f03c4af464ad7c406e8f21..17adcbb07172ce22cbcf5c06d9b20358c5a65294 100644
+--- a/codex-rs/core/src/agent/control/spawn.rs
++++ b/codex-rs/core/src/agent/control/spawn.rs
+@@ -559,7 +559,7 @@ impl AgentControl {
+         )
+         .await;
+ 
+-        match initial_input {
++        let initial_run_id = match initial_input {
+             SpawnInitialInput::UserInput(input) => {
+                 self.send_input(
+                     new_thread.thread_id,
+@@ -567,7 +567,7 @@ impl AgentControl {
+                     options.parent_turn_id,
+                     options.root_turn_id,
+                 )
+-                .await?;
++                .await?
+             }
+             SpawnInitialInput::InterAgentCommunication(communication, context) => {
+                 self.send_inter_agent_communication_after_capacity_check(
+@@ -578,9 +578,9 @@ impl AgentControl {
+                     options.parent_turn_id,
+                     options.root_turn_id,
+                 )
+-                .await?;
++                .await?
+             }
+-        }
++        };
+         if multi_agent_version != MultiAgentVersion::V2 {
+             let child_reference = agent_metadata
+                 .agent_path
+@@ -597,6 +597,7 @@ impl AgentControl {
+ 
+         Ok(LiveAgent {
+             thread_id: new_thread.thread_id,
++            initial_run_id,
+             metadata: agent_metadata,
+             status: self.get_status(new_thread.thread_id).await,
+         })
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
+index ac1b79e50116fb47384f779425f9cc77ed8e3189..570f94ca66d338b9f4f5e580bf2744242bcb4a67 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_spec.rs
+@@ -414,9 +414,13 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
+                 "task_name": {
+                     "type": "string",
+                     "description": "Canonical task name for the spawned agent."
++                },
++                "run_id": {
++                    "type": "string",
++                    "description": "Opaque exact run id for this initial child run. Pass it unchanged to join_agent."
+                 }
+             },
+-            "required": ["task_name"],
++            "required": ["task_name", "run_id"],
+             "additionalProperties": false
+         });
+     }
+@@ -428,12 +432,16 @@ fn spawn_agent_output_schema_v2(hide_agent_metadata: bool) -> Value {
+                 "type": "string",
+                 "description": "Canonical task name for the spawned agent."
+             },
++            "run_id": {
++                "type": "string",
++                "description": "Opaque exact run id for this initial child run. Pass it unchanged to join_agent."
++            },
+             "nickname": {
+                 "type": ["string", "null"],
+                 "description": "User-facing nickname for the spawned agent when available."
+             }
+         },
+-        "required": ["task_name", "nickname"],
++        "required": ["task_name", "run_id", "nickname"],
+         "additionalProperties": false
+     })
+ }
+diff --git a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
+index 898064d2e0599b416f64a7539ecbcba9d93e1fd4..bc84f8ab9a42cfe478422b9ad101df3636973a67 100644
+--- a/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
++++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/spawn.rs
+@@ -163,6 +163,7 @@ async fn handle_spawn_agent(
+     .await
+     .map_err(collab_spawn_error)?;
+     let new_thread_id = spawned_agent.thread_id;
++    let run_id = spawned_agent.initial_run_id;
+     let agent_snapshot = session
+         .services
+         .agent_control
+@@ -193,10 +194,11 @@ async fn handle_spawn_agent(
+ 
+     let hide_agent_metadata = turn.config.multi_agent_v2.hide_spawn_agent_metadata;
+     if hide_agent_metadata {
+-        Ok(SpawnAgentResult::HiddenMetadata { task_name })
++        Ok(SpawnAgentResult::HiddenMetadata { task_name, run_id })
+     } else {
+         Ok(SpawnAgentResult::WithNickname {
+             task_name,
++            run_id,
+             nickname,
+         })
+     }
+@@ -263,10 +265,12 @@ impl SpawnAgentArgs {
+ pub(crate) enum SpawnAgentResult {
+     WithNickname {
+         task_name: String,
++        run_id: String,
+         nickname: Option<String>,
+     },
+     HiddenMetadata {
+         task_name: String,
++        run_id: String,
+     },
+ }
+ 

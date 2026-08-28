@@ -60,6 +60,7 @@ The manager does not overwrite official files, copy the user's Codex home, or ed
 | [`rust-v0.149.0-native-join-p3`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.149.0-native-join-p3) | `0.149.0` | Windows x64 | Accepted and published |
 | `rust-v0.149.1-native-join-p6` | `0.149.1` | Windows x64 | Candidate, release disabled |
 | `rust-v0.149.1-native-join-p7` | `0.149.1` | Windows x64 | Candidate, release disabled |
+| `rust-v0.149.1-native-join-p8` | `0.149.1` | Windows x64 | Candidate, release disabled |
 
 The [compatibility index](release/compatibility-index.json) is authoritative for repository payloads. Normal online installation discovers every formal `compat-*` GitHub Release; build-only candidates are not listed.
 

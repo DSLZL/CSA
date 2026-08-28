@@ -1,0 +1,315 @@
+diff --git a/codex-rs/tui/src/csa_graphics.rs b/codex-rs/tui/src/csa_graphics.rs
+index e0f8df1..1881721 100644
+--- a/codex-rs/tui/src/csa_graphics.rs
++++ b/codex-rs/tui/src/csa_graphics.rs
+@@ -11,6 +11,7 @@ use crossterm::cursor::RestorePosition;
+ use crossterm::cursor::SavePosition;
+ use crossterm::queue;
+ use ratatui::backend::Backend;
++use ratatui::layout::Position;
+ use ratatui::layout::Size;
+ 
+ use crate::csa_orbit::CsaOrbitFrame;
+@@ -21,6 +22,8 @@ use crate::pets::image_protocol::ImageProtocol;
+ 
+ const CSA_KITTY_IMAGE_ID_START: u32 = 0x4353_4100;
+ const CSA_KITTY_FALLBACK_RASTER_SIZE: u16 = 12;
++const CSA_KITTY_OUTER_SPREAD: u16 = 1;
++const CSA_SIXEL_Y_OFFSET: u16 = 2;
+ 
+ #[derive(Clone, Debug, Eq, PartialEq)]
+ pub(crate) struct CsaOrbitPlacement {
+@@ -119,6 +122,13 @@ impl Default for CsaGraphicsState {
+ }
+ 
+ impl CsaGraphicsState {
++    pub(crate) fn active_positions(&self) -> Vec<Position> {
++        self.active
++            .iter()
++            .map(|placement| Position::new(placement.x, placement.y))
++            .collect()
++    }
++
+     pub(crate) fn prepare<B>(&mut self, backend: &mut B, screen_size: Size) -> io::Result<bool>
+     where
+         B: Backend<Error = io::Error>,
+@@ -321,12 +331,19 @@ fn windows_console_cell_pixels() -> Option<(u16, u16)> {
+ }
+ 
+ fn encode_csa_frame(key: CsaGraphicsKey, frame: &CsaOrbitFrame) -> io::Result<CsaEncodedFrame> {
++    let (outer_spread, shift_up) = match key.protocol {
++        ImageProtocol::Kitty => (CSA_KITTY_OUTER_SPREAD, 0),
++        ImageProtocol::Sixel => (0, CSA_SIXEL_Y_OFFSET),
++        ImageProtocol::KittyLocalFile => (0, 0),
++    };
+     let raster = rasterize_csa_orbit(
+         frame.intensities,
+         key.width,
+         key.height,
+         key.foreground,
+         key.background,
++        outer_spread,
++        shift_up,
+     );
+     match key.protocol {
+         ImageProtocol::Kitty => Ok(CsaEncodedFrame::Kitty(
+@@ -387,6 +404,14 @@ mod tests {
+ 
+         state.draw(&mut output, &placements, started_at).unwrap();
+         assert_eq!(state.active.len(), 3);
++        assert_eq!(
++            state.active_positions(),
++            vec![
++                Position::new(0, 1),
++                Position::new(0, 3),
++                Position::new(0, 5)
++            ]
++        );
+         assert_eq!(state.image_ids.len(), 3);
+         assert_eq!(state.cache.as_ref().unwrap().warmup.len(), 20);
+         assert_eq!(state.cache.as_ref().unwrap().steady.len(), 24);
+diff --git a/codex-rs/tui/src/csa_orbit.rs b/codex-rs/tui/src/csa_orbit.rs
+index 206f4c1..59da3ca 100644
+--- a/codex-rs/tui/src/csa_orbit.rs
++++ b/codex-rs/tui/src/csa_orbit.rs
+@@ -77,18 +77,18 @@ pub(crate) fn rasterize_csa_orbit(
+     height: u16,
+     foreground: (u8, u8, u8),
+     background: (u8, u8, u8),
++    outer_spread: u16,
++    shift_up: u16,
+ ) -> CsaOrbitRaster {
+     let width = width.max(1);
+     let height = height.max(1);
+     let mut rgba = vec![0; usize::from(width) * usize::from(height) * 4];
+-    for pixel in rgba.chunks_exact_mut(4) {
+-        pixel.copy_from_slice(&[background.0, background.1, background.2, u8::MAX]);
+-    }
+ 
+     let side = width.min(height);
+     let x_offset = (width - side) / 2;
+     let y_offset = (height - side) / 2;
+-    let dot_size = (side / 4).max(1);
++    let point_side = ((side / 5).max(1) | 1).saturating_sub(1).max(1);
++    let point_offset = point_side / 2;
+     for row in 0..3u16 {
+         for column in 0..3u16 {
+             let logical_index = usize::from(row * 3 + column);
+@@ -96,13 +96,24 @@ pub(crate) fn rasterize_csa_orbit(
+                 continue;
+             }
+             let intensity = intensities[logical_index].clamp(0.0, 1.0);
++            if intensity == 0.0 {
++                continue;
++            }
+             let color = blend_rgb(background, foreground, intensity);
+-            let center_x = x_offset + ((2 * column + 1) * side) / 6;
+-            let center_y = y_offset + ((2 * row + 1) * side) / 6;
+-            let start_x = center_x.saturating_sub(dot_size / 2).min(width - dot_size);
+-            let start_y = center_y.saturating_sub(dot_size / 2).min(height - dot_size);
+-            for y in start_y..start_y + dot_size {
+-                for x in start_x..start_x + dot_size {
++            let center_x = (x_offset + ((2 * column + 1) * side) / 6)
++                .saturating_add(column * outer_spread)
++                .saturating_sub(outer_spread);
++            let center_y = (y_offset + ((2 * row + 1) * side) / 6)
++                .saturating_add(row * outer_spread)
++                .saturating_sub(outer_spread);
++            let start_x = center_x
++                .saturating_sub(point_offset)
++                .min(width - point_side);
++            let start_y = center_y
++                .saturating_sub(point_offset)
++                .min(height - point_side);
++            for y in start_y..start_y + point_side {
++                for x in start_x..start_x + point_side {
+                     let offset = (usize::from(y) * usize::from(width) + usize::from(x)) * 4;
+                     rgba[offset..offset + 4].copy_from_slice(&[color.0, color.1, color.2, u8::MAX]);
+                 }
+@@ -110,6 +121,13 @@ pub(crate) fn rasterize_csa_orbit(
+         }
+     }
+ 
++    let shift_rows = usize::from(shift_up.min(height));
++    if shift_rows > 0 {
++        let row_bytes = usize::from(width) * 4;
++        rgba.copy_within(shift_rows * row_bytes.., 0);
++        rgba[(usize::from(height) - shift_rows) * row_bytes..].fill(0);
++    }
++
+     CsaOrbitRaster {
+         width,
+         height,
+@@ -151,24 +169,28 @@ fn blend_rgb(from: (u8, u8, u8), to: (u8, u8, u8), intensity: f32) -> (u8, u8, u
+ mod tests {
+     use super::*;
+ 
++    fn pixel_at(raster: &CsaOrbitRaster, x: u16, y: u16) -> [u8; 4] {
++        let offset = (usize::from(y) * usize::from(raster.width) + usize::from(x)) * 4;
++        raster.rgba[offset..offset + 4].try_into().unwrap()
++    }
++
+     fn logical_pixel(raster: &CsaOrbitRaster, row: u16, column: u16) -> [u8; 4] {
+         let side = raster.width.min(raster.height);
+         let x = (raster.width - side) / 2 + ((2 * column + 1) * side) / 6;
+         let y = (raster.height - side) / 2 + ((2 * row + 1) * side) / 6;
+-        let offset = (usize::from(y) * usize::from(raster.width) + usize::from(x)) * 4;
+-        raster.rgba[offset..offset + 4].try_into().unwrap()
++        pixel_at(raster, x, y)
+     }
+ 
+     #[test]
+     fn raster_preserves_all_perimeter_inputs_and_blank_center() {
+         let intensities = [0.1, 0.2, 0.3, 0.4, 1.0, 0.5, 0.6, 0.7, 0.8];
+-        let raster = rasterize_csa_orbit(intensities, 12, 12, (255, 255, 255), (0, 0, 0));
++        let raster = rasterize_csa_orbit(intensities, 12, 12, (255, 255, 255), (0, 0, 0), 0, 0);
+ 
+         for row in 0..3 {
+             for column in 0..3 {
+                 let pixel = logical_pixel(&raster, row, column);
+                 if (row, column) == (1, 1) {
+-                    assert_eq!(pixel, [0, 0, 0, 255]);
++                    assert_eq!(pixel, [0, 0, 0, 0]);
+                 } else {
+                     let expected =
+                         (intensities[usize::from(row * 3 + column)] * 255.0).round() as u8;
+@@ -178,6 +200,33 @@ mod tests {
+         }
+     }
+ 
++    #[test]
++    fn raster_uses_transparent_square_point_geometry() {
++        let raster = rasterize_csa_orbit([1.0; 9], 12, 12, (255, 255, 255), (0, 0, 0), 0, 0);
++        assert_eq!(pixel_at(&raster, 0, 0), [0, 0, 0, 0]);
++        assert_eq!(pixel_at(&raster, 1, 1), [255, 255, 255, 255]);
++        assert_eq!(pixel_at(&raster, 2, 2), [255, 255, 255, 255]);
++        assert_eq!(pixel_at(&raster, 3, 2), [0, 0, 0, 0]);
++
++        let narrow = rasterize_csa_orbit([1.0; 9], 9, 18, (255, 255, 255), (0, 0, 0), 0, 0);
++        assert_eq!(pixel_at(&narrow, 1, 5), [255, 255, 255, 255]);
++        assert_eq!(pixel_at(&narrow, 2, 5), [0, 0, 0, 0]);
++    }
++
++    #[test]
++    fn raster_applies_protocol_specific_spacing_and_vertical_shift() {
++        let kitty = rasterize_csa_orbit([1.0; 9], 12, 12, (255, 255, 255), (0, 0, 0), 1, 0);
++        assert_eq!(pixel_at(&kitty, 0, 0), [255, 255, 255, 255]);
++        assert_eq!(pixel_at(&kitty, 1, 0), [255, 255, 255, 255]);
++        assert!((2..=4).all(|x| pixel_at(&kitty, x, 0)[3] == 0));
++        assert_eq!(pixel_at(&kitty, 5, 0), [255, 255, 255, 255]);
++        assert_eq!(pixel_at(&kitty, 10, 0), [255, 255, 255, 255]);
++
++        let sixel = rasterize_csa_orbit([1.0; 9], 12, 12, (255, 255, 255), (0, 0, 0), 0, 2);
++        assert_eq!(pixel_at(&sixel, 1, 0), [255, 255, 255, 255]);
++        assert_eq!(pixel_at(&sixel, 1, 1), [0, 0, 0, 0]);
++    }
++
+     #[test]
+     fn raster_keeps_continuous_brightness_levels_distinct() {
+         let raster = rasterize_csa_orbit(
+@@ -186,6 +235,8 @@ mod tests {
+             12,
+             (255, 255, 255),
+             (0, 0, 0),
++            0,
++            0,
+         );
+         assert_eq!(
+             [
+@@ -196,6 +247,7 @@ mod tests {
+             ],
+             [51, 102, 179, 255]
+         );
++        assert_eq!(logical_pixel(&raster, 1, 2), [0, 0, 0, 0]);
+     }
+ 
+     #[test]
+diff --git a/codex-rs/tui/src/custom_terminal.rs b/codex-rs/tui/src/custom_terminal.rs
+index c7a91e7..383d0f0 100644
+--- a/codex-rs/tui/src/custom_terminal.rs
++++ b/codex-rs/tui/src/custom_terminal.rs
+@@ -510,6 +510,15 @@ where
+         }
+     }
+ 
++    pub(crate) fn invalidate_positions(&mut self, positions: &[Position]) {
++        let previous_buffer = self.previous_buffer_mut();
++        for &position in positions {
++            if previous_buffer.area.contains(position) {
++                previous_buffer[position].set_diff_option(CellDiffOption::AlwaysUpdate);
++            }
++        }
++    }
++
+     /// Clear the entire visible screen (not just the viewport) and force a full redraw.
+     pub fn clear_visible_screen(&mut self) -> io::Result<()> {
+         let home = Position { x: 0, y: 0 };
+@@ -1000,6 +1009,24 @@ mod tests {
+         ");
+     }
+ 
++    #[test]
++    fn invalidate_positions_marks_only_released_graphics_cells() {
++        let mut terminal =
++            Terminal::with_options(VT100Backend::new(/*width*/ 4, /*height*/ 2)).expect("terminal");
++        terminal.set_viewport_area(Rect::new(0, 0, 4, 2));
++
++        terminal.invalidate_positions(&[Position::new(1, 0), Position::new(9, 9)]);
++
++        assert_eq!(
++            terminal.previous_buffer()[(1, 0)].diff_option,
++            CellDiffOption::AlwaysUpdate
++        );
++        assert_eq!(
++            terminal.previous_buffer()[(0, 0)].diff_option,
++            CellDiffOption::None
++        );
++    }
++
+     #[test]
+     fn ordinary_redraws_with_known_size_do_not_query_backend_size() {
+         let mut terminal =
+diff --git a/codex-rs/tui/src/pets/image_protocol.rs b/codex-rs/tui/src/pets/image_protocol.rs
+index 0fd1894..d4450d0 100644
+--- a/codex-rs/tui/src/pets/image_protocol.rs
++++ b/codex-rs/tui/src/pets/image_protocol.rs
+@@ -247,7 +247,7 @@ pub(crate) fn kitty_transmit_csa_rgba_with_id(
+ ) -> String {
+     kitty_transmit_base64(
+         payload,
+-        &format!("a=T,t=d,f=32,s={width},v={height},c=1,r=1,q=2,i={image_id}"),
++        &format!("a=T,t=d,f=32,s={width},v={height},c=1,q=2,i={image_id}"),
+     )
+ }
+ 
+@@ -383,7 +383,8 @@ mod tests {
+         let payload = kitty_encode_csa_rgba(&[1, 2, 3, 4]);
+         let command = kitty_transmit_csa_rgba_with_id(&payload, 12, 16, 7);
+ 
+-        assert!(command.starts_with("\x1b_Ga=T,t=d,f=32,s=12,v=16,c=1,r=1,q=2,i=7,m=0;"));
++        assert!(command.starts_with("\x1b_Ga=T,t=d,f=32,s=12,v=16,c=1,q=2,i=7,m=0;"));
++        assert!(!command.contains(",r=1"));
+         assert!(command.contains("AQIDBA=="));
+         assert!(command.ends_with("\x1b\\"));
+     }
+diff --git a/codex-rs/tui/src/tui.rs b/codex-rs/tui/src/tui.rs
+index 9759177..60d9b85 100644
+--- a/codex-rs/tui/src/tui.rs
++++ b/codex-rs/tui/src/tui.rs
+@@ -1222,6 +1222,7 @@ impl Tui {
+ 
+         ensure_virtual_terminal_processing()?;
+ 
++        let csa_graphics_positions = self.csa_graphics_state.active_positions();
+         let result = stdout().sync_update(|_| {
+             if let Err(err) = self.csa_graphics_state.clear(self.terminal.backend_mut()) {
+                 tracing::warn!(error = %err, "disabling CSA Orbit graphics after cleanup failure");
+@@ -1255,6 +1256,8 @@ impl Tui {
+ 
+             if needs_full_repaint || history_can_overlap_viewport {
+                 terminal.invalidate_viewport();
++            } else {
++                terminal.invalidate_positions(&csa_graphics_positions);
+             }
+ 
+             // Update the y position for suspending so Ctrl-Z can place the cursor correctly.

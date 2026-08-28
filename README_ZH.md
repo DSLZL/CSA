@@ -60,6 +60,7 @@ CSA 把四个部分分开管理：
 | [`rust-v0.149.0-native-join-p3`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.149.0-native-join-p3) | `0.149.0` | Windows x64 | 已接受并发布 |
 | `rust-v0.149.1-native-join-p6` | `0.149.1` | Windows x64 | 候选，未开放发布 |
 | `rust-v0.149.1-native-join-p7` | `0.149.1` | Windows x64 | 候选，未开放发布 |
+| `rust-v0.149.1-native-join-p8` | `0.149.1` | Windows x64 | 候选，未开放发布 |
 
 [兼容索引](release/compatibility-index.json)是仓库 payload 的权威来源。正常在线安装会发现所有正式 `compat-*` GitHub Release；只开放构建的候选版本不会出现在列表里。
 

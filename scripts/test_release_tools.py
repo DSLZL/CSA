@@ -510,6 +510,22 @@ def test_contract_shape() -> None:
     assert "ImageProtocol::Kitty" in p7_patch
     assert "ImageProtocol::Sixel" in p7_patch
     assert "GetCurrentConsoleFontEx" in p7_patch
+
+    p8 = REPOSITORY / "payload" / "codex" / "rust-v0.149.1-native-join-p8"
+    p8_manifest = tomllib.loads((p8 / "manifest.toml").read_text(encoding="utf-8"))
+    p8_contract = load_contract(p8 / "test-contract.json", p8.name)
+    assert p8_manifest["patch_set_version"] == 8
+    assert len(p8_manifest["patches"]) == 16
+    assert p8_manifest["patches"][-1]["path"] == "patches/0016-csa-orbit-transparent-points.patch"
+    assert len(p8_contract["tests"]) == 19
+    p8_patch = (p8 / "patches" / "0016-csa-orbit-transparent-points.patch").read_text(
+        encoding="utf-8"
+    )
+    assert "raster_uses_transparent_square_point_geometry" in p8_patch
+    assert "let mut rgba = vec![0;" in p8_patch
+    assert "CSA_KITTY_OUTER_SPREAD" in p8_patch
+    assert "CSA_SIXEL_Y_OFFSET" in p8_patch
+    assert "invalidate_positions" in p8_patch
     for attributes in (
         REPOSITORY / "payload" / "codex" / ".gitattributes",
         REPOSITORY / "release" / ".gitattributes",
@@ -1399,7 +1415,7 @@ def test_compatibility_release_tools(root: Path) -> None:
             if repository == "openai/codex":
                 assert tag == "rust-v9.8.7"
                 return "f" * 40
-            assert repository == "dslzl/CSA" and tag == "compat-rust-v9.8.7-native-join-p7"
+            assert repository == "dslzl/CSA" and tag == "compat-rust-v9.8.7-native-join-p8"
             return "d" * 40
 
     fake = FakeApi()
@@ -1412,13 +1428,13 @@ def test_compatibility_release_tools(root: Path) -> None:
     detection = detect(REPOSITORY.resolve(), fake)
     assert detection["action"] == "blocked" and detection["issue_needs_update"] is False
     fake.issue_body = ""
-    fake.pulls = [{"head": {"ref": "automation/compat-rust-v9.8.7-native-join-p7"}}]
+    fake.pulls = [{"head": {"ref": "automation/compat-rust-v9.8.7-native-join-p8"}}]
     assert detect(REPOSITORY.resolve(), fake)["action"] == "candidate_open"
     fake.pulls = []
     with patch("compat_release.exact_local_entry", return_value=True):
         assert detect(REPOSITORY.resolve(), fake)["action"] == "publish"
     fake.release = {
-        "tag_name": "compat-rust-v9.8.7-native-join-p7",
+        "tag_name": "compat-rust-v9.8.7-native-join-p8",
         "draft": False,
         "prerelease": False,
     }
@@ -1438,7 +1454,7 @@ def test_compatibility_release_tools(root: Path) -> None:
 
     matching = MatchingApi()
     current = detect(REPOSITORY.resolve(), matching)
-    assert current["compat_id"] == "rust-v0.149.1-native-join-p7"
+    assert current["compat_id"] == "rust-v0.149.1-native-join-p8"
     assert current["action"] == "publish"
 
 

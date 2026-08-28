@@ -18,3 +18,4 @@ SHA256SUMS.txt
 /target/
 /rtk/
 __pycache__/
+tests/ui/target/

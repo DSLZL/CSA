@@ -498,10 +498,11 @@ fn validate_manifest(manifest: &CompatibilityManifest) -> Result<()> {
         5 => 13,
         6 => 14,
         7 => 15,
+        8 => 16,
         _ => {
             return Err(ManagerError::new(
                 "unsupported_manifest",
-                "only patch sets 1, 2, 3, 4, 5, 6, and 7 are supported",
+                "only patch sets 1 through 8 are supported",
             ));
         }
     };
@@ -731,18 +732,18 @@ pub struct BuildContract {
 impl TestContract {
     fn validate(&self, manifest: &CompatibilityManifest) -> Result<()> {
         let p2 = manifest.patch_set_version == 2;
-        let p3 = matches!(manifest.patch_set_version, 3..=7);
-        let p3_isolates_background_exit = matches!(manifest.patch_set_version, 6..=7);
+        let p3 = matches!(manifest.patch_set_version, 3..=8);
+        let p3_isolates_background_exit = matches!(manifest.patch_set_version, 6..=8);
         let p3_tui_offset = usize::from(p3_isolates_background_exit);
         let p3_offset = usize::from(p3);
-        let transport_fallback = matches!(manifest.patch_set_version, 6..=7)
+        let transport_fallback = matches!(manifest.patch_set_version, 6..=8)
             && manifest.patches.iter().any(|patch| {
                 patch.path == "patches/0013-subagent-live-polish.patch"
                     && patch.sha256
                         == "37853b54b759412b4f10a942dc036a2ffb18a03091455617ea81cd832ace9ce4"
             });
         let transport_fallback_offset = usize::from(transport_fallback);
-        let csa_orbit = manifest.patch_set_version == 7
+        let csa_orbit = matches!(manifest.patch_set_version, 7..=8)
             && manifest
                 .patches
                 .iter()
@@ -761,7 +762,7 @@ impl TestContract {
             4 if batch_join => 16,
             5 if batch_join => 16,
             6 if batch_join => 17 + transport_fallback_offset,
-            7 if batch_join && csa_orbit => 17 + transport_fallback_offset + csa_orbit_offset,
+            7..=8 if batch_join && csa_orbit => 17 + transport_fallback_offset + csa_orbit_offset,
             _ => {
                 return Err(ManagerError::new(
                     "invalid_test_contract",
@@ -1160,7 +1161,7 @@ impl TestContract {
                     ],
                     &[],
                 ));
-        let overlay_test_matches = !matches!(manifest.patch_set_version, 4..=7)
+        let overlay_test_matches = !matches!(manifest.patch_set_version, 4..=8)
             || step_matches(
                 &self.tests[15 + p3_tui_offset + transport_fallback_offset + csa_orbit_offset],
                 "CSA official runtime overlay",
@@ -1201,7 +1202,7 @@ impl TestContract {
                     ("SOURCE_DATE_EPOCH", "1786063808"),
                 ],
             ),
-            6..=7 => map_matches(
+            6..=8 => map_matches(
                 &self.build.env,
                 &[
                     ("CARGO_BUILD_JOBS", "4"),
