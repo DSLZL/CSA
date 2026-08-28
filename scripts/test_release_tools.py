@@ -771,8 +771,8 @@ def test_release_stream_contracts() -> None:
     assert 'cp -a payload "$staged_root/"' in patched_workflow
     assert '--manifest "$STAGED_MANIFEST"' in patched_workflow
     assert 'sha256sum "$ARTIFACT_PATH"' in patched_workflow
-    assert "Upload release candidate assets" in patched_workflow
-    assert patched_workflow.count("actions/upload-artifact@") == 1
+    assert "Upload local acceptance candidate" in patched_workflow
+    assert "Upload formal release assets" in patched_workflow
     assert patched_workflow.count("actions/download-artifact@") == 2
     assert "Upload production build bundle" not in patched_workflow
     assert "patched-codex-cli-bundle-" not in patched_workflow
@@ -813,7 +813,6 @@ def test_release_stream_contracts() -> None:
     contract_runner = (REPOSITORY / "scripts" / "run_patch_contract.py").read_text(
         encoding="utf-8"
     )
-    circleci = (REPOSITORY / ".circleci" / "config.yml").read_text(encoding="utf-8")
     build_profile = (
         REPOSITORY / "release" / "build-profiles" / "windows-msvc-x64.json"
     ).read_text(encoding="utf-8")
@@ -831,9 +830,7 @@ def test_release_stream_contracts() -> None:
         assert f"build_patched_codex_bundle.sh {phase}" in validation_workflow
     for phase in ("build", "release"):
         assert f"build_patched_codex_bundle.sh {phase}" not in validation_workflow
-    assert "output.circle-artifacts.com" not in patched_workflow
     assert "accepted_artifact_url" not in patched_workflow
-    assert circleci.count("build_patched_codex_bundle.sh") == 1
     assert patched_workflow.count("runs-on: ubuntu-24.04") == 2
     assert "runs-on: ubuntu-26.04" not in patched_workflow
     assert "timeout-minutes: 120" in patched_workflow
@@ -857,56 +854,18 @@ def test_release_stream_contracts() -> None:
     assert "build_patched_codex_bundle.sh" not in watcher
     assert "compat_release.py finalize" not in watcher
     assert "compat_release.py pack" not in watcher
-    assert "CircleCI compilation and local Windows acceptance" in watcher
+    assert "GitHub Actions acceptance-candidate build and local Windows acceptance" in watcher
     assert "No artifact hash or npm integrity is copied into a workflow input" in watcher
     assert "full_payload" not in ci_workflow
     assert "warm_cache_acceptance" not in ci_workflow
-    assert "default: false" in circleci
-    assert circleci.count("image: ubuntu-2604:current") == 2
-    assert "image: ubuntu-2604:2026.05.1" not in circleci
-    assert "resource_class: large.gen3" in circleci
-    assert "resource_class: large.gen2" not in circleci
-    assert "no_output_timeout: 20m" in circleci
-    assert "scripts/compat_catalog.py resolve" in circleci
-    assert "csa-cargo-home-v6-linux-amd64-" in circleci
-    assert "csa-rustup-v3-linux-amd64-" in circleci
-    assert "csa-xwin-v3-linux-amd64-" in circleci
-    assert "csa-sccache-v6-linux-amd64-" in circleci
-    assert "csa-sccache-v3-linux-amd64-1.95.0-xwin-0.23.0-codex-" in circleci
-    assert "csa-sccache-v2-" not in circleci
-    for cargo_download in ("registry/index", "registry/cache", "git/db"):
-        assert f"/cargo-home/{cargo_download}" in circleci
     assert 'export RUSTC_WRAPPER="$CSA_TOOL_BIN/sccache"' in shared_build
-    assert "SCCACHE_CACHE_SIZE: 4G" in circleci
-    assert "SCCACHE_CACHE_SIZE: 450M" not in circleci
-    assert "caches: 7d" in circleci
-    assert "sccache --max-cache-size" not in circleci
-    assert 'root="$HOME/csa-patched-codex/$CSA_COMPAT_ID"' in circleci
-    assert 'root="/tmp/csa-patched-codex/$CSA_COMPAT_ID"' not in circleci
-    assert "TMPDIR: /home/circleci/csa-tmp" in circleci
-    assert "umask 077" in circleci
-    assert 'chmod 0700 "$TMPDIR"' in circleci
-    assert "rust-v0." not in circleci
-    assert "sha512-" not in circleci
-    assert "build_latest_patched_codex:" in circleci
-    assert "build_patched_codex:" in circleci
-    assert "compat_selector:" in circleci
-    assert "build_all_compat is intentionally rejected" in circleci
-    assert "<<'EOF'" not in circleci
-    assert "store_latest_patched_artifact:" in circleci
-    assert circleci.count("require_warm_cache:") == 4
-    assert 'if [[ "$CSA_REQUIRE_WARM_CACHE_PARAM" == true ]]; then' in circleci
-    assert "export CSA_MINIMUM_RUST_HIT_RATE=95" in circleci
-    assert "build=(timeout 50m bash)" in circleci
-    assert "build=(timeout 30m bash)" in circleci
-    assert '"${build[@]}" scripts/build_patched_codex_bundle.sh' in circleci
-    assert "require_warm_cache: << pipeline.parameters.require_warm_cache >>" in circleci
-    assert 'require_warm_cache: "true"' not in circleci
-    assert "git clone +" not in circleci
-    assert "condition: << parameters.store_artifact >>" in circleci
-    assert "store_artifact: << pipeline.parameters.store_latest_patched_artifact >>" in circleci
-    assert "OPENAI_API_KEY" not in circleci
-    assert "binding_sha256:" not in circleci
+    assert "Create local acceptance candidate" in patched_workflow
+    assert "compat_catalog.py candidate" in patched_workflow
+    assert "--provider github-actions" in patched_workflow
+    assert "patched-codex-acceptance-${{ steps.resolve.outputs.compat_id }}" in patched_workflow
+    assert patched_workflow.count("if: ${{ !inputs.publish }}") == 2
+    assert patched_workflow.count("if: ${{ inputs.publish }}") == 5
+    assert patched_workflow.count("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a") == 2
 
     assert "--portable-evidence" in shared_build
     assert "--stats-format json" in shared_build
@@ -1111,10 +1070,12 @@ def test_release_stream_contracts() -> None:
     for workflow, expected in (
         (ci_workflow, 1),
         (manager_workflow, 1),
-        (patched_workflow, 1),
         (watcher, 1),
     ):
         assert workflow.count("retention-days: 1") == expected
+    patched_lines = patched_workflow.splitlines()
+    assert patched_lines.count("          retention-days: 1") == 1
+    assert patched_lines.count("          retention-days: 14") == 1
     validation_lines = validation_workflow.splitlines()
     assert validation_lines.count("          retention-days: 1") == 0
     assert validation_lines.count("          retention-days: 14") == 1

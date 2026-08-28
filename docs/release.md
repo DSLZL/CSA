@@ -38,7 +38,10 @@ build profile      runtime lock
                │
                ▼
        independent formal rebuild
-               │ exact SHA-256 and size match
+               │
+               ▼
+       temporary manifest finalization
+               │ exact local/remote asset match
                ▼
        draft reconciliation and publication
 ```
@@ -86,7 +89,7 @@ Validate the whole catalog:
 ```bash
 python scripts/compat_catalog.py validate \
   --repository . \
-  --workflow .circleci/config.yml \
+  --workflow .github/workflows/validate-patched-codex.yml \
   --workflow .github/workflows/release-patched-codex.yml
 ```
 
@@ -114,34 +117,29 @@ python scripts/compat_catalog.py resolve \
 
 Unknown selectors, unknown targets, hash drift, disabled build/release flags, and missing acceptance records fail closed.
 
-## CircleCI candidate build
+## GitHub Actions candidate build
 
-CircleCI owns acceptance-oriented candidate compilation. It does not publish the formal GitHub compatibility Release. The machine executor is pinned to the dated `ubuntu-2604:2026.05.1` image; advancing that image is an explicit reviewed infrastructure change, not an implicit moving-tag update.
+The `Release patched Codex CLI` workflow owns both build modes, but each dispatch has one purpose. With `publish=false` it produces only a disposable local-acceptance candidate; with `publish=true` it independently rebuilds an accepted entry and owns formal publication.
 
-For the current version, trigger one pipeline with:
+Dispatch the workflow from the default branch with:
 
 ```text
-build_patched_codex=true
-compat_selector=current
+compat_selector=<exact-candidate-id>
 target=x86_64-pc-windows-msvc
-store_artifact=true
-require_warm_cache=false
+publish=false
 ```
 
-For one exact historical or candidate version, set `compat_selector` to its exact compatibility ID. One pipeline request creates one heavy build. `build_all_compat=true` is intentionally rejected; enumerate reviewed IDs and trigger them separately when an explicit historical regression is required.
+The dispatch requires successful Patch Validation evidence from the same default-branch commit. Use `validation_run_id` only to select one exact successful run when automatic selection is not appropriate. One dispatch resolves and builds exactly one compatibility and target.
 
-CircleCI stores:
+The 14-day workflow artifact is named `patched-codex-acceptance-<compat_id>` and contains:
 
 ```text
-resolution/
 bundle/
-diagnostics/
-candidates/
+candidate-record.json
+resolution.json
 ```
 
 The candidate record binds the artifact to the manifest, build profile, runtime lock, provider pipeline/job identity, and source commit. It is not an acceptance record by itself.
-
-`require_warm_cache=true` is a deliberate benchmark lane. It raises the minimum Rust cache-hit requirement and uses a shorter timeout. It must not be enabled for every ordinary candidate build.
 
 ## Port a new compatibility
 
@@ -155,13 +153,13 @@ python scripts/compat_catalog.py stage-candidate \
   --runtime-lock release/runtime-locks/rust-v0.150.0-native-join-p4.json
 ```
 
-This command reads the exact compatibility ID and upstream facts from the manifest. It does not place version identities in CircleCI or GitHub workflow YAML.
+This command reads the exact compatibility ID and upstream facts from the manifest. It does not place version identities in GitHub workflow YAML.
 
 Commit the payload, runtime lock, and catalog candidate route together. Run static validation before requesting a heavy build.
 
 ## Candidate acceptance
 
-Download the CircleCI canonical bundle and candidate record. Perform acceptance only in a disposable Windows environment using an isolated `CODEX_HOME`, working directory, npm prefix, and activation path. Do not replace the official Codex installation.
+Download the `patched-codex-acceptance-<compat_id>` GitHub Actions artifact. Perform acceptance only in a disposable Windows environment using an isolated `CODEX_HOME`, working directory, npm prefix, and activation path. Do not replace the official Codex installation. The executable is at `bundle/bin/codex.exe`; the record is `candidate-record.json`.
 
 The sanitized evidence JSON must identify the actual tests performed and must not contain credentials, auth files, tokens, session content, or private paths.
 
@@ -175,7 +173,7 @@ python scripts/compat_catalog.py accept `
   --selector $CompatId `
   --target $Target `
   --candidate-record .\candidate-record.json `
-  --artifact .\codex.exe `
+  --artifact .\bundle\bin\codex.exe `
   --acceptance ("release/acceptance/{0}/{1}.json" -f $CompatId, $Target) `
   --evidence .\sanitized-acceptance-evidence.json `
   --make-current
@@ -185,11 +183,10 @@ python scripts/compat_catalog.py accept `
 
 - a catalog entry still in `candidate` lifecycle;
 - an artifact matching the candidate record;
-- a manifest already finalized with that exact artifact SHA-256 and size;
-- matching manifest, build-profile, and runtime-lock hashes;
+- a candidate record bound to the current manifest, build-profile, and runtime-lock hashes;
 - an explicit evidence file.
 
-Review the finalized manifest, acceptance JSON, and compatibility-index changes as one security-sensitive change.
+Review the acceptance JSON and compatibility-index changes as one security-sensitive change. The accepted candidate hash records what was tested locally; it does not constrain the later independent production build.
 
 ## Formal patched-Codex release
 
@@ -200,7 +197,7 @@ compat_selector=rust-v0.149.0-native-join-p3
 target=x86_64-pc-windows-msvc
 ```
 
-The workflow does not accept copied npm integrity, CircleCI artifacts, or accepted SHA values. It resolves committed source/runtime authority and performs an independent CLI-only production build.
+The workflow does not accept copied npm integrity, development candidate artifacts, or accepted SHA values. It resolves committed source/runtime authority and performs an independent CLI-only production build.
 
 The formal build command remains limited to:
 
@@ -271,7 +268,6 @@ Also run when available:
 
 ```bash
 actionlint
-circleci config validate .circleci/config.yml
 ```
 
-Hosted GitHub Actions, hosted CircleCI, the full patched-Codex rebuild, and formal draft publication remain mandatory canary validations; local static checks do not substitute for them.
+Hosted Patch Validation, the GitHub Actions acceptance-candidate build, the independent formal rebuild, and formal draft publication remain mandatory canary validations; local static checks do not substitute for them.

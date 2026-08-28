@@ -143,7 +143,7 @@ jobs:
               esac
 
               case "$file" in
-                .github/*|.circleci/*)
+                .github/*)
                   workflows=true
                   classified=true
                   ;;
@@ -288,7 +288,6 @@ jobs:
           python scripts/test_validation_evidence.py
           python scripts/compat_catalog.py validate --repository .
           python scripts/compat_catalog.py guard-workflows \
-            .circleci/config.yml \
             .github/workflows/ci.yml \
             .github/workflows/release-csa.yml \
             .github/workflows/release-patched-codex.yml \

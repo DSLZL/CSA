@@ -1202,13 +1202,13 @@ def build_parser() -> argparse.ArgumentParser:
     stage_parser.add_argument("--npm-integrity", default="registry")
 
     candidate_parser = subparsers.add_parser(
-        "candidate", help="record a CircleCI/GitHub/local candidate artifact identity"
+        "candidate", help="record a GitHub Actions or local candidate artifact identity"
     )
     candidate_parser.add_argument("--repository", default=".")
     candidate_parser.add_argument("--resolution", type=Path, required=True)
     candidate_parser.add_argument("--artifact", type=Path, required=True)
     candidate_parser.add_argument("--output", type=Path, required=True)
-    candidate_parser.add_argument("--provider", choices=("circleci", "github-actions", "local"), required=True)
+    candidate_parser.add_argument("--provider", choices=("github-actions", "local"), required=True)
     candidate_parser.add_argument("--pipeline")
     candidate_parser.add_argument("--job")
     candidate_parser.add_argument("--source-commit")

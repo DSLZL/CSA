@@ -38,7 +38,7 @@ env:
 
 jobs:
   build:
-    name: Build production patched Codex CLI
+    name: Build patched Codex CLI
     runs-on: ubuntu-24.04
     timeout-minutes: 120
     permissions:
@@ -362,8 +362,38 @@ jobs:
           path: ${{ env.SCCACHE_RELEASE_DIR }}
           key: csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-release-${{ steps.resolve.outputs.build_profile_sha256 }}-upstream-${{ steps.resolve.outputs.upstream_commit }}-patch-${{ steps.resolve.outputs.manifest_sha256 }}
 
+      - name: Create local acceptance candidate
+        if: ${{ !inputs.publish }}
+        shell: bash
+        run: |
+          set -euo pipefail
+          candidate_root="$PATCHED_CODEX_ROOT/acceptance-candidate"
+          mkdir -p "$candidate_root"
+          cp -a "$BUNDLE_ROOT" "$candidate_root/bundle"
+          cp "$RESOLUTION_JSON" "$candidate_root/resolution.json"
+          python scripts/compat_catalog.py candidate \
+            --repository . \
+            --resolution "$RESOLUTION_JSON" \
+            --artifact "$ARTIFACT_PATH" \
+            --output "$candidate_root/candidate-record.json" \
+            --provider github-actions \
+            --pipeline "$GITHUB_RUN_ID" \
+            --job "$GITHUB_JOB" \
+            --source-commit "$GITHUB_SHA"
+
+      - name: Upload local acceptance candidate
+        if: ${{ !inputs.publish }}
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: patched-codex-acceptance-${{ steps.resolve.outputs.compat_id }}
+          path: ${{ runner.temp }}/csa-patched-codex/acceptance-candidate
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14
+
       - id: finalize
         name: Finalize production manifest from the GitHub-built CLI
+        if: ${{ inputs.publish }}
         shell: bash
         run: |
           set -euo pipefail
@@ -379,6 +409,7 @@ jobs:
           echo "artifact_sha256=$actual_sha" >> "$GITHUB_OUTPUT"
 
       - name: Reverify clean source and finalized production manifest
+        if: ${{ inputs.publish }}
         shell: bash
         run: |
           set -euo pipefail
@@ -390,6 +421,7 @@ jobs:
             --artifact "$ARTIFACT_PATH"
 
       - name: Pack formal compatibility assets
+        if: ${{ inputs.publish }}
         shell: bash
         run: |
           set -euo pipefail
@@ -401,6 +433,7 @@ jobs:
 
       - id: guard
         name: Enforce exact CLI-only local Release asset set
+        if: ${{ inputs.publish }}
         shell: bash
         run: |
           set -euo pipefail
@@ -409,7 +442,8 @@ jobs:
             --expected-executable '${{ steps.resolve.outputs.artifact_asset }}'
           echo 'artifact_asset=${{ steps.resolve.outputs.artifact_asset }}' >> "$GITHUB_OUTPUT"
 
-      - name: Upload release candidate assets
+      - name: Upload formal release assets
+        if: ${{ inputs.publish }}
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
           name: patched-codex-cli-release-${{ steps.resolve.outputs.compat_id }}

@@ -57,11 +57,10 @@ real-manifest repository overlay: 52 / 52 passed
 - release-asset guard unit tests;
 - Python syntax compilation;
 - JSON parsing and hash/link validation;
-- GitHub/CircleCI YAML parsing with the available parser;
+- GitHub Actions YAML parsing with the available parser;
 - Bash syntax validation for `build_patched_codex_bundle.sh`;
-- workflow static guard: no compatibility ID, upstream commit, or npm SRI authority in CircleCI/formal patched release YAML;
-- CircleCI uses the dated `ubuntu-2604:2026.05.1` machine image rather than a moving `current` tag;
-- workflow-dispatch and CircleCI selector/target values are passed as environment data rather than interpolated into shell source;
+- workflow static guard: no compatibility ID, upstream commit, or npm SRI authority in GitHub Actions YAML;
+- workflow-dispatch selector/target values are passed as environment data rather than interpolated into shell source;
 - Manager platform CI discovers `npm pack --json` output paths instead of assuming version `0.1.2`;
 - resolver validation against the real p1/p2/p3 manifests from the fixed baseline;
 - current p3 resolution with acceptance and release authority required.
@@ -70,9 +69,7 @@ real-manifest repository overlay: 52 / 52 passed
 
 - hosted GitHub Actions execution;
 - `actionlint` in the repository toolchain;
-- CircleCI CLI validation;
-- hosted CircleCI candidate compilation;
-- cold/warm/near-warm build timings and CircleCI credits;
+- hosted GitHub Actions acceptance-candidate compilation;
 - full independent p3 binary rebuild;
 - exact reproduction of the accepted `codex.exe` SHA-256;
 - draft reconciliation against a real GitHub Release;
@@ -85,20 +82,19 @@ Do not mark the replacement production-ready until the hosted and build validati
 
 The following gates are mandatory:
 
-- [x] CircleCI YAML contains no static compatibility version matrix.
-- [x] One ordinary pipeline request resolves one exact compatibility and target.
-- [x] `build_all_compat=true` fails closed instead of compiling all historical versions.
+- [x] GitHub Actions YAML contains no static compatibility version matrix.
+- [x] One build-only workflow dispatch resolves one exact compatibility and target.
 - [x] Historical payloads remain present and immutable.
 - [x] Workflow inputs no longer copy official npm integrity or accepted artifact SHA-256.
 - [x] Build infrastructure is committed in a reviewed build profile.
 - [x] Official runtime identity is committed in a target-specific runtime lock.
 - [x] Acceptance identity is committed in a machine-readable record.
 - [x] Formal release rebuilds only `codex-cli` / `codex`.
-- [x] Formal release does not call manifest `finalize` in temporary staging.
+- [x] Formal release finalizes only a temporary manifest copy.
 - [x] Draft publication is recoverable and exact-asset guarded.
 - [x] Published compatibility Releases are immutable.
-- [ ] Hosted CircleCI current build succeeds.
-- [ ] Hosted GitHub formal rebuild reproduces the accepted artifact exactly.
+- [ ] Hosted GitHub Actions acceptance-candidate build succeeds.
+- [ ] Hosted GitHub formal rebuild matches its finalized manifest, descriptor, and checksums exactly.
 - [ ] Draft upload/recovery canary succeeds.
 - [ ] Final published asset set passes remote digest verification.
 
