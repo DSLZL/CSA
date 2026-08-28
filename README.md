@@ -2,246 +2,197 @@
 
 # CSA
 
-A fail-closed manager for running a version-pinned, patched Codex CLI beside the official installation.
+A version-pinned, fail-closed manager for running a patched Codex CLI beside the official installation.
 
 [![CI](https://github.com/DSLZL/CSA/actions/workflows/ci.yml/badge.svg)](https://github.com/DSLZL/CSA/actions/workflows/ci.yml)
 [![CSA release](https://img.shields.io/github/v/release/DSLZL/CSA?filter=v%2A&label=CSA)](https://github.com/DSLZL/CSA/releases)
+[![npm](https://img.shields.io/npm/v/%40dslzl%2Fcsa)](https://www.npmjs.com/package/@dslzl/csa)
 [![Patched Codex](https://img.shields.io/badge/patched%20Codex-0.150.1%20accepted-white)](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.150.1-native-join-p8)
 
-[Getting started](#getting-started) · [How it works](#how-it-works) · [Compatibility](#compatibility) · [Commands](#commands) · [Development](#development) · [简体中文](README_ZH.md)
+[Quick start](#quick-start) · [Current support](#current-support) · [Commands](#command-reference) · [Documentation](#development-and-documentation) · [简体中文](README_ZH.md)
 
 </div>
 
-CSA adds native subagent joins and a live subagent view to Codex without replacing the official CLI. The manager discovers the installed Codex package, verifies its runtime files, and places the patched executable in a separate managed directory.
+CSA adds native subagent joins and a live subagent view to Codex without replacing the official CLI. The Manager verifies the installed official runtime, downloads one exact patched compatibility from a formal GitHub Release, and keeps every managed file in a separate directory.
 
 > [!IMPORTANT]
-> CSA Manager `0.1.3` is distributed through `@dslzl/csa` and the `v0.1.3` GitHub Release. Patched Codex `0.150.1` p8 is the current accepted Windows x64 release.
+> CSA Manager `0.1.3` is published as `@dslzl/csa` and as the `v0.1.3` GitHub Release. The current formal patched compatibility is Codex `0.150.1` p8 for Windows x64.
 
-## What the patch changes
+## Why CSA
 
-- `join_agent` waits for one exact child run to finish in a single tool call.
-- `join_agents` waits for several exact runs and returns results in request order.
-- The parent no longer needs to poll child status while a native Join is pending.
-- The TUI can show live child activity, completed work, and navigation back to a child session.
-- The patched executable uses the official Codex runtime package and companion tools instead of carrying a second copy.
+CSA keeps the patch useful without turning the official installation into a mutable build target:
 
-The current `0.150.1` p8 release includes the latest subagent panel and lossless terminal Orbit work.
+- `join_agent` waits for one exact child run to finish in one tool call.
+- `join_agents` waits for several exact runs and returns their outcomes in request order.
+- The TUI shows live child activity, completed work, and navigation back to a child session.
+- The patched executable reuses the verified official Codex runtime and companion tools.
+- A checksum-bound shim falls back to official Codex if the prepared binding is no longer valid.
 
-## How it works
+The Manager does not overwrite official Codex files, copy the default `CODEX_HOME`, edit shell profiles, or change `PATH`.
 
-```text
-Official Codex installation (read-only)
-                  │
-                  │ discover and fingerprint
-                  ▼
-             CSA Manager
-                  │ prepare + plug
-                  ▼
-       <manager-root>/bin/codex
-             ├─ valid binding ──> patched codex.exe + official runtime
-             └─ invalid binding ─> official Codex launcher
-```
+## Current support
 
-CSA keeps four things separate:
-
-| Component | Owned by | Purpose |
+| Product | Current release | Platforms |
 | --- | --- | --- |
-| Official Codex | OpenAI package manager installation | Configuration, authentication, runtime helpers, and safe fallback |
-| CSA Manager | CSA | Verification, preparation, activation, status, and removal |
-| Patched Codex | CSA manager directory | Version-pinned Native Join and TUI changes |
-| `codex` shim | CSA manager directory | Chooses the verified patched binary or falls back to official Codex |
+| CSA Manager | `0.1.3` | Windows x64, Linux x64, Linux arm64 glibc, macOS x64, macOS arm64 |
+| Patched Codex CLI | [`rust-v0.150.1-native-join-p8`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.150.1-native-join-p8) | Windows x64 |
 
-The manager does not overwrite official files, copy the user's Codex home, or edit `PATH`. Normal shim launches inherit the same `CODEX_HOME`, configuration, authentication, working directory, and terminal as official Codex.
+Manager availability on a platform does not imply that a patched Codex compatibility exists for that platform. The [compatibility index](release/compatibility-index.json) is authoritative for repository payloads, while normal installation discovers published `compat-*` Releases.
 
-## Compatibility
+Online installation is exact-match only. A release is selectable only when its target and Codex version match the Manager and the installed official runtime. Tags, commits, manifests, file sizes, and SHA-256 values are checked before activation.
 
-| Compatibility | Codex | Target | State |
-| --- | --- | --- | --- |
-| [`rust-v0.149.0-native-join-p3`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.149.0-native-join-p3) | `0.149.0` | Windows x64 | Accepted and published |
-| `rust-v0.149.1-native-join-p6` | `0.149.1` | Windows x64 | Candidate, release disabled |
-| `rust-v0.149.1-native-join-p7` | `0.149.1` | Windows x64 | Candidate, release disabled |
-| `rust-v0.149.1-native-join-p8` | `0.149.1` | Windows x64 | Candidate, release disabled |
-| [`rust-v0.150.1-native-join-p8`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.150.1-native-join-p8) | `0.150.1` | Windows x64 | Accepted and published |
+## Quick start
 
-The [compatibility index](release/compatibility-index.json) is authoritative for repository payloads. Normal online installation discovers every formal `compat-*` GitHub Release; build-only candidates are not listed.
+### Install the Manager
 
-Online installation is deliberately strict. CSA lists every formal patched release, but enables only entries whose target and Codex version exactly match this Manager and the installed read-only official runtime. Every selected Release is then revalidated against its tag, upstream commit, manifest, size, and SHA-256.
-
-## Prerequisites
-
-- An official Codex CLI installation that CSA can discover.
-- Windows x64 for the currently accepted patched Codex target.
-- Rust `1.95.0` when building the current Manager or a patched payload from source.
-- Node.js `18` or newer when installing the Manager from npm.
-
-Public GitHub API requests work without authentication. If that rate limit is exhausted, set `GITHUB_TOKEN` or `GH_TOKEN` for the current `csa install` process; CSA sends it only to `api.github.com` and never stores it.
-
-## Getting started
-
-### Get the Manager
-
-Install the standard CLI from npm:
+You need Node.js 18 or newer and a working official Codex CLI installation.
 
 ```powershell
-npm install --global @dslzl/csa
+npm install --global @dslzl/csa@0.1.3
 csa --version
 ```
 
-Prebuilt Manager archives and `SHA256SUMS` are also available on the [Releases page](https://github.com/DSLZL/CSA/releases). Download the archive for your platform, verify it, and extract the `csa` executable.
-
-To build the current source instead:
+You can also run the CLI without a global install:
 
 ```powershell
-git clone https://github.com/DSLZL/CSA.git
-Set-Location CSA
-cargo build --release --locked
-
-$Manager = (Resolve-Path '.\target\release\csa.exe').Path
-& $Manager --version
+npx @dslzl/csa@0.1.3 --version
 ```
+
+Adding `--yes` to `npx` only suppresses npm's package-install confirmation. It does not choose a patched Codex release for you:
+
+```powershell
+npx --yes @dslzl/csa@0.1.3 --version
+```
+
+Prebuilt Manager archives and `SHA256SUMS` are available from the [`v0.1.3` Release](https://github.com/DSLZL/CSA/releases/tag/v0.1.3).
 
 > [!NOTE]
-> The npm package exposes only `csa`. It does not replace `codex` or activate a patched build during package installation; run `csa install` explicitly.
+> Installing the npm package exposes only `csa`. It does not replace `codex`, download a patched build, or activate a shim during package installation.
 
-### Verify and install
+### Check and install patched Codex
 
-Use an explicit manager root while testing so its files are easy to inspect and remove:
+Run these commands in an interactive terminal:
 
 ```powershell
-$ManagerRoot = Join-Path $env:LOCALAPPDATA 'CSA\managed'
-
-csa doctor --manager-root $ManagerRoot
-csa install --manager-root $ManagerRoot
-csa status --manager-root $ManagerRoot
+csa doctor
+csa install
+csa status
 ```
 
-In an interactive terminal, bare `csa install` fetches the formal compatibility catalog, lists patched Codex versions and their installability, and asks for a number. Automation must select the exact ID explicitly:
+`csa install` lists formal, non-draft, non-prerelease patched Releases in version order. It marks incompatible entries as unavailable and asks you to select an installable version.
+
+Automation must provide the exact compatibility ID:
 
 ```powershell
 csa install --compat rust-v0.150.1-native-join-p8
 ```
 
 > [!WARNING]
-> A Release is selectable only when its target and Codex version match the current Manager and installed official runtime. CSA never downloads or overwrites a different official Codex version. Local payload mode is for development and acceptance work, not a downgrade bypass.
+> CSA does not download, downgrade, or overwrite the official Codex installation to make a compatibility fit. If no entry matches, install the required official Codex version yourself or wait for a matching CSA compatibility.
 
-For local payload development, pass a manifest and exactly one local artifact or source directory:
+### Use the managed shim
 
-```powershell
-$CompatId = 'rust-v0.150.1-native-join-p8'
-$Manifest = Join-Path 'C:\absolute\payload' "$CompatId\manifest.toml"
-$Artifact = 'C:\absolute\patched\codex.exe'
-
-& $Manager install --manager-root $ManagerRoot `
-  --manifest $Manifest `
-  --artifact $Artifact
-```
-
-The compatibility directory must keep the same name as its `compat_id`. Candidate manifests must be finalized in a disposable payload copy before local installation; the committed candidate files remain immutable inputs.
-
-### Use the patched CLI
-
-`install` creates the managed shim but does not edit `PATH`. Add it only to the current PowerShell process first:
+`install` creates a verified shim but does not edit `PATH`. On Windows, test it in the current PowerShell process first:
 
 ```powershell
-$ManagedBin = Join-Path $ManagerRoot 'bin'
-$env:PATH = $ManagedBin + [IO.Path]::PathSeparator + $env:PATH
+$Status = csa status | ConvertFrom-Json
+$env:PATH = $Status.activation.managed_bin + [IO.Path]::PathSeparator + $env:PATH
 
 Get-Command codex -All
 codex --version
 codex
 ```
 
-For automated or disposable testing, use `exec --isolated` instead of activating the shim:
+Keep the official Codex launcher on `PATH` after the managed directory. If the binding becomes invalid, the shim uses that official launcher instead of an unverified patched executable.
+
+### Remove CSA-managed state
 
 ```powershell
-& $Manager exec --isolated `
-  --manager-root $ManagerRoot `
-  --codex-home C:\absolute\isolated\codex-home `
-  --cwd C:\absolute\fixture `
-  --logs-dir C:\absolute\logs `
-  --state-dir C:\absolute\state `
-  --record C:\absolute\evidence.json `
-  --npm-prefix C:\absolute\npm-prefix `
-  -- --version
-```
-
-Every isolated directory must be absolute, normalized, distinct, and outside the manager and official Codex trees.
-
-### Uninstall
-
-```powershell
-& $Manager uninstall --manager-root $ManagerRoot
+csa uninstall
 
 Get-Command codex -All
 codex --version
+npm uninstall --global @dslzl/csa
 ```
 
-`uninstall` removes the managed shim and Manager-owned preparation data. It is safe to run more than once. It does not remove the official Codex installation, npm packages, user configuration, or manually added `PATH` entries.
+`uninstall` withdraws the shim and removes Manager-owned preparation data. It leaves official Codex, user configuration, authentication, npm state, and manually edited `PATH` entries alone.
 
-If you added the managed `bin` directory to a persistent user `PATH`, remove only that entry after confirming that `codex` resolves to the official launcher.
+## Native Join and TUI
 
-## Commands
+The current p8 patch includes:
 
-| Command | What it does |
+- exact single-run and batch Native Join tools;
+- replayable terminal outcomes and ordered batch results;
+- child transport fallback inheritance;
+- a live subagent panel for starting, running, waiting, approval, completed, failed, and cancelled work;
+- text, Sixel, and Kitty Orbit rendering with reduced-motion behavior.
+
+The formal Windows x64 acceptance record covers the exact executable hash, official runtime binding, official-file immutability, and an authenticated single-child Native Join. Multi-child Native Join, Ultra runtime behavior, and interactive TUI acceptance remain explicitly unverified.
+
+For quick visual work without compiling Codex, use the standalone [Ratatui UI harness](tests/ui/README.md).
+
+## How CSA works
+
+```text
+Official Codex installation, read-only
+                 |
+                 | detect and fingerprint
+                 v
+            CSA Manager
+                 |
+                 | prepare and plug
+                 v
+      <manager-root>/bin/codex
+          | valid binding   -> patched codex.exe + official runtime
+          | invalid binding -> official Codex launcher
+```
+
+CSA separates four identities:
+
+| Component | Owner | Role |
+| --- | --- | --- |
+| Official Codex | Existing package-manager installation | Configuration, authentication, runtime files, and fallback |
+| CSA Manager | CSA | Discovery, verification, installation, activation, status, and removal |
+| Patched Codex | Manager-owned directory | Version-pinned Native Join and TUI changes |
+| `codex` shim | Manager-owned `bin` directory | Revalidates the binding and selects patched or official Codex |
+
+Normal shim launches inherit the current `CODEX_HOME`, working directory, terminal, and environment just like an official launch. Tests that need isolation must use explicit disposable directories instead.
+
+## Command reference
+
+| Command | Purpose |
 | --- | --- |
-| `csa doctor` | Checks the official installation and optional compatibility inputs without changing state |
-| `csa install` | Lists formal patched releases, installs the selected exact match, or accepts an exact local payload |
-| `csa uninstall` | Withdraws the shim and removes Manager-owned preparation data |
-| `csa prepare` | Validates or builds an exact local payload without activating it |
-| `csa plug` | Publishes the checksum-bound shim inside `<manager-root>/bin` |
-| `csa unplug` | Withdraws the shim without removing prepared data |
-| `csa status` | Reports prepared state, activation health, and drift |
-| `csa purge` | Removes the shim and all Manager-owned prepared, source, build, and state data |
-| `csa exec --isolated` | Runs the prepared Codex binary with explicit isolated directories and records evidence |
+| `csa doctor` | Check the official installation and optional compatibility inputs without changing state |
+| `csa install` | List formal Releases and install one exact match, or install an exact local payload |
+| `csa uninstall` | Withdraw the shim and remove Manager-owned prepared state |
+| `csa prepare` | Validate or build an exact local payload without activating it |
+| `csa plug` | Publish the checksum-bound shim inside `<manager-root>/bin` |
+| `csa unplug` | Withdraw the shim while keeping prepared data |
+| `csa status` | Report prepared state, activation health, paths, and drift |
+| `csa purge` | Remove all Manager-owned prepared, source, build, shim, and state data |
+| `csa exec --isolated` | Run the prepared binary with explicit isolated directories and record evidence |
 
-Run `csa --help` for the exact option list. Manager commands return machine-readable JSON; invalid input and verification failures return a structured error on stderr.
+Run `csa --help` for the complete option list. Manager commands write machine-readable JSON to stdout. Invalid input and verification failures write a structured error to stderr and exit with code 2.
 
-## Safety boundaries
+## Development and documentation
 
-- Official Codex paths are external and read-only.
-- Manifests, source preimages, runtime files, artifacts, state, and shims are checksum-bound.
-- Missing files, version drift, unsafe path overlap, and unverified assets fail closed.
-- The shim revalidates its binding before launch and falls back to official Codex when the patched path is no longer trusted.
-- Tests use disposable homes, working directories, state, logs, npm prefixes, and child-only `PATH` values.
-- Authentication files, tokens, cookies, and full environment dumps do not belong in test evidence or release assets.
-
-## Development
-
-The Manager is a small Rust binary. Patched Codex payloads are data-driven and pinned to exact upstream tags, commits, source hashes, toolchains, targets, and test contracts.
-
-Run the Manager quality gate:
+The Manager requires Rust `1.89` or newer. The current release and patched-Codex build profiles are pinned to Rust `1.95.0`.
 
 ```powershell
 cargo fmt --all -- --check
 cargo clippy --workspace --all-targets --all-features -- -D warnings
 cargo test --all-targets
-```
-
-Validate compatibility and release tooling:
-
-```powershell
-py -3 validation\validate_replacements.py --repository .
-py -3 scripts\test_compat_catalog.py
-py -3 scripts\test_verify_release_asset_set.py
-py -3 scripts\test_verify_patch_payload.py
+py -3 scripts\test_validation_evidence.py
 py -3 scripts\test_release_tools.py
 ```
 
-CSA has two independent release streams:
-
-- `vX.Y.Z` releases contain the Manager and its platform archives.
-- `compat-<compat_id>` releases contain one reviewed patched Codex compatibility.
-
-GitHub Actions builds disposable acceptance candidates and independently rebuilds accepted compatibility entries for formal publication. Candidate binaries are local-test evidence, never production release authority.
-
-## Documentation
-
-- [Operations and recovery](docs/operations.md)
+- [Operations, recovery, and troubleshooting](docs/operations.md)
 - [Development and test isolation](docs/development.md)
 - [Compatibility and release process](docs/release.md)
-- [Current release readiness](release-readiness.md)
 - [Compatibility catalog](release/compatibility-index.json)
-- [Platform support matrix](release/support-matrix.json)
+- [Manager platform support matrix](release/support-matrix.json)
+
+CSA uses two independent release streams: `vX.Y.Z` for the Manager and `compat-<compat_id>` for one reviewed patched Codex compatibility.
 
 ## Friends
 
