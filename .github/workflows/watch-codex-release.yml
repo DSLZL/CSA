@@ -217,7 +217,7 @@ jobs:
           @"
           Ports the reviewed Native Join patch set to ``$env:UPSTREAM_TAG`` at ``$env:UPSTREAM_COMMIT``.
 
-          The exact tag/commit, source preimages, cumulative patch preflight, runtime lock, compatibility-index registration, and payload contracts passed. CircleCI compilation and local Windows acceptance from ``.dev`` are required before the candidate can become ``accepted``. This watcher does not build binaries or publish a GitHub Release.
+          The exact tag/commit, source preimages, cumulative patch preflight, runtime lock, compatibility-index registration, and payload contracts passed. A GitHub Actions acceptance-candidate build and local Windows acceptance from a disposable directory are required before the candidate can become ``accepted``. This watcher does not build binaries or publish a GitHub Release.
           "@ | Set-Content -Encoding utf8 "$env:WATCH_ROOT/pr-body.md"
           & gh pr create --repo "$env:GITHUB_REPOSITORY" --base "$env:GITHUB_REF_NAME" --head $branch --title "feat(compat): support $env:UPSTREAM_TAG" --body-file "$env:WATCH_ROOT/pr-body.md" *>> "$env:WATCH_ROOT/candidate.log"
           $code = $LASTEXITCODE
@@ -290,22 +290,22 @@ jobs:
             echo "- Upstream: \`$UPSTREAM_TAG\` / \`$UPSTREAM_COMMIT\`"
             echo
             if [[ "$lifecycle" == candidate ]]; then
-              echo "Build exactly this compatibility in CircleCI with:"
+              echo "Dispatch \`Release patched Codex CLI\` to build exactly this acceptance candidate with:"
               echo
               echo '```text'
-              echo "build_patched_codex: true"
               echo "compat_selector: $COMPAT_ID"
               echo "target: x86_64-pc-windows-msvc"
-              echo "store_artifact: true"
+              echo "publish: false"
               echo '```'
               echo
-              echo "After local Windows acceptance, finalize the reviewed manifest, then commit an acceptance record with \`scripts/compat_catalog.py accept\`. No artifact hash or npm integrity is copied into a workflow input."
+              echo "Download \`patched-codex-acceptance-$COMPAT_ID\`, run local Windows acceptance in a disposable directory, then commit an acceptance record with \`scripts/compat_catalog.py accept\`. No artifact hash or npm integrity is copied into a workflow input."
             else
               echo "The committed acceptance authority is ready. Dispatch \`Release patched Codex CLI\` with:"
               echo
               echo '```text'
               echo "compat_selector: $COMPAT_ID"
               echo "target: x86_64-pc-windows-msvc"
+              echo "publish: true"
               echo '```'
             fi
           } >> "$GITHUB_STEP_SUMMARY"

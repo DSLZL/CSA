@@ -231,7 +231,7 @@ CSA has two independent release streams:
 - `vX.Y.Z` releases contain the Manager and its platform archives.
 - `compat-<compat_id>` releases contain one reviewed patched Codex compatibility.
 
-CircleCI builds acceptance candidates. GitHub Actions performs an independent production build and owns formal publication. Neither pipeline treats the other's binary as release authority.
+GitHub Actions builds disposable acceptance candidates and independently rebuilds accepted compatibility entries for formal publication. Candidate binaries are local-test evidence, never production release authority.
 
 ## Documentation
 

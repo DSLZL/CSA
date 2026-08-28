@@ -231,7 +231,7 @@ CSA 有两条相互独立的发布流：
 - `vX.Y.Z` release 包含管理器和各平台压缩包。
 - `compat-<compat_id>` release 包含一个经过评审的 patched Codex compatibility。
 
-CircleCI 负责编译验收 candidate。GitHub Actions 会独立执行 production build，并负责正式发布。两条 pipeline 都不会把对方的 binary 当作发布 authority。
+GitHub Actions 负责编译一次性验收 candidate，并在 compatibility 被接受后独立重建和正式发布。Candidate binary 只作为本地测试 evidence，不是 production release authority。
 
 ## 文档
 
