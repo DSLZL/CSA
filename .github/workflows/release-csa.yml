@@ -372,6 +372,7 @@ jobs:
               -f ref="refs/tags/$TAG" \
               -f sha="$tag_sha" >/dev/null
           fi
+          git fetch --force --tags origin
 
       - name: Publish GitHub Release
         env:
@@ -386,14 +387,12 @@ jobs:
             exit 2
           fi
 
-          cat > "$RUNNER_TEMP/release-notes.md" <<EOF
-          CSA v${VERSION}
-
-          This Release contains the CSA manager distribution only.
-          Each supported platform is published as an independent manager archive and verified npm package tarball.
-          The @dslzl/csa meta package tarball is included for exact npm publication.
-          Patched Codex CLI builds are published separately under compat-<compat_id> Releases.
-          EOF
+          python scripts/generate_release_notes.py \
+            --repository . \
+            --stream manager \
+            --current-ref "$GITHUB_SHA" \
+            --version "$VERSION" \
+            --output "$RUNNER_TEMP/release-notes.md"
 
           mapfile -t assets < <(find "$RUNNER_TEMP/csa-release-assets" -maxdepth 1 -type f -print | sort)
 

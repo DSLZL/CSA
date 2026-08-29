@@ -29,6 +29,7 @@ from ci_release import build_input, platform_artifact  # noqa: E402
 from compatibility_audit import AuditError, check_immutability  # noqa: E402
 from check_sccache_stats import main as sccache_stats_main  # noqa: E402
 from check_sccache_stats import summarize as summarize_sccache_stats  # noqa: E402
+from generate_release_notes import ReleaseNotesError, generate  # noqa: E402
 from compat_release import (  # noqa: E402
     CompatibilityReleaseError,
     blocker_body,
@@ -1074,6 +1075,51 @@ def test_release_stream_contracts() -> None:
     assert "dslzl-csa-darwin-arm64-${VERSION}.tgz" in manager_workflow
     assert "Validate exact manager and npm asset set" in manager_workflow
 
+    generator = (REPOSITORY / "scripts" / "generate_release_notes.py").read_text(
+        encoding="utf-8"
+    )
+    release_policy = (REPOSITORY / ".github" / "release.yml").read_text(encoding="utf-8")
+    assert manager_workflow.count("python scripts/generate_release_notes.py") == 1
+    assert "--stream manager" in manager_workflow
+    assert patched_workflow.count("python scripts/generate_release_notes.py") == 1
+    assert "--stream compat" in patched_workflow
+    assert "build_target: ${{ steps.resolve.outputs.build_target }}" in patched_workflow
+    assert 'TARGET: ${{ needs.build.outputs.build_target }}' in patched_workflow
+    for workflow in (manager_workflow, patched_workflow):
+        assert "--generate-notes" not in workflow
+        assert 'cat > "$RUNNER_TEMP/release-notes.md"' not in workflow
+        assert workflow.index("python scripts/generate_release_notes.py") < workflow.index(
+            'gh release create "$TAG"'
+        )
+    patched_publish = patched_workflow.split(
+        "- name: Create or resume draft, upload idempotently, verify, then publish", 1
+    )[1]
+    assert patched_publish.index('if [[ "$existing_draft" == false ]]') < patched_publish.index(
+        "python scripts/generate_release_notes.py"
+    )
+    for fact in (
+        "This Release contains the CSA manager distribution only.",
+        "This compatibility Release contains exactly one Codex executable product",
+        "Production executable SHA-256",
+        "Built independently from the reviewed upstream source",
+    ):
+        assert fact in generator
+    for label in (
+        "feature",
+        "enhancement",
+        "bug",
+        "fix",
+        "cli",
+        "performance",
+        "ci",
+        "build",
+        "release",
+        "documentation",
+        "skip-changelog",
+        "dependencies",
+    ):
+        assert f"- {label}" in release_policy
+
     for workflow in (manager_workflow, patched_workflow):
         assert 'repos/$GITHUB_REPOSITORY/git/tags' in workflow
         assert 'repos/$GITHUB_REPOSITORY/git/refs' in workflow
@@ -1232,6 +1278,247 @@ def git(root: Path, *args: str) -> str:
         ["git", *args], cwd=root, check=True, capture_output=True, text=True
     )
     return result.stdout.strip()
+
+
+def release_notes_commit(
+    root: Path, relative: str, content: str, subject: str, body: str | None = None
+) -> None:
+    path = root / relative
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content, encoding="utf-8")
+    git(root, "add", "--", relative)
+    args = ["commit", "-q", "-m", subject]
+    if body is not None:
+        args.extend(["-m", body])
+    git(root, *args)
+
+
+def release_notes_index(compat_id: str) -> dict[str, object]:
+    return {
+        "schema": 1,
+        "compatibilities": {
+            compat_id: {
+                "manifest": f"payload/codex/native-join-p2/bindings/{compat_id}/manifest.toml",
+                "targets": {
+                    "x86_64-pc-windows-msvc": {
+                        "runtime_lock": f"release/runtime-locks/{compat_id}.json",
+                        "acceptance": f"release/acceptance/{compat_id}.json",
+                    }
+                },
+            }
+        },
+    }
+
+
+def initialize_release_notes_repository(root: Path, compat_id: str) -> None:
+    root.mkdir()
+    git(root, "init", "-q")
+    git(root, "config", "user.name", "CSA Test")
+    git(root, "config", "user.email", "csa@example.invalid")
+    (root / "release").mkdir()
+    (root / "release" / "compatibility-index.json").write_text(
+        json.dumps(release_notes_index(compat_id), indent=2) + "\n", encoding="utf-8"
+    )
+    git(root, "add", "release/compatibility-index.json")
+    release_notes_commit(root, "src/main.rs", "baseline\n", "chore: fixture baseline")
+
+
+def expect_release_notes_error(call) -> None:
+    try:
+        call()
+    except ReleaseNotesError:
+        return
+    raise AssertionError("invalid release-note input was accepted")
+
+
+def test_release_notes(root: Path) -> None:
+    compat_id = "rust-v1.2.3-native-join-p3"
+    initialize_release_notes_repository(root, compat_id)
+    git(root, "tag", "v1.0.0")
+    git(root, "tag", "compat-rust-v1.2.3-native-join-p1")
+
+    release_notes_commit(
+        root,
+        "src/main.rs",
+        "feature one\n",
+        "feat(cli): choose [safe] *mode*",
+    )
+    release_notes_commit(
+        root,
+        "src/main.rs",
+        "feature two\n",
+        "feat(cli): CHOOSE [safe] *mode*",
+    )
+    release_notes_commit(
+        root,
+        "src/skipped.rs",
+        "skip\n",
+        "feat(manager): skipped feature",
+        "Changelog: skip",
+    )
+    release_notes_commit(
+        root, "src/heading.rs", "literal\n", "feat(cli): # keep heading literal"
+    )
+    release_notes_commit(
+        root, "src/feature.rs", "feature\n", "feat(manager): add managed activation"
+    )
+    release_notes_commit(
+        root, "src/breaking.rs", "breaking\n", "feat(cli)!: replace legacy mode"
+    )
+    release_notes_commit(root, "src/perf.rs", "fast\n", "perf(manager): speed resolution")
+    release_notes_commit(
+        root, "src/refactor.rs", "simple\n", "refactor(manager): simplify routing"
+    )
+    release_notes_commit(root, "docs/install.md", "guide\n", "docs: explain installation")
+    release_notes_commit(
+        root,
+        ".github/workflows/release-csa.yml",
+        "name: fixture\n",
+        "ci: stabilize manager release",
+    )
+    release_notes_commit(root, "Cargo.toml", "[package]\n", "build: pin release metadata")
+    release_notes_commit(root, "src/test_only.rs", "test\n", "test: hidden manager test")
+    release_notes_commit(root, "src/chore.rs", "chore\n", "chore: hidden cleanup")
+    git(root, "tag", "compat-rust-v1.2.3-native-join-p2")
+    release_notes_commit(
+        root,
+        "payload/codex/native-join-p2/patches/orbit.patch",
+        "square orbit\n",
+        "feat(patch): add square orbit",
+    )
+    release_notes_commit(
+        root,
+        "payload/codex/native-join-p2/patches/overlap.patch",
+        "no overlap\n",
+        "fix(patch): repair loading overlap",
+    )
+    release_notes_commit(
+        root,
+        "release/build-profiles/windows-msvc-x64.json",
+        "{}\n",
+        "build(patch): pin LLVM",
+    )
+    release_notes_commit(root, "src/routing.rs", "fixed\n", "fix(manager): restore routing")
+    git(root, "tag", "v1.1.0")
+    git(root, "tag", f"compat-{compat_id}")
+    git(root, "tag", "compat-rust-v1.2.3-other-family-p99")
+    git(root, "tag", "v9.9.9")
+
+    manager_output = root / "manager.md"
+    manager_result = generate(
+        root, "manager", "HEAD", manager_output, version="1.1.0"
+    )
+    manager = manager_output.read_text(encoding="utf-8")
+    assert manager_result["previous_tag"] == "v1.0.0"
+    assert "`v1.0.0...v1.1.0`" in manager
+    manager_dynamic = manager.split("## Changelog", 1)[0]
+    assert manager_dynamic.count("Choose \\[safe\\] \\*mode\\*.") == 1
+    assert "\\# keep heading literal." in manager_dynamic
+    for section in (
+        "## New Features",
+        "## Bug Fixes",
+        "## CLI",
+        "## Improvements",
+        "## Build & Release",
+        "## Documentation",
+    ):
+        assert section in manager
+    assert "Breaking: Replace legacy mode." in manager
+    assert manager.index("Speed resolution.") < manager.index("Simplify routing.")
+    assert "Add square orbit" not in manager
+    for hidden in ("skipped feature", "hidden manager test", "hidden cleanup"):
+        assert hidden not in manager
+    assert manager.index("## CLI") < manager.index("## Release Information")
+    assert manager.count("feat(cli): choose \\[safe\\] \\*mode\\*") == 1
+    assert manager.count("feat(cli): CHOOSE \\[safe\\] \\*mode\\*") == 1
+
+    compat_output = root / "compat.md"
+    compat_result = generate(
+        root,
+        "compat",
+        "HEAD",
+        compat_output,
+        compat_id=compat_id,
+        codex_version="1.2.3",
+        upstream_tag="rust-v1.2.3",
+        upstream_commit="a" * 40,
+        target="x86_64-pc-windows-msvc",
+        artifact_sha256="b" * 64,
+    )
+    compat = compat_output.read_text(encoding="utf-8")
+    assert compat_result["previous_tag"] == "compat-rust-v1.2.3-native-join-p2"
+    assert "`compat-rust-v1.2.3-native-join-p2...compat-rust-v1.2.3-native-join-p3`" in compat
+    assert "## Patch Changes" in compat and "## Bug Fixes" in compat
+    assert "## Build & Release" in compat
+    assert "## Documentation" not in compat and "## Improvements" not in compat
+    assert "Add square orbit." in compat and "Repair loading overlap." in compat
+    assert "Pin LLVM." in compat
+    assert "Choose" not in compat and "Restore routing" not in compat
+    assert "- Target: `x86_64-pc-windows-msvc`" in compat
+    assert "`" + "b" * 64 + "`" in compat
+    assert compat.index("## Patch Changes") < compat.index("## Compatibility")
+
+    first = root.parent / "release-notes-first"
+    first_compat_id = "rust-v9.8.7-native-join-p1"
+    initialize_release_notes_repository(first, first_compat_id)
+    git(first, "tag", "v0.1.0")
+    git(first, "tag", f"compat-{first_compat_id}")
+    for stream, kwargs in (
+        ("manager", {"version": "0.1.0"}),
+        (
+            "compat",
+            {
+                "compat_id": first_compat_id,
+                "codex_version": "9.8.7",
+                "upstream_tag": "rust-v9.8.7",
+                "upstream_commit": "c" * 40,
+                "target": "x86_64-pc-windows-msvc",
+                "artifact_sha256": "d" * 64,
+            },
+        ),
+    ):
+        output = first / f"{stream}.md"
+        result = generate(first, stream, "HEAD", output, **kwargs)
+        notes = output.read_text(encoding="utf-8")
+        assert result["previous_tag"] is None
+        assert "No user-facing changes in this release." in notes
+        assert "Initial release history through" in notes
+
+    expect_release_notes_error(
+        lambda: generate(root, "manager", "missing", root / "missing.md", version="1.1.0")
+    )
+    expect_release_notes_error(
+        lambda: generate(
+            root,
+            "compat",
+            "HEAD",
+            root / "bad-digest.md",
+            compat_id=compat_id,
+            codex_version="1.2.3",
+            upstream_tag="rust-v1.2.3",
+            upstream_commit="a" * 40,
+            target="x86_64-pc-windows-msvc",
+            artifact_sha256="not-a-digest",
+        )
+    )
+    expect_release_notes_error(
+        lambda: generate(
+            root,
+            "compat",
+            "HEAD",
+            root / "bad-compat-id.md",
+            compat_id="not-a-compatibility-id",
+            codex_version="1.2.3",
+            upstream_tag="rust-v1.2.3",
+            upstream_commit="a" * 40,
+            target="x86_64-pc-windows-msvc",
+            artifact_sha256="b" * 64,
+        )
+    )
+    git(root, "tag", "v2.0.0", "v1.0.0")
+    expect_release_notes_error(
+        lambda: generate(root, "manager", "HEAD", root / "wrong-tag.md", version="2.0.0")
+    )
 
 
 def port_fixture(root: Path) -> tuple[Path, Path, str]:
@@ -1494,6 +1781,7 @@ def main() -> int:
         test_contract_shape()
         test_sccache_statistics()
         test_release_stream_contracts()
+        test_release_notes(root / "release-notes")
         test_release_phase_skips_validation_steps()
         test_compatibility_release_tools(root / "compat-release")
     print(
@@ -1510,6 +1798,7 @@ def main() -> int:
                 "patch_contract_shape": "pass",
                 "sccache_statistics": "pass",
                 "release_stream_contracts": "pass",
+                "release_notes": "pass",
                 "release_only_contract": "pass",
                 "absolute_path_version_execution": "pass",
                 "compatibility_release_pack": "pass",

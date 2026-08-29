@@ -50,6 +50,7 @@ jobs:
       codex_version: ${{ steps.resolve.outputs.codex_version }}
       upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
       upstream_commit: ${{ steps.resolve.outputs.upstream_commit }}
+      build_target: ${{ steps.resolve.outputs.build_target }}
       release_enabled: ${{ steps.resolve.outputs.release_enabled }}
       artifact_asset: ${{ steps.guard.outputs.artifact_asset }}
       artifact_sha256: ${{ steps.finalize.outputs.artifact_sha256 }}
@@ -541,6 +542,7 @@ jobs:
               -f ref="refs/tags/$TAG" \
               -f sha="$tag_sha" >/dev/null
           fi
+          git fetch --force --tags origin
 
       - name: Create or resume draft, upload idempotently, verify, then publish
         env:
@@ -550,6 +552,7 @@ jobs:
           UPSTREAM_TAG: ${{ needs.build.outputs.upstream_tag }}
           UPSTREAM_COMMIT: ${{ needs.build.outputs.upstream_commit }}
           COMPAT_ID: ${{ needs.build.outputs.compat_id }}
+          TARGET: ${{ needs.build.outputs.build_target }}
           PRODUCTION_CODEX_SHA256: ${{ needs.build.outputs.artifact_sha256 }}
           EXPECTED_EXECUTABLE: ${{ needs.build.outputs.artifact_asset }}
         run: |
@@ -567,19 +570,7 @@ jobs:
             fi
             gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" > "$remote"
           }
-          cat > "$notes" <<EOF
-          Patched Codex CLI ${CODEX_VERSION}
-
-          Compatibility ID: ${COMPAT_ID}
-          Upstream: ${UPSTREAM_TAG} (${UPSTREAM_COMMIT})
-          Production executable SHA-256: ${PRODUCTION_CODEX_SHA256}
-          Built independently from the reviewed upstream source by GitHub Actions.
-
-          This compatibility Release contains exactly one Codex executable product: the patched Codex CLI.
-          It does not publish Codex App, Codex Desktop, app-server, exec-server, MCP server, or other Codex binaries.
-          The remaining assets are the fail-closed compatibility payload, provenance descriptor, and checksums required by CSA Manager.
-          EOF
-
+          release_exists=false
           if load_release; then
             existing_draft="$(python -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["draft"]).lower())' "$remote")"
             existing_prerelease="$(python -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["prerelease"]).lower())' "$remote")"
@@ -593,6 +584,22 @@ jobs:
               echo "Published release already exists with the exact reviewed asset set."
               exit 0
             fi
+            release_exists=true
+          fi
+
+          python scripts/generate_release_notes.py \
+            --repository . \
+            --stream compat \
+            --current-ref "$GITHUB_SHA" \
+            --compat-id "$COMPAT_ID" \
+            --codex-version "$CODEX_VERSION" \
+            --upstream-tag "$UPSTREAM_TAG" \
+            --upstream-commit "$UPSTREAM_COMMIT" \
+            --target "$TARGET" \
+            --artifact-sha256 "$PRODUCTION_CODEX_SHA256" \
+            --output "$notes"
+
+          if [[ "$release_exists" == true ]]; then
             gh release edit "$TAG" \
               --repo "$GITHUB_REPOSITORY" \
               --draft \
