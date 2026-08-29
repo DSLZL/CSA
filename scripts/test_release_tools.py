@@ -932,46 +932,32 @@ def test_release_stream_contracts() -> None:
     for workflow in (patched_workflow, validation_workflow):
         assert workflow.count(cargo_key) == 3
         assert f"{cargo_key}-" not in workflow
-    assert patched_workflow.count("csa-patched-codex-sccache-v8-linux-X64") == 1
-    assert "csa-patched-codex-sccache-v8-linux-X64" not in validation_workflow
+    assert "csa-patched-codex-sccache-v8-linux-X64" not in (
+        patched_workflow + validation_workflow
+    )
     compiler_prefix = (
         "csa-patched-codex-sccache-v9-linux-X64-"
         "${{ steps.resolve.outputs.build_target }}-rust-"
         "${{ steps.resolve.outputs.rust_toolchain }}"
     )
-    test_compatible = (
-        f"{compiler_prefix}-test-"
+    shared_compatible = (
+        f"{compiler_prefix}-shared-"
         "${{ steps.resolve.outputs.build_profile_sha256 }}-"
     )
-    test_exact = (
-        f"{test_compatible}upstream-${{{{ steps.resolve.outputs.upstream_commit }}}}-"
+    shared_exact = (
+        f"{shared_compatible}upstream-${{{{ steps.resolve.outputs.upstream_commit }}}}-"
         "patch-${{ steps.resolve.outputs.manifest_sha256 }}"
     )
-    release_compatible = (
-        f"{compiler_prefix}-release-"
-        "${{ steps.resolve.outputs.build_profile_sha256 }}-"
-    )
-    release_exact = (
-        f"{release_compatible}upstream-${{{{ steps.resolve.outputs.upstream_commit }}}}-"
-        "patch-${{ steps.resolve.outputs.manifest_sha256 }}"
-    )
-    assert validation_workflow.count(test_exact) == 3
-    assert patched_workflow.count(test_exact) == 0
-    assert validation_workflow.count(f"restore-keys: {test_compatible}") == 1
-    assert patched_workflow.count(release_exact) == 3
-    assert validation_workflow.count(release_exact) == 0
-    assert patched_workflow.count(
-        f"restore-keys: |\n            {release_compatible}\n"
-    ) == 1
-    assert "SCCACHE_TEST_DIR" not in patched_workflow
-    assert "SCCACHE_RELEASE_DIR=$root/cache/sccache" in patched_workflow
-    assert "SCCACHE_DIR: ${{ env.SCCACHE_RELEASE_DIR }}" in patched_workflow
-    assert "CSA_SCCACHE_CACHE_SIZE: 6G" in patched_workflow
+    shared_dir = "SCCACHE_DIR=$RUNNER_TEMP/csa-patched-codex-cache/sccache"
+    for workflow in (patched_workflow, validation_workflow):
+        assert workflow.count(shared_exact) == 3
+        assert workflow.count(f"restore-keys: {shared_compatible}") == 1
+        assert shared_dir in workflow
+        assert "SCCACHE_DIR: ${{ env.SCCACHE_DIR }}" in workflow
+        assert "CSA_SCCACHE_CACHE_SIZE: 6G" in workflow
+        assert "SCCACHE_RELEASE_DIR" not in workflow
     assert "CSA_SCCACHE_PROFILE: release" in patched_workflow
     assert patched_workflow.count("CSA_MINIMUM_RUST_HIT_RATE: 95") == 1
-    assert "SCCACHE_DIR=$root/cache/sccache-test" in validation_workflow
-    assert "SCCACHE_DIR: ${{ env.SCCACHE_DIR }}" in validation_workflow
-    assert "CSA_SCCACHE_CACHE_SIZE: 4G" in validation_workflow
     assert "CSA_SCCACHE_PROFILE: test" in validation_workflow
     assert validation_workflow.count("CSA_MINIMUM_RUST_HIT_RATE: 95") == 1
     assert 'echo "SCCACHE_STATS=$root/sccache-stats.json"' in patched_workflow

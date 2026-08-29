@@ -83,7 +83,7 @@ jobs:
             echo "CSA_TOOL_CACHE=$root/cache/tools"
             echo "CSA_RUNTIME_CACHE=$root/cache/official-runtime"
             echo "RUSTUP_HOME=$root/cache/rustup"
-            echo "SCCACHE_DIR=$root/cache/sccache-test"
+            echo "SCCACHE_DIR=$RUNNER_TEMP/csa-patched-codex-cache/sccache"
             echo "XWIN_CACHE_DIR=$RUNNER_TEMP/csa-patched-codex-cache/xwin"
             echo "TMPDIR=$tmp"
             echo "HOME=$root/home"
@@ -173,8 +173,8 @@ jobs:
         uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.SCCACHE_DIR }}
-          key: csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-test-${{ steps.resolve.outputs.build_profile_sha256 }}-upstream-${{ steps.resolve.outputs.upstream_commit }}-patch-${{ steps.resolve.outputs.manifest_sha256 }}
-          restore-keys: csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-test-${{ steps.resolve.outputs.build_profile_sha256 }}-
+          key: csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-shared-${{ steps.resolve.outputs.build_profile_sha256 }}-upstream-${{ steps.resolve.outputs.upstream_commit }}-patch-${{ steps.resolve.outputs.manifest_sha256 }}
+          restore-keys: csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-shared-${{ steps.resolve.outputs.build_profile_sha256 }}-
 
       - name: Clone exact reviewed upstream source
         shell: bash
@@ -297,7 +297,7 @@ jobs:
         shell: bash
         env:
           SCCACHE_DIR: ${{ env.SCCACHE_DIR }}
-          CSA_SCCACHE_CACHE_SIZE: 4G
+          CSA_SCCACHE_CACHE_SIZE: 6G
           CSA_SCCACHE_PROFILE: test
           CSA_MINIMUM_RUST_HIT_RATE: 95
         run: |
@@ -317,7 +317,7 @@ jobs:
         run: |
           for key in \
             csa-patched-codex-cargo-v8-linux-X64 \
-            csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-test-${{ steps.resolve.outputs.build_profile_sha256 }}-upstream-${{ steps.resolve.outputs.upstream_commit }}-patch-${{ steps.resolve.outputs.manifest_sha256 }}; do
+            csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-shared-${{ steps.resolve.outputs.build_profile_sha256 }}-upstream-${{ steps.resolve.outputs.upstream_commit }}-patch-${{ steps.resolve.outputs.manifest_sha256 }}; do
             gh cache delete "$key" \
               --repo "$GITHUB_REPOSITORY" \
               --ref "$GITHUB_REF" || true
@@ -338,7 +338,7 @@ jobs:
         uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
         with:
           path: ${{ env.SCCACHE_DIR }}
-          key: csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-test-${{ steps.resolve.outputs.build_profile_sha256 }}-upstream-${{ steps.resolve.outputs.upstream_commit }}-patch-${{ steps.resolve.outputs.manifest_sha256 }}
+          key: csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-shared-${{ steps.resolve.outputs.build_profile_sha256 }}-upstream-${{ steps.resolve.outputs.upstream_commit }}-patch-${{ steps.resolve.outputs.manifest_sha256 }}
 
       - name: Create exact validation evidence
         shell: bash
