@@ -16,7 +16,7 @@
 CSA 为 Codex 加入原生子代理 Join 和实时子代理视图，但不会替换官方 CLI。管理器会验证本机的官方 runtime，从正式 GitHub Release 下载一个精确匹配的 patched compatibility，并把所有受管文件放在独立目录中。
 
 > [!IMPORTANT]
-> CSA Manager `0.1.4` 已发布到 `@dslzl/csa` 和 GitHub `v0.1.4` Release。当前正式 patched compatibility 是面向 Windows x64 的 Codex `0.150.1` p9。
+> CSA Manager `0.1.5` 已发布到 `@dslzl/csa` 和 GitHub `v0.1.5` Release。当前正式 patched compatibility 是面向 Windows x64 的 Codex `0.150.1` p9。
 
 ## 为什么使用 CSA
 
@@ -34,7 +34,7 @@ CSA 让这些补丁可用，同时避免把官方安装当作可以直接修改�
 
 | 产品 | 当前版本 | 平台 |
 | --- | --- | --- |
-| CSA Manager | `0.1.4` | Windows x64、Linux x64、Linux arm64 glibc、macOS x64、macOS arm64 |
+| CSA Manager | `0.1.5` | Windows x64、Linux x64、Linux arm64 glibc、macOS x64、macOS arm64 |
 | Patched Codex CLI | [`rust-v0.150.1-native-join-p9`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.150.1-native-join-p9) | Windows x64 |
 
 Manager 可用于某个平台，并不代表该平台已有 patched Codex compatibility。[兼容索引](release/compatibility-index.json)是仓库 payload 的权威来源；正常安装则会发现已发布的 `compat-*` Release。
@@ -48,23 +48,23 @@ Manager 可用于某个平台，并不代表该平台已有 patched Codex compat
 你需要 Node.js 18 或更高版本，并确保官方 Codex CLI 已经可以正常运行。
 
 ```powershell
-npm install --global @dslzl/csa@0.1.4
+npm install --global @dslzl/csa@0.1.5
 csa --version
 ```
 
 也可以不做全局安装，直接运行 CLI：
 
 ```powershell
-npx @dslzl/csa@0.1.4 --version
+npx @dslzl/csa@0.1.5 --version
 ```
 
 为 `npx` 加上 `--yes` 只会跳过 npm 的安装确认，不会替你选择 patched Codex Release：
 
 ```powershell
-npx --yes @dslzl/csa@0.1.4 --version
+npx --yes @dslzl/csa@0.1.5 --version
 ```
 
-[`v0.1.4` Release](https://github.com/DSLZL/CSA/releases/tag/v0.1.4) 还提供预编译的 Manager 压缩包和 `SHA256SUMS`。
+[`v0.1.5` Release](https://github.com/DSLZL/CSA/releases/tag/v0.1.5) 还提供预编译的 Manager 压缩包和 `SHA256SUMS`。
 
 > [!NOTE]
 > 安装 npm package 只会暴露 `csa` 命令，不会替换 `codex`，也不会在安装 package 时下载 patched build 或激活 shim。

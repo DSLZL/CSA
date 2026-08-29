@@ -156,8 +156,8 @@ The Windows distribution harness runs in disposable directories. It installs loc
 $TempRoot = Join-Path $env:TEMP ("csa-e2e-" + [Guid]::NewGuid().ToString('N'))
 
 powershell -NoProfile -File .\scripts\test_npm_distribution_windows.ps1 `
-  -MetaTarball C:\absolute\dslzl-csa-0.1.4.tgz `
-  -PlatformTarball C:\absolute\dslzl-csa-win32-x64-0.1.4.tgz `
+  -MetaTarball C:\absolute\dslzl-csa-0.1.5.tgz `
+  -PlatformTarball C:\absolute\dslzl-csa-win32-x64-0.1.5.tgz `
   -TempRoot $TempRoot `
   -OutputPath C:\absolute\trellis-e2e.json `
   -Official C:\absolute\official\codex.exe `

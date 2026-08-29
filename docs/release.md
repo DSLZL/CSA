@@ -11,7 +11,7 @@ GitHub Actions is the release authority for both domains. Publishing a formal Ma
 
 ## Current release snapshot
 
-The current published Manager release is [`v0.1.4`](https://github.com/DSLZL/CSA/releases/tag/v0.1.4). The npm meta package is [`@dslzl/csa@0.1.4`](https://www.npmjs.com/package/@dslzl/csa).
+The current published Manager release is [`v0.1.5`](https://github.com/DSLZL/CSA/releases/tag/v0.1.5). The npm meta package is [`@dslzl/csa@0.1.5`](https://www.npmjs.com/package/@dslzl/csa).
 
 The current formal patched release is [`compat-rust-v0.150.1-native-join-p9`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.150.1-native-join-p9):
 
@@ -120,7 +120,7 @@ Commit and push the reviewed version change to the default branch before dispatc
 Run `Release CSA` from the default branch with:
 
 ```text
-version=0.1.4
+version=0.1.5
 ```
 
 The workflow:
@@ -135,20 +135,20 @@ The workflow:
 8. creates an annotated `vX.Y.Z` tag and immutable GitHub Release;
 9. dispatches npm Trusted Publishing for that exact tag.
 
-The `v0.1.4` asset pattern is:
+The `v0.1.5` asset pattern is:
 
 ```text
-csa-v0.1.4-windows-x86_64.zip
-csa-v0.1.4-linux-x86_64.tar.gz
-csa-v0.1.4-linux-aarch64.tar.gz
-csa-v0.1.4-macos-x86_64.tar.gz
-csa-v0.1.4-macos-aarch64.tar.gz
-dslzl-csa-0.1.4.tgz
-dslzl-csa-win32-x64-0.1.4.tgz
-dslzl-csa-linux-x64-0.1.4.tgz
-dslzl-csa-linux-arm64-0.1.4.tgz
-dslzl-csa-darwin-x64-0.1.4.tgz
-dslzl-csa-darwin-arm64-0.1.4.tgz
+csa-v0.1.5-windows-x86_64.zip
+csa-v0.1.5-linux-x86_64.tar.gz
+csa-v0.1.5-linux-aarch64.tar.gz
+csa-v0.1.5-macos-x86_64.tar.gz
+csa-v0.1.5-macos-aarch64.tar.gz
+dslzl-csa-0.1.5.tgz
+dslzl-csa-win32-x64-0.1.5.tgz
+dslzl-csa-linux-x64-0.1.5.tgz
+dslzl-csa-linux-arm64-0.1.5.tgz
+dslzl-csa-darwin-x64-0.1.5.tgz
+dslzl-csa-darwin-arm64-0.1.5.tgz
 SHA256SUMS
 ```
 
@@ -174,14 +174,14 @@ Current package manifests bind `repository.url` to `https://github.com/DSLZL/CSA
 To publish an existing formal Release that predates the workflow, or to resume a partial run:
 
 ```powershell
-gh workflow run publish-npm.yml --ref main -f tag=v0.1.4
+gh workflow run publish-npm.yml --ref main -f tag=v0.1.5
 ```
 
 Verify the registry and launcher:
 
 ```powershell
 npm view @dslzl/csa version dist-tags.latest --registry=https://registry.npmjs.org
-npx --yes @dslzl/csa@0.1.4 --version
+npx --yes @dslzl/csa@0.1.5 --version
 ```
 
 ## Validate a patched compatibility

@@ -16,7 +16,7 @@ A version-pinned, fail-closed manager for running a patched Codex CLI beside the
 CSA adds native subagent joins and a live subagent view to Codex without replacing the official CLI. The Manager verifies the installed official runtime, downloads one exact patched compatibility from a formal GitHub Release, and keeps every managed file in a separate directory.
 
 > [!IMPORTANT]
-> CSA Manager `0.1.4` is published as `@dslzl/csa` and as the `v0.1.4` GitHub Release. The current formal patched compatibility is Codex `0.150.1` p9 for Windows x64.
+> CSA Manager `0.1.5` is published as `@dslzl/csa` and as the `v0.1.5` GitHub Release. The current formal patched compatibility is Codex `0.150.1` p9 for Windows x64.
 
 ## Why CSA
 
@@ -34,7 +34,7 @@ The Manager does not overwrite official Codex files, copy the default `CODEX_HOM
 
 | Product | Current release | Platforms |
 | --- | --- | --- |
-| CSA Manager | `0.1.4` | Windows x64, Linux x64, Linux arm64 glibc, macOS x64, macOS arm64 |
+| CSA Manager | `0.1.5` | Windows x64, Linux x64, Linux arm64 glibc, macOS x64, macOS arm64 |
 | Patched Codex CLI | [`rust-v0.150.1-native-join-p9`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.150.1-native-join-p9) | Windows x64 |
 
 Manager availability on a platform does not imply that a patched Codex compatibility exists for that platform. The [compatibility index](release/compatibility-index.json) is authoritative for repository payloads, while normal installation discovers published `compat-*` Releases.
@@ -48,23 +48,23 @@ Online installation is exact-match only. A release is selectable only when its t
 You need Node.js 18 or newer and a working official Codex CLI installation.
 
 ```powershell
-npm install --global @dslzl/csa@0.1.4
+npm install --global @dslzl/csa@0.1.5
 csa --version
 ```
 
 You can also run the CLI without a global install:
 
 ```powershell
-npx @dslzl/csa@0.1.4 --version
+npx @dslzl/csa@0.1.5 --version
 ```
 
 Adding `--yes` to `npx` only suppresses npm's package-install confirmation. It does not choose a patched Codex release for you:
 
 ```powershell
-npx --yes @dslzl/csa@0.1.4 --version
+npx --yes @dslzl/csa@0.1.5 --version
 ```
 
-Prebuilt Manager archives and `SHA256SUMS` are available from the [`v0.1.4` Release](https://github.com/DSLZL/CSA/releases/tag/v0.1.4).
+Prebuilt Manager archives and `SHA256SUMS` are available from the [`v0.1.5` Release](https://github.com/DSLZL/CSA/releases/tag/v0.1.5).
 
 > [!NOTE]
 > Installing the npm package exposes only `csa`. It does not replace `codex`, download a patched build, or activate a shim during package installation.

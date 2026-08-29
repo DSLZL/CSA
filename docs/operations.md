@@ -8,7 +8,7 @@ CSA has two products with separate release streams:
 
 | Product | Release form | Current scope |
 | --- | --- | --- |
-| Manager | `vX.Y.Z` and `@dslzl/csa` | `0.1.4` on five Manager platforms |
+| Manager | `vX.Y.Z` and `@dslzl/csa` | `0.1.5` on five Manager platforms |
 | Patched Codex | `compat-<compat_id>` | Codex `0.150.1` p9 on Windows x64 |
 
 The Manager can be installed on Windows x64, Linux x64, Linux arm64 glibc, macOS x64, and macOS arm64. The current patched Codex compatibility is Windows x64 only. A Manager package for an operating system does not imply that a patched compatibility is available there.
@@ -27,14 +27,14 @@ Official Codex paths are read-only. The Manager rejects path overlap with its ow
 The npm distribution requires Node.js 18 or newer:
 
 ```powershell
-npm install --global @dslzl/csa@0.1.4
+npm install --global @dslzl/csa@0.1.5
 csa --version
 ```
 
 For a one-off command, use `npx`:
 
 ```powershell
-npx @dslzl/csa@0.1.4 --version
+npx @dslzl/csa@0.1.5 --version
 ```
 
 `npx --yes` suppresses npm's confirmation before it downloads a missing package. It does not bypass CSA validation or answer the later release picker. `csa install --yes` is the separate CSA option that auto-selects the recommended compatible Release.
@@ -65,7 +65,7 @@ npm view @dslzl/csa version --registry=https://registry.npmjs.org
 If the official registry returns the version but a configured mirror returns 404, use the official registry for this install or wait for the mirror to synchronize:
 
 ```powershell
-npm install --global @dslzl/csa@0.1.4 --registry=https://registry.npmjs.org
+npm install --global @dslzl/csa@0.1.5 --registry=https://registry.npmjs.org
 ```
 
 The same distinction applies to tools such as `bunx` when they are configured to use an npm mirror.
