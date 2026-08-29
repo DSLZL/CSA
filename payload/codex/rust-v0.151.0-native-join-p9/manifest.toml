@@ -41,7 +41,7 @@ sha256 = "5620cd127b7b4e4ddb03627857d9b44c5af628cb9e84c27d9a8b7895d2badd88"
 
 [[patches]]
 path = "patches/0005-tests-telemetry-batch-join.patch"
-sha256 = "082557365825f8dbe6a17eca11d10be9092ff874ac62024727794746a12c4b49"
+sha256 = "0d88bdf1ddff9889cc47280bfe6cb80d911bc1c96607465a808b4ead86090343"
 
 [[patches]]
 path = "patches/0006-csa-version-display.patch"
@@ -73,7 +73,7 @@ sha256 = "b63e1a940ed2d903da87fc8079653b4f36ca47c2e468140c5284020681e8402b"
 
 [[patches]]
 path = "patches/0013-subagent-live-polish.patch"
-sha256 = "bdb157058cf58b5b552c6c0671b3a039fa7f66334beef983f2e33bf0d7ec2504"
+sha256 = "250af1a1cad1359b70602e93fab1cdddc45989df44f4dda8992dc4e4b481122b"
 
 [[patches]]
 path = "patches/0014-csa-version-snapshots.patch"

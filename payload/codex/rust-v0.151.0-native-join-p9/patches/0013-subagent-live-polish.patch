@@ -42,7 +42,7 @@ index ca6f75b..cb54a75 100644
 +            .session
 +            .services
 +            .model_client
-+            .force_http_fallback(&turn.session_telemetry, &turn.model_info)
++            .force_http_fallback(&turn.session_telemetry, turn.model_info().as_ref())
 +    );
 +
 +    let child_thread_id = harness

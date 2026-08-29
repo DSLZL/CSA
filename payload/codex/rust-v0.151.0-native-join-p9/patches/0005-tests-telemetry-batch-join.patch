@@ -89,7 +89,7 @@ diff --git a/codex-rs/core/src/session/tests.rs b/codex-rs/core/src/session/test
 index b334571..a24a801 100644
 --- a/codex-rs/core/src/session/tests.rs
 +++ b/codex-rs/core/src/session/tests.rs
-@@ -210,6 +210,186 @@ use std::sync::Arc;
+@@ -210,6 +210,188 @@ use std::sync::Arc;
  use std::sync::OnceLock;
  use std::time::Duration as StdDuration;
  
@@ -141,6 +141,7 @@ index b334571..a24a801 100644
 +    ));
 +
 +    let error = ErrorEvent {
++        misalignment: None,
 +        message: "failed".to_string(),
 +        codex_error_info: None,
 +    };
@@ -200,6 +201,7 @@ index b334571..a24a801 100644
 +                time_to_first_token_ms: None,
 +            }),
 +            Some(ErrorEvent {
++                misalignment: None,
 +                message: "child failed".to_string(),
 +                codex_error_info: None,
 +            }),

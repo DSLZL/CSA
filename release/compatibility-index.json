@@ -145,7 +145,7 @@
       "build_enabled": true,
       "release_enabled": false,
       "manifest": "payload/codex/rust-v0.151.0-native-join-p9/manifest.toml",
-      "manifest_sha256": "bb9b68fd7041952dfad44cf96f8d38e4e186d3a92e0c93c1a0d2ebecaa8677b3",
+      "manifest_sha256": "eb925c9f10587eb3954a3eced6f21a0e0e75692fa24e749966d724a664a00e5d",
       "targets": {
         "x86_64-pc-windows-msvc": {
           "build_profile": "release/build-profiles/windows-msvc-x64.json",
