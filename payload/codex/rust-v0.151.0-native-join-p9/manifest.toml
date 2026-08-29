@@ -37,11 +37,11 @@ sha256 = "6fea00150aed6e883c450f9e6b65776cb8e1191db136f17008951b096a778e17"
 
 [[patches]]
 path = "patches/0004-join-protocol-schema-handler.patch"
-sha256 = "8292f6506f8432406fe79409b21c70f1566b67b792a162ea483b587c1757af1f"
+sha256 = "5620cd127b7b4e4ddb03627857d9b44c5af628cb9e84c27d9a8b7895d2badd88"
 
 [[patches]]
 path = "patches/0005-tests-telemetry-batch-join.patch"
-sha256 = "10bb543302c7c8e6a115998b8567a00cdef02f55072d1ec05be1bbf99bfea3ac"
+sha256 = "082557365825f8dbe6a17eca11d10be9092ff874ac62024727794746a12c4b49"
 
 [[patches]]
 path = "patches/0006-csa-version-display.patch"

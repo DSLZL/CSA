@@ -1245,7 +1245,7 @@ new file mode 100644
 index 0000000..e740ea1
 --- /dev/null
 +++ b/codex-rs/core/src/tools/handlers/multi_agents_v2/join_many.rs
-@@ -0,0 +1,130 @@
+@@ -0,0 +1,133 @@
 +use super::*;
 +use crate::tools::handlers::multi_agents_spec::create_join_agents_tool_v2;
 +use codex_tools::ToolSpec;
@@ -1263,7 +1263,10 @@ index 0000000..e740ea1
 +        create_join_agents_tool_v2()
 +    }
 +
-+    fn handle(&self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'_> {
++    fn handle<'a>(&'a self, invocation: ToolInvocation) -> codex_tools::ToolExecutorFuture<'a>
++    where
++        ToolInvocation: 'a,
++    {
 +        Box::pin(self.handle_call(invocation))
 +    }
 +}
