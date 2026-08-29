@@ -94,7 +94,7 @@ jobs:
             echo "ASSET_DIR=$assets"
           } >> "$GITHUB_ENV"
 
-      - name: Publish exact npm tarballs with provenance
+      - name: Publish exact npm tarballs through OIDC
         run: |
           set -euo pipefail
 
@@ -146,13 +146,13 @@ jobs:
               --access public \
               --registry=https://registry.npmjs.org
 
-            for attempt in 1 2 3 4 5; do
+            for attempt in {1..36}; do
               if actual="$(npm view "$package@$VERSION" dist.integrity --registry=https://registry.npmjs.org 2>"$error_file")" \
                 && [[ "$actual" == "$expected" ]]; then
                 echo "Verified $package@$VERSION at the registry."
                 return
               fi
-              sleep 2
+              sleep 5
             done
             cat "$error_file" >&2
             echo "Published $package@$VERSION but could not verify its exact integrity." >&2
