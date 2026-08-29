@@ -1048,13 +1048,17 @@ def test_release_stream_contracts() -> None:
 
     online = (REPOSITORY / "src" / "online.rs").read_text(encoding="utf-8")
     assert "compatibility_id_for_version" not in online
-    assert "discover_catalog" in online
+    assert "discover_install_candidates" in online
     assert "select_automatic" in online
     assert "prompt_catalog" not in online
     assert "io::stdin" not in online
     assert "releases/latest" not in online
+    assert 'const INSTALL_CATALOG_ASSET: &str = "install-catalog-v1.json"' in online
+    assert "MAX_INSTALL_CATALOG_PROBES: usize = 16" in online
     assert 'format!("rust-v{upstream_version}-native-join-p2")' not in online
     assert 'format!("rust-v{upstream_version}-native-join-p1")' not in online
+    assert "compat_catalog.py install-catalog" in patched_workflow
+    assert patched_workflow.count("--require-install-catalog") == 3
 
     manager_workflow = (
         REPOSITORY / ".github" / "workflows" / "release-csa.yml"

@@ -1,13 +1,21 @@
+use crossterm::cursor::{Hide, MoveDown, MoveToColumn, MoveUp, Show};
+use crossterm::event::{self, Event, KeyCode, KeyEventKind, KeyModifiers};
+use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, size};
+use crossterm::{SynchronizedUpdate, execute, queue};
 use csa::activation::{CommandResolution, PlugReport, PurgeReport, UnplugReport};
 use csa::error::{ManagerError, Result};
 use csa::manager::{
     DoctorReport, InstallEvent, InstallReport, PrepareReport, StatusReport, UninstallReport,
 };
+use csa::online::InstallCandidate;
 use serde::Serialize;
+use std::cmp::min;
 use std::io::{self, IsTerminal, Write};
 use std::time::{Duration, Instant};
 
 const PROGRESS_REFRESH: Duration = Duration::from_millis(100);
+const PICKER_ROWS: usize = 5;
+pub(crate) const INSTALLATION_CANCELLED: &str = "installation_cancelled";
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 pub(crate) enum OutputMode {
@@ -61,20 +69,26 @@ pub(crate) fn output_mode(explicit_json: bool) -> OutputMode {
     resolve_output_mode(explicit_json, io::stdout().is_terminal())
 }
 
+pub(crate) fn streams_are_interactive() -> bool {
+    io::stdin().is_terminal() && io::stdout().is_terminal() && io::stderr().is_terminal()
+}
+
 pub(crate) struct InstallProgress {
     mode: OutputMode,
     download_started: Option<Instant>,
     last_draw: Option<Instant>,
     line_active: bool,
+    picker: bool,
 }
 
 impl InstallProgress {
-    pub(crate) fn new(mode: OutputMode) -> Self {
+    pub(crate) fn new(mode: OutputMode, picker: bool) -> Self {
         Self {
             mode,
             download_started: None,
             last_draw: None,
             line_active: false,
+            picker,
         }
     }
 
@@ -95,6 +109,16 @@ impl InstallProgress {
         now: Instant,
     ) -> io::Result<()> {
         if self.mode == OutputMode::Json {
+            return Ok(());
+        }
+        if self.picker
+            && matches!(
+                event,
+                InstallEvent::DetectingOfficial
+                    | InstallEvent::DiscoveringCompatibility
+                    | InstallEvent::SelectingCompatibility
+            )
+        {
             return Ok(());
         }
         if let InstallEvent::ArtifactProgress {
@@ -135,6 +159,7 @@ impl InstallProgress {
             InstallEvent::DiscoveringCompatibility => {
                 writeln!(writer, "Discovering compatible releases...")
             }
+            InstallEvent::SelectingCompatibility => Ok(()),
             InstallEvent::SelectedCompatibility { compat_id } => {
                 writeln!(writer, "Selected compatibility: {compat_id}")
             }
@@ -162,6 +187,435 @@ impl InstallProgress {
         }
         Ok(())
     }
+}
+
+struct PickerState<'a> {
+    candidates: &'a [InstallCandidate],
+    installed: Option<&'a str>,
+    visible: Vec<usize>,
+    selected: usize,
+    viewport: usize,
+    query: String,
+    search_active: bool,
+}
+
+enum PickerDecision {
+    Continue,
+    Confirm(String),
+    Cancel,
+}
+
+impl<'a> PickerState<'a> {
+    fn new(candidates: &'a [InstallCandidate], installed: Option<&'a str>) -> Self {
+        let visible: Vec<_> = (0..candidates.len()).collect();
+        let selected = visible
+            .iter()
+            .position(|index| candidates[*index].recommended)
+            .unwrap_or(0);
+        let mut state = Self {
+            candidates,
+            installed,
+            visible,
+            selected,
+            viewport: 0,
+            query: String::new(),
+            search_active: false,
+        };
+        state.keep_selected_visible();
+        state
+    }
+
+    fn move_by(&mut self, delta: isize) {
+        if self.visible.is_empty() {
+            return;
+        }
+        self.selected =
+            (self.selected as isize + delta).clamp(0, self.visible.len() as isize - 1) as usize;
+        self.keep_selected_visible();
+    }
+
+    fn move_one(&mut self, delta: isize) {
+        if self.visible.is_empty() {
+            return;
+        }
+        self.selected = if delta < 0 {
+            self.selected
+                .checked_sub(1)
+                .unwrap_or(self.visible.len() - 1)
+        } else {
+            (self.selected + 1) % self.visible.len()
+        };
+        self.keep_selected_visible();
+    }
+
+    fn home(&mut self) {
+        if !self.visible.is_empty() {
+            self.selected = 0;
+            self.keep_selected_visible();
+        }
+    }
+
+    fn end(&mut self) {
+        if !self.visible.is_empty() {
+            self.selected = self.visible.len() - 1;
+            self.keep_selected_visible();
+        }
+    }
+
+    fn begin_search(&mut self) {
+        self.search_active = true;
+        self.query.clear();
+        self.rebuild_filter();
+    }
+
+    fn push_query(&mut self, character: char) {
+        self.search_active = true;
+        self.query.push(character);
+        self.rebuild_filter();
+    }
+
+    fn backspace(&mut self) {
+        if self.search_active {
+            self.query.pop();
+            self.rebuild_filter();
+        }
+    }
+
+    fn escape(&mut self) -> PickerDecision {
+        if self.search_active {
+            self.search_active = false;
+            self.query.clear();
+            self.rebuild_filter();
+            PickerDecision::Continue
+        } else {
+            PickerDecision::Cancel
+        }
+    }
+
+    fn confirm(&self) -> PickerDecision {
+        self.visible
+            .get(self.selected)
+            .map(|index| PickerDecision::Confirm(self.candidates[*index].compat_id.clone()))
+            .unwrap_or(PickerDecision::Continue)
+    }
+
+    fn rebuild_filter(&mut self) {
+        let query = self.query.to_ascii_lowercase();
+        let mut ranked: Vec<_> = self
+            .candidates
+            .iter()
+            .enumerate()
+            .filter_map(|(index, candidate)| {
+                search_rank(candidate, &query).map(|rank| (index, rank))
+            })
+            .collect();
+        ranked.sort_by(|left, right| {
+            left.1
+                .cmp(&right.1)
+                .then_with(|| {
+                    self.candidates[right.0]
+                        .patch_revision
+                        .cmp(&self.candidates[left.0].patch_revision)
+                })
+                .then_with(|| {
+                    self.candidates[left.0]
+                        .compat_id
+                        .cmp(&self.candidates[right.0].compat_id)
+                })
+        });
+        self.visible = ranked.into_iter().map(|(index, _)| index).collect();
+        self.selected = 0;
+        self.viewport = 0;
+    }
+
+    fn keep_selected_visible(&mut self) {
+        if self.selected < self.viewport {
+            self.viewport = self.selected;
+        } else if self.selected >= self.viewport + PICKER_ROWS {
+            self.viewport = self.selected + 1 - PICKER_ROWS;
+        }
+    }
+
+    fn render(&self, width: u16) -> Vec<String> {
+        let end = min(self.viewport + PICKER_ROWS, self.visible.len());
+        let mut lines = vec![
+            "Select a patched Codex CLI version".to_owned(),
+            format!("  {} newer hidden", self.viewport),
+        ];
+        for row in 0..PICKER_ROWS {
+            let position = self.viewport + row;
+            let line = self
+                .visible
+                .get(position)
+                .map_or_else(String::new, |index| {
+                    let candidate = &self.candidates[*index];
+                    let selected = if position == self.selected { '>' } else { ' ' };
+                    let mut markers = Vec::new();
+                    if candidate.recommended {
+                        markers.push("Recommended");
+                    }
+                    if self.installed == Some(candidate.compat_id.as_str()) {
+                        markers.push("Installed");
+                    }
+                    let suffix = if markers.is_empty() {
+                        String::new()
+                    } else {
+                        format!("  {}", markers.join("  "))
+                    };
+                    format!(
+                        "{selected} p{:<3} Codex {:<8} {}{suffix}",
+                        candidate.patch_revision, candidate.codex_version, candidate.recorded_on
+                    )
+                });
+            lines.push(line);
+        }
+        lines.push(format!(
+            "  {} older hidden",
+            self.visible.len().saturating_sub(end)
+        ));
+        lines.push(if self.search_active {
+            format!("Search: {}_", self.query)
+        } else {
+            "Search: / to filter".to_owned()
+        });
+        lines.push(
+            self.visible
+                .get(self.selected)
+                .map(|index| format!("ID: {}", self.candidates[*index].compat_id))
+                .unwrap_or_else(|| "No matching versions".to_owned()),
+        );
+        lines.push("Up/Down move  PgUp/PgDn page  Enter install  Esc cancel".to_owned());
+        lines
+            .into_iter()
+            .map(|line| line.chars().take(width as usize).collect())
+            .collect()
+    }
+}
+
+fn search_rank(candidate: &InstallCandidate, query: &str) -> Option<u8> {
+    if query.is_empty() {
+        return Some(0);
+    }
+    let revision = format!("p{}", candidate.patch_revision);
+    let fields = [
+        revision.as_str(),
+        candidate.compat_id.as_str(),
+        candidate.codex_version.as_str(),
+        candidate.recorded_on.as_str(),
+    ];
+    if revision == query {
+        Some(0)
+    } else if fields
+        .iter()
+        .any(|field| field.to_ascii_lowercase().starts_with(query))
+    {
+        Some(1)
+    } else if fields
+        .iter()
+        .any(|field| field.to_ascii_lowercase().contains(query))
+    {
+        Some(2)
+    } else {
+        None
+    }
+}
+
+struct PickerTerminal {
+    stderr: io::Stderr,
+    frame: Vec<String>,
+    active: bool,
+}
+
+impl PickerTerminal {
+    fn enter() -> Result<Self> {
+        enable_raw_mode()
+            .map_err(|error| ManagerError::io("enable install picker raw mode", error))?;
+        let mut stderr = io::stderr();
+        if let Err(error) = execute!(stderr, Hide) {
+            let _ = disable_raw_mode();
+            return Err(ManagerError::io("hide install picker cursor", error));
+        }
+        Ok(Self {
+            stderr,
+            frame: Vec::new(),
+            active: true,
+        })
+    }
+
+    fn draw(&mut self, lines: &[String]) -> Result<()> {
+        let update = picker_frame_update(&self.frame, lines)
+            .map_err(|error| ManagerError::io("draw install picker", error))?;
+        if !update.is_empty() {
+            self.stderr
+                .sync_update(|stderr| stderr.write_all(&update))
+                .and_then(|result| result)
+                .map_err(|error| ManagerError::io("draw install picker", error))?;
+        }
+        self.frame.clear();
+        self.frame.extend_from_slice(lines);
+        Ok(())
+    }
+
+    fn leave(&mut self) -> io::Result<()> {
+        if !self.active {
+            return Ok(());
+        }
+        self.active = false;
+        let clear_result = (|| {
+            if !self.frame.is_empty() {
+                let lines = self.frame.len() as u16;
+                execute!(self.stderr, MoveUp(lines))?;
+                for line in 0..lines {
+                    execute!(self.stderr, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
+                    if line + 1 < lines {
+                        execute!(self.stderr, MoveDown(1))?;
+                    }
+                }
+                if lines > 1 {
+                    execute!(self.stderr, MoveUp(lines - 1))?;
+                }
+                self.stderr.flush()?;
+            }
+            Ok(())
+        })();
+        let cursor_result = execute!(self.stderr, Show);
+        let raw_result = disable_raw_mode();
+        clear_result.and(cursor_result).and(raw_result)
+    }
+}
+
+fn picker_frame_update(previous: &[String], current: &[String]) -> io::Result<Vec<u8>> {
+    if !previous.is_empty() && previous.len() != current.len() {
+        return Err(io::Error::new(
+            io::ErrorKind::InvalidInput,
+            "install picker frame height changed",
+        ));
+    }
+
+    let mut update = Vec::new();
+    if previous.is_empty() {
+        for line in current {
+            queue!(update, MoveToColumn(0), Clear(ClearType::CurrentLine))?;
+            writeln!(update, "{line}")?;
+        }
+        return Ok(update);
+    }
+
+    let height = current.len() as u16;
+    for (index, (old, new)) in previous.iter().zip(current).enumerate() {
+        if old == new {
+            continue;
+        }
+        let distance = height - index as u16;
+        queue!(
+            update,
+            MoveUp(distance),
+            MoveToColumn(0),
+            Clear(ClearType::CurrentLine)
+        )?;
+        write!(update, "{new}")?;
+        queue!(update, MoveDown(distance), MoveToColumn(0))?;
+    }
+    Ok(update)
+}
+
+impl Drop for PickerTerminal {
+    fn drop(&mut self) {
+        let _ = self.leave();
+    }
+}
+
+pub(crate) fn pick_install_candidate(
+    candidates: &[InstallCandidate],
+    installed: Option<&str>,
+) -> Result<String> {
+    let mut state = PickerState::new(candidates, installed);
+    let mut terminal = PickerTerminal::enter()?;
+    loop {
+        let width = size().map(|(width, _)| width).unwrap_or(100).max(1);
+        terminal.draw(&state.render(width))?;
+        let Event::Key(key) =
+            event::read().map_err(|error| ManagerError::io("read install picker input", error))?
+        else {
+            continue;
+        };
+        if key.kind == KeyEventKind::Release {
+            continue;
+        }
+        let decision = if key.modifiers.contains(KeyModifiers::CONTROL)
+            && matches!(key.code, KeyCode::Char('c' | 'C'))
+        {
+            PickerDecision::Cancel
+        } else {
+            match key.code {
+                KeyCode::Up => {
+                    state.move_one(-1);
+                    PickerDecision::Continue
+                }
+                KeyCode::Down => {
+                    state.move_one(1);
+                    PickerDecision::Continue
+                }
+                KeyCode::PageUp => {
+                    state.move_by(-(PICKER_ROWS as isize));
+                    PickerDecision::Continue
+                }
+                KeyCode::PageDown => {
+                    state.move_by(PICKER_ROWS as isize);
+                    PickerDecision::Continue
+                }
+                KeyCode::Home => {
+                    state.home();
+                    PickerDecision::Continue
+                }
+                KeyCode::End => {
+                    state.end();
+                    PickerDecision::Continue
+                }
+                KeyCode::Enter => state.confirm(),
+                KeyCode::Esc => state.escape(),
+                KeyCode::Backspace => {
+                    state.backspace();
+                    PickerDecision::Continue
+                }
+                KeyCode::Char('/') => {
+                    state.begin_search();
+                    PickerDecision::Continue
+                }
+                KeyCode::Char(character)
+                    if !character.is_control()
+                        && !key
+                            .modifiers
+                            .intersects(KeyModifiers::CONTROL | KeyModifiers::ALT) =>
+                {
+                    state.push_query(character);
+                    PickerDecision::Continue
+                }
+                _ => PickerDecision::Continue,
+            }
+        };
+        match decision {
+            PickerDecision::Continue => {}
+            PickerDecision::Confirm(compat_id) => {
+                terminal.leave().map_err(|error| {
+                    ManagerError::io("restore terminal after install picker", error)
+                })?;
+                return Ok(compat_id);
+            }
+            PickerDecision::Cancel => {
+                let _ = terminal.leave();
+                return Err(ManagerError::new(
+                    INSTALLATION_CANCELLED,
+                    "Installation cancelled.",
+                ));
+            }
+        }
+    }
+}
+
+pub(crate) fn write_install_cancelled() -> i32 {
+    let _ = writeln!(io::stderr().lock(), "Installation cancelled.");
+    130
 }
 
 fn resolve_output_mode(explicit_json: bool, stdout_is_terminal: bool) -> OutputMode {
@@ -783,12 +1237,14 @@ fn write_resolution(writer: &mut dyn Write, resolution: &CommandResolution) -> i
 #[cfg(test)]
 mod tests {
     use super::{
-        HumanReport, InstallProgress, Operation, OutputMode, resolve_output_mode,
-        write_doctor_error_to, write_doctor_report_to, write_error_to, write_report_to,
+        HumanReport, InstallProgress, Operation, OutputMode, PickerDecision, PickerState,
+        picker_frame_update, resolve_output_mode, write_doctor_error_to, write_doctor_report_to,
+        write_error_to, write_report_to,
     };
     use csa::activation::{ActivationReport, CommandResolution};
     use csa::detect::{FileFingerprint, OfficialCodex};
     use csa::manager::{CompatibilityReport, DoctorReport, InstallEvent, StatusReport};
+    use csa::online::InstallCandidate;
     use csa::state::PreparedState;
     use serde::Serialize;
     use std::io::{self, Write};
@@ -1077,6 +1533,93 @@ mod tests {
     }
 
     #[test]
+    fn install_picker_filters_navigates_and_marks_the_current_version() {
+        let candidates: Vec<_> = (1..=8)
+            .rev()
+            .map(|revision| {
+                let compat_id = format!("rust-v0.150.1-native-join-p{revision}");
+                InstallCandidate {
+                    compat_id: compat_id.clone(),
+                    codex_version: "0.150.1".to_owned(),
+                    build_target: "x86_64-pc-windows-msvc".to_owned(),
+                    patch_revision: revision,
+                    recorded_on: format!("2026-08-{:02}", 20 + revision),
+                    recommended: revision == 8,
+                    release_tag: format!("compat-{compat_id}"),
+                    release_commit: "a".repeat(40),
+                }
+            })
+            .collect();
+        let installed = candidates[2].compat_id.clone();
+        let mut state = PickerState::new(&candidates, Some(&installed));
+        assert!(matches!(state.confirm(), PickerDecision::Confirm(ref id) if id.ends_with("p8")));
+        state.move_one(-1);
+        assert_eq!(state.selected, 7);
+        assert_eq!(state.viewport, 3);
+        state.move_one(1);
+        assert_eq!(state.selected, 0);
+        assert_eq!(state.viewport, 0);
+        let rendered = state.render(200);
+        assert_eq!(rendered.len(), 11);
+        assert_eq!(rendered[2..7].len(), 5);
+        assert!(rendered.iter().any(|line| line.contains("Recommended")));
+        state.move_by(2);
+        assert!(
+            state
+                .render(200)
+                .iter()
+                .any(|line| line.contains("Installed"))
+        );
+        state.end();
+        assert_eq!(state.selected, 7);
+        assert_eq!(state.viewport, 3);
+        state.home();
+        assert_eq!(state.selected, 0);
+        state.move_by(5);
+        assert_eq!(state.selected, 5);
+        assert_eq!(state.viewport, 1);
+        assert!(
+            state
+                .render(20)
+                .iter()
+                .all(|line| line.chars().count() <= 20)
+        );
+
+        state.begin_search();
+        state.push_query('p');
+        state.push_query('3');
+        assert_eq!(state.visible.len(), 1);
+        assert!(matches!(state.confirm(), PickerDecision::Confirm(ref id) if id.ends_with("p3")));
+        state.backspace();
+        assert_eq!(state.visible.len(), 8);
+        assert!(matches!(state.escape(), PickerDecision::Continue));
+        assert!(matches!(state.escape(), PickerDecision::Cancel));
+
+        state.push_query('z');
+        assert!(state.visible.is_empty());
+        assert!(matches!(state.confirm(), PickerDecision::Continue));
+    }
+
+    #[test]
+    fn install_picker_redraw_skips_unchanged_lines() {
+        let first = vec![
+            "Select a patched Codex CLI version".to_owned(),
+            "> p9".to_owned(),
+            "Enter install".to_owned(),
+        ];
+        let initial = String::from_utf8(picker_frame_update(&[], &first).unwrap()).unwrap();
+        assert!(initial.contains(&first[0]));
+        assert!(picker_frame_update(&first, &first).unwrap().is_empty());
+
+        let mut next = first.clone();
+        next[1] = "> p8".to_owned();
+        let incremental = String::from_utf8(picker_frame_update(&first, &next).unwrap()).unwrap();
+        assert!(incremental.contains("> p8"));
+        assert!(!incremental.contains(&first[0]));
+        assert!(!incremental.contains(&first[2]));
+    }
+
+    #[test]
     fn output_mode_and_json_contract_are_stable() {
         assert_eq!(resolve_output_mode(false, true), OutputMode::Human);
         assert_eq!(resolve_output_mode(false, false), OutputMode::Json);
@@ -1125,7 +1668,7 @@ mod tests {
         assert!(output.contains("Recovery:"));
 
         let start = Instant::now();
-        let mut progress = InstallProgress::new(OutputMode::Human);
+        let mut progress = InstallProgress::new(OutputMode::Human, false);
         let mut output = Vec::new();
         progress
             .write_event_to(&mut output, InstallEvent::DetectingOfficial, start)
@@ -1173,7 +1716,7 @@ mod tests {
         assert!(output.contains("100%"));
         assert!(output.contains("Verifying downloaded artifact..."));
 
-        let mut progress = InstallProgress::new(OutputMode::Json);
+        let mut progress = InstallProgress::new(OutputMode::Json, false);
         let mut output = Vec::new();
         progress
             .write_event_to(&mut output, InstallEvent::DetectingOfficial, start)

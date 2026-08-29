@@ -10,6 +10,8 @@ import tempfile
 import unittest
 from pathlib import Path
 
+import compat_catalog as catalog_module
+
 SCRIPT = Path(__file__).with_name("compat_catalog.py")
 TARGET = "x86_64-pc-windows-msvc"
 COMPAT = "rust-v9.9.9-native-join-p9"
@@ -166,6 +168,7 @@ url = "{url}"
                 "manifest_sha256": sha(manifest),
                 "build_profile_sha256": sha(profile),
                 "runtime_lock_sha256": sha(runtime_current),
+                "recorded_at": "2026-08-29",
                 "evidence": {"kind": "unit-test"},
             },
         )
@@ -442,6 +445,83 @@ url = "{url}"
         release = self.run_catalog(root, "list", "--target", TARGET, "--release")
         self.assertEqual(release.returncode, 0, release.stderr)
         self.assertEqual(release.stdout.strip(), COMPAT)
+
+    def test_install_catalog_is_generated_from_formal_release_and_acceptance(self) -> None:
+        holder, root = self.fixture()
+        self.addCleanup(holder.cleanup)
+        subprocess.run(["git", "init", "-q", str(root)], check=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.name", "CSA Tests"], check=True)
+        subprocess.run(["git", "-C", str(root), "config", "user.email", "csa@example.invalid"], check=True)
+        subprocess.run(["git", "-C", str(root), "add", "."], check=True)
+        subprocess.run(["git", "-C", str(root), "commit", "-qm", "fixture"], check=True)
+        source_commit = subprocess.run(
+            ["git", "-C", str(root), "rev-parse", "HEAD"],
+            check=True,
+            capture_output=True,
+            text=True,
+        ).stdout.strip()
+        release_tag = f"compat-{COMPAT}"
+        formal_tags = root / "formal-tags.txt"
+        formal_tags.write_text(release_tag + "\n", encoding="utf-8")
+        output = root / "bundle/install-catalog-v1.json"
+        result = self.run_catalog(
+            root,
+            "install-catalog",
+            "--formal-tags",
+            str(formal_tags),
+            "--current-release-tag",
+            release_tag,
+            "--current-source-commit",
+            source_commit,
+            "--output",
+            str(output),
+        )
+        self.assertEqual(result.returncode, 0, result.stderr)
+        catalog = json.loads(output.read_text(encoding="utf-8"))
+        self.assertEqual(catalog["source_commit"], source_commit)
+        self.assertEqual([entry["compat_id"] for entry in catalog["entries"]], [COMPAT])
+        self.assertEqual(catalog["entries"][0]["patch_revision"], 9)
+        self.assertEqual(catalog["entries"][0]["recorded_on"], "2026-08-29")
+
+    def test_install_catalog_schema_rejects_duplicates_unknown_fields_and_bad_dates(self) -> None:
+        entries = []
+        for revision in range(100, 0, -1):
+            compat_id = f"rust-v9.9.9-native-join-p{revision}"
+            entries.append(
+                {
+                    "compat_id": compat_id,
+                    "release_tag": f"compat-{compat_id}",
+                    "release_commit": f"{revision:040x}",
+                    "codex_version": "9.9.9",
+                    "build_target": TARGET,
+                    "patch_revision": revision,
+                    "recorded_on": "2026-08-29",
+                }
+            )
+        value = {
+            "schema": 1,
+            "repository": "DSLZL/CSA",
+            "source_release_tag": entries[0]["release_tag"],
+            "source_commit": entries[0]["release_commit"],
+            "entries": entries,
+        }
+        self.assertEqual(len(catalog_module.validate_install_catalog(value)["entries"]), 100)
+
+        duplicate = json.loads(json.dumps(value))
+        duplicate["entries"][-1]["compat_id"] = duplicate["entries"][0]["compat_id"]
+        duplicate["entries"][-1]["release_tag"] = duplicate["entries"][0]["release_tag"]
+        with self.assertRaises(catalog_module.CatalogError):
+            catalog_module.validate_install_catalog(duplicate)
+
+        unknown = json.loads(json.dumps(value))
+        unknown["unexpected"] = True
+        with self.assertRaises(catalog_module.CatalogError):
+            catalog_module.validate_install_catalog(unknown)
+
+        bad_date = json.loads(json.dumps(value))
+        bad_date["entries"][0]["recorded_on"] = "2026-02-30"
+        with self.assertRaises(catalog_module.CatalogError):
+            catalog_module.validate_install_catalog(bad_date)
 
     def test_workflow_guard_rejects_compatibility_authority(self) -> None:
         holder, root = self.fixture()

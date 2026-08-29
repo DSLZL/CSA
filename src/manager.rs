@@ -10,7 +10,9 @@ use crate::detect::{
 use crate::error::{ManagerError, Result};
 use crate::hash::sha256_bytes;
 use crate::isolation::{IsolationPlan, IsolationRequest};
-use crate::online::resolve_online_install_with_progress;
+use crate::online::{
+    InstallSelector, resolve_online_install_with_progress, resolve_online_install_with_selector,
+};
 use crate::process::{CommandResult, CommandSpec, ProcessRunner};
 use crate::state::{
     Clock, ManagerPaths, PrepareLock, PreparedState, StateStore, ensure_managed_directory,
@@ -78,6 +80,7 @@ pub enum InstallOptions {
 pub enum InstallEvent {
     DetectingOfficial,
     DiscoveringCompatibility,
+    SelectingCompatibility,
     SelectedCompatibility {
         compat_id: String,
     },
@@ -355,6 +358,26 @@ pub fn install_with_progress(
     manager_executable: &Path,
     progress: &mut dyn FnMut(InstallEvent),
 ) -> Result<InstallReport> {
+    install_with_progress_and_selector(
+        options,
+        runner,
+        clock,
+        provider,
+        manager_executable,
+        progress,
+        None,
+    )
+}
+
+pub fn install_with_progress_and_selector(
+    options: InstallOptions,
+    runner: &dyn ProcessRunner,
+    clock: &dyn Clock,
+    provider: &dyn ArtifactProvider,
+    manager_executable: &Path,
+    progress: &mut dyn FnMut(InstallEvent),
+    selector: Option<&mut InstallSelector<'_>>,
+) -> Result<InstallReport> {
     match options {
         InstallOptions::Local(options) => install_local(
             options,
@@ -365,7 +388,11 @@ pub fn install_with_progress(
             progress,
         ),
         InstallOptions::Online(options) => {
-            let bundle = resolve_online_install_with_progress(&options, runner, progress)?;
+            let bundle = if let Some(selector) = selector {
+                resolve_online_install_with_selector(&options, runner, progress, selector)?
+            } else {
+                resolve_online_install_with_progress(&options, runner, progress)?
+            };
             install_local(
                 bundle.prepare_options(),
                 runner,

@@ -11,7 +11,7 @@ pub const USAGE: &str = "\
 csa [--json] <command>
 
 csa doctor [--manager-root PATH] [--official PATH] [--official-native PATH] [--manifest PATH]
-csa install [--manager-root PATH] [--official PATH] [--official-native PATH] [--compat ID | --manifest PATH (--artifact PATH | --source PATH)]
+csa install [--yes] [--manager-root PATH] [--official PATH] [--official-native PATH] [--compat ID | --manifest PATH (--artifact PATH | --source PATH)]
 csa uninstall [--manager-root PATH]
 csa prepare [--manager-root PATH] [--official PATH] [--official-native PATH] --manifest PATH (--artifact PATH | --source PATH)
 csa plug [--manager-root PATH]
@@ -25,7 +25,7 @@ Global option: --json writes machine-readable output and may appear before or af
 #[derive(Clone, Debug)]
 pub enum Cli {
     Doctor(DoctorOptions),
-    Install(InstallOptions),
+    Install { options: InstallOptions, yes: bool },
     Uninstall { manager_root: Option<PathBuf> },
     Prepare(PrepareOptions),
     Plug { manager_root: Option<PathBuf> },
@@ -114,6 +114,7 @@ fn parse_install(mut args: VecDeque<OsString>, explicit_json: &mut bool) -> Resu
     let mut artifact = None;
     let mut source = None;
     let mut compat = None;
+    let mut yes = false;
     while let Some(flag) = args.pop_front() {
         match unicode_flag(&flag)? {
             "--manager-root" => set_path(
@@ -143,6 +144,8 @@ fn parse_install(mut args: VecDeque<OsString>, explicit_json: &mut bool) -> Resu
             )?,
             "--source" => set_path(&mut source, take_value(&mut args, "--source")?, "--source")?,
             "--compat" => set_string(&mut compat, take_value(&mut args, "--compat")?, "--compat")?,
+            "--yes" if !yes => yes = true,
+            "--yes" => return Err(duplicate_flag("--yes")),
             "--json" => set_json(explicit_json)?,
             "--help" | "-h" => return Ok(Cli::Help),
             flag => return Err(unknown_flag(flag)),
@@ -155,7 +158,7 @@ fn parse_install(mut args: VecDeque<OsString>, explicit_json: &mut bool) -> Resu
             official_native,
             compat,
         }),
-        (Some(manifest), Some(artifact), None) if compat.is_none() => {
+        (Some(manifest), Some(artifact), None) if compat.is_none() && !yes => {
             InstallOptions::Local(PrepareOptions {
                 manager_root,
                 official,
@@ -165,7 +168,7 @@ fn parse_install(mut args: VecDeque<OsString>, explicit_json: &mut bool) -> Resu
                 source: None,
             })
         }
-        (Some(manifest), None, Some(source)) if compat.is_none() => {
+        (Some(manifest), None, Some(source)) if compat.is_none() && !yes => {
             InstallOptions::Local(PrepareOptions {
                 manager_root,
                 official,
@@ -178,11 +181,11 @@ fn parse_install(mut args: VecDeque<OsString>, explicit_json: &mut bool) -> Resu
         _ => {
             return Err(ManagerError::new(
                 "invalid_cli",
-                "install accepts --compat only in online mode, or --manifest with exactly one of --artifact/--source for local mode",
+                "install accepts --yes/--compat only in online mode, or --manifest with exactly one of --artifact/--source for local mode",
             ));
         }
     };
-    Ok(Cli::Install(options))
+    Ok(Cli::Install { options, yes })
 }
 
 fn parse_doctor(mut args: VecDeque<OsString>, explicit_json: &mut bool) -> Result<Cli> {
@@ -515,23 +518,38 @@ mod tests {
 
     #[test]
     fn install_supports_online_and_explicit_local_modes() {
-        let Cli::Install(InstallOptions::Online(options)) = parse(&["install"]).unwrap() else {
+        let Cli::Install {
+            options: InstallOptions::Online(options),
+            yes,
+        } = parse(&["install"]).unwrap()
+        else {
             panic!("expected online install")
         };
+        assert!(!yes);
         assert!(options.manager_root.is_none());
         assert!(options.official.is_none());
         assert!(options.compat.is_none());
 
-        let Cli::Install(InstallOptions::Online(options)) =
-            parse(&["install", "--compat", "rust-v0.149.0-native-join-p3"]).unwrap()
+        let Cli::Install {
+            options: InstallOptions::Online(options),
+            yes,
+        } = parse(&[
+            "install",
+            "--yes",
+            "--compat",
+            "rust-v0.149.0-native-join-p3",
+        ])
+        .unwrap()
         else {
             panic!("expected selected online install")
         };
+        assert!(yes);
         assert_eq!(
             options.compat.as_deref(),
             Some("rust-v0.149.0-native-join-p3")
         );
         assert!(parse(&["install", "--compat", "a", "--compat", "b"]).is_err());
+        assert!(parse(&["install", "--yes", "--yes"]).is_err());
         assert!(
             parse(&[
                 "install",
@@ -559,7 +577,11 @@ mod tests {
             "C:/tmp/patched.exe",
         ])
         .unwrap();
-        let Cli::Install(InstallOptions::Local(options)) = cli else {
+        let Cli::Install {
+            options: InstallOptions::Local(options),
+            yes: false,
+        } = cli
+        else {
             panic!("expected local install")
         };
         assert_eq!(
@@ -577,6 +599,17 @@ mod tests {
         assert!(options.source.is_none());
         assert!(parse(&["install", "--manifest", "C:/tmp/manifest.toml"]).is_err());
         assert!(parse(&["install", "--artifact", "C:/tmp/patched.exe"]).is_err());
+        assert!(
+            parse(&[
+                "install",
+                "--yes",
+                "--manifest",
+                "C:/tmp/manifest.toml",
+                "--artifact",
+                "C:/tmp/patched.exe",
+            ])
+            .is_err()
+        );
 
         let Cli::Uninstall { manager_root } =
             parse(&["uninstall", "--manager-root", "C:/tmp/csa"]).unwrap()

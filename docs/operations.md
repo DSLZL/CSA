@@ -37,7 +37,7 @@ For a one-off command, use `npx`:
 npx @dslzl/csa@0.1.3 --version
 ```
 
-`npx --yes` suppresses npm's confirmation before it downloads a missing package. It does not bypass CSA validation or answer the later `csa install` release prompt.
+`npx --yes` suppresses npm's confirmation before it downloads a missing package. It does not bypass CSA validation or answer the later release picker. `csa install --yes` is the separate CSA option that auto-selects the recommended compatible Release.
 
 ### Why npm shows several CSA packages
 
@@ -113,9 +113,13 @@ In a terminal:
 csa install
 ```
 
-CSA discovers public `compat-*` tags without using the GitHub REST API and keeps only tags whose fixed Release assets include `SHA256SUMS`. Bare `csa install` filters to the current Manager target and installed official Codex version, then selects the greatest numeric terminal `-pN` revision. An unresolved greatest-revision tie fails closed.
+CSA discovers public `compat-*` tags without using the GitHub REST API or a login token. It probes at most the 16 newest compatibility Releases for `install-catalog-v1.json`, then uses the committed p3/p8/p9 bootstrap catalog when older Releases do not have that asset. The catalog is display-only: it is not part of a Release's immutable `SHA256SUMS` payload authority.
 
-The selected Release is checked against its peeled tag, CSA commit, upstream Codex tag and commit, manifest, descriptor/checksum coverage, file sizes, and SHA-256 values. A mismatch stops the install. Interactive terminals show stages and artifact download progress; `--json` and redirected output emit only the final JSON document.
+When stdin, stdout, and stderr are terminals, bare `csa install` opens a fixed five-row picker after filtering to the current Manager target and installed official Codex version. The unique greatest numeric terminal `-pN` revision starts as `Recommended`; an exact valid prepared state is marked `Installed`. Use Up/Down, PgUp/PgDn, Home/End, Enter, Escape, Backspace, `/`, or direct typing. Search covers `pN`, the full compatibility ID, Codex version, and acceptance date. Escape first clears an active search; Escape again or Ctrl+C cancels with exit code 130 before the large artifact, prepare, activation, or PATH changes.
+
+`csa install --yes`, `--json`, and any non-interactive stream skip the picker and auto-select the same unique greatest revision. An unresolved greatest-revision tie fails closed. Exact `--compat` also skips the picker and does not consult the display catalog; local `--manifest` mode rejects `--yes` and remains local.
+
+After a choice, CSA re-enters the existing exact verification path. The selected Release is checked against its peeled tag, CSA commit, upstream Codex tag and commit, manifest, descriptor/checksum coverage, file sizes, and SHA-256 values. A mismatch stops the install. Interactive terminals then show artifact download progress; `--json` and redirected output emit only the final JSON document.
 
 To pin an older exact matching Release, select its full ID explicitly:
 

@@ -79,7 +79,9 @@ csa install
 csa status
 ```
 
-`csa install` 会检测已安装的官方 Codex 版本和当前平台，并自动选择完全匹配且数字 `-pN` 修订号最大的公开 `compat-*` Release。交互式终端会显示安装阶段、产物字节数、百分比和传输速率；重定向输出只保留 JSON。无需登录 GitHub：CSA 会并行运行五秒上限的 Cloudflare 与阿里系淘宝 IP 国家探测，任意一个明确返回中国大陆（`CN`）就从 `gh-proxy.com` 开始下载；没有 `CN` 时默认直连 GitHub，并保留直连到镜像的兜底。
+`csa install` 会检测已安装的官方 Codex 版本和当前平台。当 stdin、stdout、stderr 都是交互式终端时，它会显示固定五行的版本选择器，并标出 `Recommended` 和 `Installed`；可以使用方向键或翻页键移动，直接输入文字搜索，按 Enter 安装。Escape 或 Ctrl+C 会在下载 patched executable 之前取消。使用 `csa install --yes`、`--json` 或重定向输入/输出时，则不会询问，自动选择数字 `-pN` 修订号最大的唯一条目。
+
+选择器使用一个仅供展示的小型目录，但最终选中的 Release 仍必须通过原有 peeled tag、descriptor、checksum、size、SHA-256、upstream 和 target 校验。无需登录 GitHub：CSA 会并行运行五秒上限的 Cloudflare 与阿里系淘宝 IP 国家探测，任意一个明确返回中国大陆（`CN`）就从 `gh-proxy.com` 开始下载；没有 `CN` 时默认直连 GitHub，并保留直连到镜像的兜底。
 
 在交互式终端中，`status` 会优先给出是否安装、是否激活、是否健康、官方版本、compatibility 和命令解析结论；`doctor` 会按顺序显示 `PASS`/`WARN`/`FAIL`、影响、恢复动作和汇总计数。稳定的机器报告可使用 `csa --json <command>` 或 `csa <command> --json`；stdout 被重定向时也会自动使用 JSON。
 
@@ -167,7 +169,7 @@ CSA 把四个身份分开管理：
 | 命令 | 用途 |
 | --- | --- |
 | `csa doctor` | 诊断官方安装、prepared state、激活、命令优先级和可选 compatibility inputs，不修改状态 |
-| `csa install` | 自动安装修订号最大的精确匹配 Release，或安装精确的本地 payload |
+| `csa install` | 交互选择精确匹配的 Release、用 `--yes` 自动选择，或安装精确的本地 payload |
 | `csa uninstall` | 撤回 shim，删除 Manager 自己的 prepared state |
 | `csa prepare` | 验证或构建精确的本地 payload，但不激活 |
 | `csa plug` | 在 `<manager-root>/bin` 中发布绑定 checksum 的 shim |

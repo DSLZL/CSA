@@ -23,20 +23,36 @@ const CLOUDFLARE_TRACE_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
 const ALIBABA_REGION_URL: &str = "https://ip.taobao.com/outGetIpInfo?ip=myip&accessKey=alibaba-inc";
 const RELEASE_DESCRIPTOR: &str = "compatibility-release.json";
 const RELEASE_CHECKSUMS: &str = "SHA256SUMS";
+const INSTALL_CATALOG_ASSET: &str = "install-catalog-v1.json";
+const INSTALL_CATALOG_BOOTSTRAP: &str =
+    include_str!("../release/install-catalog-bootstrap-v1.json");
 const MAX_REGION_TRACE_BYTES: u64 = 8 * 1024;
 const MAX_GIT_REFS_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RELEASE_FILE_BYTES: u64 = 16 * 1024 * 1024;
+const MAX_INSTALL_CATALOG_BYTES: u64 = 1024 * 1024;
 const MAX_ARTIFACT_BYTES: u64 = 1024 * 1024 * 1024;
 const MAX_COMPATIBILITY_TAGS: usize = 1_000;
+const MAX_INSTALL_CATALOG_PROBES: usize = 16;
 
-struct CompatibilityEntry {
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct InstallCandidate {
+    pub compat_id: String,
+    pub codex_version: String,
+    pub build_target: String,
+    pub patch_revision: u64,
+    pub recorded_on: String,
+    pub recommended: bool,
+    pub release_tag: String,
+    pub release_commit: String,
+}
+
+pub type InstallSelector<'a> = dyn FnMut(&[InstallCandidate]) -> Result<String> + 'a;
+
+struct SelectedCompatibility {
     compat_id: String,
-    codex_version: String,
-    build_target: String,
-    version_key: (u64, u64, u64),
-    patch_revision: u64,
-    csa_commit: String,
-    unavailable: Option<String>,
+    release_tag: String,
+    release_commit: String,
+    catalog_entry: Option<InstallCandidate>,
 }
 
 pub struct OnlineBundle {
@@ -65,13 +81,31 @@ pub fn resolve_online_install(
     options: &OnlineInstallOptions,
     runner: &dyn ProcessRunner,
 ) -> Result<OnlineBundle> {
-    resolve_online_install_with_progress(options, runner, &mut |_| {})
+    resolve_online_install_inner(options, runner, &mut |_| {}, None)
 }
 
 pub fn resolve_online_install_with_progress(
     options: &OnlineInstallOptions,
     runner: &dyn ProcessRunner,
     progress: &mut dyn FnMut(InstallEvent),
+) -> Result<OnlineBundle> {
+    resolve_online_install_inner(options, runner, progress, None)
+}
+
+pub fn resolve_online_install_with_selector(
+    options: &OnlineInstallOptions,
+    runner: &dyn ProcessRunner,
+    progress: &mut dyn FnMut(InstallEvent),
+    selector: &mut InstallSelector<'_>,
+) -> Result<OnlineBundle> {
+    resolve_online_install_inner(options, runner, progress, Some(selector))
+}
+
+fn resolve_online_install_inner(
+    options: &OnlineInstallOptions,
+    runner: &dyn ProcessRunner,
+    progress: &mut dyn FnMut(InstallEvent),
+    selector: Option<&mut InstallSelector<'_>>,
 ) -> Result<OnlineBundle> {
     let paths = ManagerPaths::resolve(options.manager_root.clone())?;
     progress(InstallEvent::DetectingOfficial);
@@ -94,26 +128,53 @@ pub fn resolve_online_install_with_progress(
         path: staging_path.clone(),
     };
 
-    let catalog = discover_catalog(&client, &paths.root, &staging_path, &official.version)?;
-    if catalog.is_empty() {
-        return Err(ManagerError::new(
-            "no_compatibility_releases",
-            "CSA has no formal compatibility releases",
-        ));
-    }
-    let selected_index = if let Some(requested) = options.compat.as_deref() {
-        select_requested(&catalog, requested)?
+    let refs = client.repository_refs(CSA_REPOSITORY)?;
+    let selected = if let Some(requested) = options.compat.as_deref() {
+        validate_asset_name(requested)?;
+        let release_tag = format!("compat-{requested}");
+        let release_commit = peel_tag_from_refs(&refs, &release_tag).map_err(|_| {
+            ManagerError::new(
+                "compatibility_not_found",
+                format!("no formal compatibility release has ID {requested}"),
+            )
+        })?;
+        SelectedCompatibility {
+            compat_id: requested.to_owned(),
+            release_tag,
+            release_commit,
+            catalog_entry: None,
+        }
     } else {
-        select_automatic(&catalog)?
+        let mut candidates = discover_install_candidates(
+            &client,
+            &paths.root,
+            &staging_path,
+            &refs,
+            &official.version,
+        )?;
+        let recommended = select_automatic(&candidates)?;
+        candidates[recommended].recommended = true;
+        let selected_id = if let Some(select) = selector {
+            progress(InstallEvent::SelectingCompatibility);
+            select(&candidates)?
+        } else {
+            candidates[recommended].compat_id.clone()
+        };
+        let candidate = take_selected_candidate(candidates, &selected_id)?;
+        SelectedCompatibility {
+            compat_id: candidate.compat_id.clone(),
+            release_tag: candidate.release_tag.clone(),
+            release_commit: candidate.release_commit.clone(),
+            catalog_entry: Some(candidate),
+        }
     };
-    let selected = &catalog[selected_index];
     let compat_id = &selected.compat_id;
     progress(InstallEvent::SelectedCompatibility {
         compat_id: compat_id.clone(),
     });
-    let release_tag = format!("compat-{compat_id}");
+    let release_tag = selected.release_tag;
     let csa_commit = client.peel_tag(CSA_REPOSITORY, &release_tag)?;
-    if csa_commit != selected.csa_commit {
+    if csa_commit != selected.release_commit {
         return Err(ManagerError::new(
             "compatibility_release_changed",
             "selected compatibility tag changed during installation",
@@ -129,9 +190,10 @@ pub fn resolve_online_install_with_progress(
             )
         })?;
     validate_catalog_descriptor(&descriptor, &release_tag, &csa_commit, compat_id)?;
-    if descriptor.upstream.version != selected.codex_version
-        || descriptor.build_target != selected.build_target
-    {
+    if selected.catalog_entry.is_some_and(|expected| {
+        descriptor.upstream.version != expected.codex_version
+            || descriptor.build_target != expected.build_target
+    }) {
         return Err(ManagerError::new(
             "compatibility_release_changed",
             "selected compatibility metadata changed during installation",
@@ -230,55 +292,98 @@ pub fn resolve_online_install_with_progress(
     })
 }
 
-fn discover_catalog(
+fn discover_install_candidates(
     client: &GitHubClient,
     manager_root: &Path,
     staging_path: &Path,
+    refs: &BTreeMap<String, String>,
     official_version: &str,
-) -> Result<Vec<CompatibilityEntry>> {
+) -> Result<Vec<InstallCandidate>> {
     let catalog_path = staging_path.join("catalog");
     ensure_managed_directory(manager_root, &catalog_path)?;
-    let mut entries = Vec::new();
-    let refs = client.repository_refs(CSA_REPOSITORY)?;
-    for release_tag in compatibility_tags(&refs)? {
-        let compat_id = release_tag
-            .strip_prefix("compat-")
-            .expect("compatibility_tags only returns compatibility tags");
-        let csa_commit = peel_tag_from_refs(&refs, &release_tag)?;
-        let entry_path = catalog_path.join(entries.len().to_string());
-        ensure_managed_directory(manager_root, &entry_path)?;
-        let Some((descriptor, _)) = download_release_metadata(client, &release_tag, &entry_path)?
-        else {
-            continue;
-        };
-        validate_catalog_descriptor(&descriptor, &release_tag, &csa_commit, compat_id)?;
-        let patch_revision = patch_revision(&descriptor.compat_id)?;
-        entries.push(CompatibilityEntry {
-            compat_id: descriptor.compat_id,
-            codex_version: descriptor.upstream.version.clone(),
-            build_target: descriptor.build_target.clone(),
-            version_key: version_key(&descriptor.upstream.version)?,
-            patch_revision,
-            csa_commit,
-            unavailable: incompatibility_reason(
-                &descriptor.upstream.version,
-                &descriptor.build_target,
-                official_version,
-            ),
-        });
-    }
-    sort_catalog(&mut entries);
-    Ok(entries)
+    let catalog = load_install_catalog(client, &catalog_path, refs)?;
+    install_candidates(catalog, official_version)
 }
 
-fn sort_catalog(entries: &mut [CompatibilityEntry]) {
-    entries.sort_by(|left, right| {
-        right
-            .version_key
-            .cmp(&left.version_key)
-            .then_with(|| right.patch_revision.cmp(&left.patch_revision))
-            .then_with(|| left.compat_id.cmp(&right.compat_id))
-    });
+fn install_candidates(
+    catalog: InstallCatalog,
+    official_version: &str,
+) -> Result<Vec<InstallCandidate>> {
+    let candidates: Vec<_> = catalog
+        .entries
+        .into_iter()
+        .filter(|entry| {
+            entry.codex_version == official_version && entry.build_target == BUILD_TARGET
+        })
+        .map(|entry| InstallCandidate {
+            compat_id: entry.compat_id,
+            codex_version: entry.codex_version,
+            build_target: entry.build_target,
+            patch_revision: entry.patch_revision,
+            recorded_on: entry.recorded_on,
+            recommended: false,
+            release_tag: entry.release_tag,
+            release_commit: entry.release_commit,
+        })
+        .collect();
+    if candidates.is_empty() {
+        return Err(ManagerError::new(
+            "no_installable_compatibility_releases",
+            "no formal compatibility release matches this Manager target and official Codex version",
+        ));
+    }
+    Ok(candidates)
+}
+
+fn take_selected_candidate(
+    candidates: Vec<InstallCandidate>,
+    selected_id: &str,
+) -> Result<InstallCandidate> {
+    candidates
+        .into_iter()
+        .find(|candidate| candidate.compat_id == selected_id)
+        .ok_or_else(|| {
+            ManagerError::new(
+                "invalid_install_selection",
+                "compatibility selector returned an unknown compatibility ID",
+            )
+        })
+}
+
+fn load_install_catalog(
+    client: &GitHubClient,
+    catalog_path: &Path,
+    refs: &BTreeMap<String, String>,
+) -> Result<InstallCatalog> {
+    // ponytail: probe only the newest 16 tags; switch to one stable catalog URL if release history outgrows it.
+    for (index, release_tag) in compatibility_tags(refs)?
+        .into_iter()
+        .take(MAX_INSTALL_CATALOG_PROBES)
+        .enumerate()
+    {
+        let destination = catalog_path.join(format!("remote-{index}.json"));
+        if client.download_asset(
+            &release_tag,
+            INSTALL_CATALOG_ASSET,
+            &destination,
+            None,
+            None,
+            MAX_INSTALL_CATALOG_BYTES,
+        )? {
+            let catalog = read_install_catalog(&destination)?;
+            validate_install_catalog(&catalog, refs, Some(&release_tag))?;
+            return Ok(catalog);
+        }
+    }
+    let catalog: InstallCatalog =
+        serde_json::from_str(INSTALL_CATALOG_BOOTSTRAP).map_err(|error| {
+            ManagerError::new(
+                "invalid_install_catalog",
+                format!("invalid bundled install catalog: {error}"),
+            )
+        })?;
+    validate_install_catalog(&catalog, refs, None)?;
+    Ok(catalog)
 }
 
 fn download_release_metadata(
@@ -340,29 +445,9 @@ fn download_release_metadata(
     Ok(Some((descriptor, checksums)))
 }
 
-fn select_requested(catalog: &[CompatibilityEntry], requested: &str) -> Result<usize> {
-    let index = catalog
-        .iter()
-        .position(|entry| entry.compat_id == requested)
-        .ok_or_else(|| {
-            ManagerError::new(
-                "compatibility_not_found",
-                format!("no formal compatibility release has ID {requested}"),
-            )
-        })?;
-    if let Some(reason) = &catalog[index].unavailable {
-        return Err(ManagerError::new(
-            "compatibility_not_installable",
-            format!("{requested} is not installable: {reason}"),
-        ));
-    }
-    Ok(index)
-}
-
-fn select_automatic(catalog: &[CompatibilityEntry]) -> Result<usize> {
+fn select_automatic(catalog: &[InstallCandidate]) -> Result<usize> {
     let greatest = catalog
         .iter()
-        .filter(|entry| entry.unavailable.is_none())
         .map(|entry| entry.patch_revision)
         .max()
         .ok_or_else(|| {
@@ -374,7 +459,7 @@ fn select_automatic(catalog: &[CompatibilityEntry]) -> Result<usize> {
     let mut matches = catalog
         .iter()
         .enumerate()
-        .filter(|(_, entry)| entry.unavailable.is_none() && entry.patch_revision == greatest);
+        .filter(|(_, entry)| entry.patch_revision == greatest);
     let selected = matches
         .next()
         .expect("greatest revision came from catalog")
@@ -405,25 +490,6 @@ fn patch_revision(compat_id: &str) -> Result<u64> {
     Ok(revision)
 }
 
-fn incompatibility_reason(
-    codex_version: &str,
-    build_target: &str,
-    official_version: &str,
-) -> Option<String> {
-    let mut reasons = Vec::new();
-    if build_target != BUILD_TARGET {
-        reasons.push(format!(
-            "requires target {build_target}; manager is {BUILD_TARGET}"
-        ));
-    }
-    if codex_version != official_version {
-        reasons.push(format!(
-            "requires official Codex {codex_version}; installed is {official_version}"
-        ));
-    }
-    (!reasons.is_empty()).then(|| reasons.join("; "))
-}
-
 fn version_key(version: &str) -> Result<(u64, u64, u64)> {
     let mut parts = version.split('.');
     let parse = |value: Option<&str>| {
@@ -448,6 +514,133 @@ fn version_key(version: &str) -> Result<(u64, u64, u64)> {
         ));
     }
     Ok(key)
+}
+
+fn validate_install_catalog(
+    catalog: &InstallCatalog,
+    refs: &BTreeMap<String, String>,
+    containing_release_tag: Option<&str>,
+) -> Result<()> {
+    if catalog.schema != 1
+        || !catalog.repository.eq_ignore_ascii_case(CSA_REPOSITORY)
+        || catalog.entries.is_empty()
+        || catalog.entries.len() > MAX_COMPATIBILITY_TAGS
+    {
+        return Err(invalid_install_catalog(
+            "install catalog schema, repository, or entry count is invalid",
+        ));
+    }
+    validate_asset_name(&catalog.source_release_tag)
+        .map_err(|_| invalid_install_catalog("install catalog source tag is invalid"))?;
+    validate_sha(&catalog.source_commit)
+        .map_err(|_| invalid_install_catalog("install catalog source commit is invalid"))?;
+    if containing_release_tag.is_some_and(|tag| tag != catalog.source_release_tag) {
+        return Err(invalid_install_catalog(
+            "install catalog source tag differs from the containing release",
+        ));
+    }
+    if catalog_ref_commit(refs, &catalog.source_release_tag)? != catalog.source_commit {
+        return Err(invalid_install_catalog(
+            "install catalog source commit differs from its Git tag",
+        ));
+    }
+
+    let mut compat_ids = BTreeSet::new();
+    let mut release_tags = BTreeSet::new();
+    let mut order = Vec::with_capacity(catalog.entries.len());
+    let mut source_matches = 0;
+    for entry in &catalog.entries {
+        validate_asset_name(&entry.compat_id)
+            .map_err(|_| invalid_install_catalog("install catalog compatibility ID is invalid"))?;
+        validate_asset_name(&entry.release_tag)
+            .map_err(|_| invalid_install_catalog("install catalog release tag is invalid"))?;
+        validate_asset_name(&entry.build_target)
+            .map_err(|_| invalid_install_catalog("install catalog build target is invalid"))?;
+        validate_sha(&entry.release_commit)
+            .map_err(|_| invalid_install_catalog("install catalog release commit is invalid"))?;
+        let key = version_key(&entry.codex_version)
+            .map_err(|_| invalid_install_catalog("install catalog Codex version is invalid"))?;
+        if format!("{}.{}.{}", key.0, key.1, key.2) != entry.codex_version
+            || patch_revision(&entry.compat_id)
+                .map_err(|_| invalid_install_catalog("install catalog patch revision is invalid"))?
+                != entry.patch_revision
+            || entry.release_tag != format!("compat-{}", entry.compat_id)
+            || !valid_recorded_on(&entry.recorded_on)
+        {
+            return Err(invalid_install_catalog(
+                "install catalog entry identity, revision, or date is invalid",
+            ));
+        }
+        if !compat_ids.insert(&entry.compat_id) || !release_tags.insert(&entry.release_tag) {
+            return Err(invalid_install_catalog(
+                "install catalog repeats a compatibility ID or release tag",
+            ));
+        }
+        if catalog_ref_commit(refs, &entry.release_tag)? != entry.release_commit {
+            return Err(invalid_install_catalog(
+                "install catalog release commit differs from its Git tag",
+            ));
+        }
+        if entry.release_tag == catalog.source_release_tag {
+            source_matches += 1;
+            if entry.release_commit != catalog.source_commit {
+                return Err(invalid_install_catalog(
+                    "install catalog source entry differs from the source commit",
+                ));
+            }
+        }
+        order.push((key, entry.patch_revision, entry.compat_id.as_str()));
+    }
+    let mut sorted = order.clone();
+    sorted.sort_by(|left, right| {
+        right
+            .0
+            .cmp(&left.0)
+            .then_with(|| right.1.cmp(&left.1))
+            .then_with(|| left.2.cmp(right.2))
+    });
+    if source_matches != 1 || order != sorted {
+        return Err(invalid_install_catalog(
+            "install catalog source entry or newest-first ordering is invalid",
+        ));
+    }
+    Ok(())
+}
+
+fn catalog_ref_commit(refs: &BTreeMap<String, String>, tag: &str) -> Result<String> {
+    peel_tag_from_refs(refs, tag)
+        .map_err(|_| invalid_install_catalog("install catalog references a missing Git tag"))
+}
+
+fn invalid_install_catalog(message: impl Into<String>) -> ManagerError {
+    ManagerError::new("invalid_install_catalog", message)
+}
+
+fn valid_recorded_on(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    if bytes.len() != 10
+        || bytes[4] != b'-'
+        || bytes[7] != b'-'
+        || bytes
+            .iter()
+            .enumerate()
+            .any(|(index, byte)| index != 4 && index != 7 && !byte.is_ascii_digit())
+    {
+        return false;
+    }
+    let parse = |start: usize, end: usize| value[start..end].parse::<u32>().ok();
+    let (Some(year), Some(month), Some(day)) = (parse(0, 4), parse(5, 7), parse(8, 10)) else {
+        return false;
+    };
+    let leap = year.is_multiple_of(4) && (!year.is_multiple_of(100) || year.is_multiple_of(400));
+    let days = match month {
+        1 | 3 | 5 | 7 | 8 | 10 | 12 => 31,
+        4 | 6 | 9 | 11 => 30,
+        2 if leap => 29,
+        2 => 28,
+        _ => return false,
+    };
+    year != 0 && day != 0 && day <= days
 }
 
 struct ProgressReader<'a, R> {
@@ -865,7 +1058,21 @@ fn compatibility_tags(refs: &BTreeMap<String, String>) -> Result<Vec<String>> {
             continue;
         }
         validate_asset_name(tag)?;
-        tags.push(format!("compat-{tag}"));
+        let version = tag
+            .strip_prefix("rust-v")
+            .and_then(|value| value.split_once('-').map(|(version, _)| version))
+            .ok_or_else(|| {
+                invalid_install_catalog("compatibility tag has no numeric Codex version")
+            })?;
+        tags.push((
+            format!("compat-{tag}"),
+            version_key(version).map_err(|_| {
+                invalid_install_catalog("compatibility tag has an invalid Codex version")
+            })?,
+            patch_revision(tag).map_err(|_| {
+                invalid_install_catalog("compatibility tag has an invalid patch revision")
+            })?,
+        ));
     }
     if tags.len() > MAX_COMPATIBILITY_TAGS {
         return Err(ManagerError::new(
@@ -873,7 +1080,14 @@ fn compatibility_tags(refs: &BTreeMap<String, String>) -> Result<Vec<String>> {
             "compatibility catalog reached the 1,000-tag safety limit",
         ));
     }
-    Ok(tags)
+    tags.sort_by(|left, right| {
+        right
+            .1
+            .cmp(&left.1)
+            .then_with(|| right.2.cmp(&left.2))
+            .then_with(|| left.0.cmp(&right.0))
+    });
+    Ok(tags.into_iter().map(|(tag, _, _)| tag).collect())
 }
 
 fn peel_tag_from_refs(refs: &BTreeMap<String, String>, tag: &str) -> Result<String> {
@@ -952,6 +1166,28 @@ fn invalid_git_refs() -> ManagerError {
         "invalid_github_response",
         "GitHub returned an invalid Git ref advertisement",
     )
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstallCatalog {
+    schema: u32,
+    repository: String,
+    source_release_tag: String,
+    source_commit: String,
+    entries: Vec<InstallCatalogEntry>,
+}
+
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct InstallCatalogEntry {
+    compat_id: String,
+    release_tag: String,
+    release_commit: String,
+    codex_version: String,
+    build_target: String,
+    patch_revision: u64,
+    recorded_on: String,
 }
 
 #[derive(Deserialize)]
@@ -1040,6 +1276,14 @@ fn read_json_file<T: DeserializeOwned>(path: &Path) -> Result<T> {
         .map_err(|error| ManagerError::io(&format!("read JSON {}", path.display()), error))?;
     serde_json::from_slice(&bytes)
         .map_err(|error| ManagerError::new("invalid_compatibility_release", error.to_string()))
+}
+
+fn read_install_catalog(path: &Path) -> Result<InstallCatalog> {
+    let bytes = fs::read(path)
+        .map_err(|error| ManagerError::io(&format!("read JSON {}", path.display()), error))?;
+    serde_json::from_slice(&bytes).map_err(|error| {
+        invalid_install_catalog(format!("install catalog is invalid JSON: {error}"))
+    })
 }
 
 fn validate_catalog_descriptor(
@@ -1253,14 +1497,14 @@ fn network_error(context: &str, error: impl std::fmt::Display) -> ManagerError {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUILD_TARGET, CSA_REPOSITORY, CompatibilityEntry, CompatibilityRelease, GitHubClient,
-        GitHubRoute, MAX_ARTIFACT_BYTES, OPENAI_REPOSITORY, ProgressReader, ReleaseFile,
-        UpstreamRelease, compatibility_tags, country_from_alibaba_region,
-        country_from_cloudflare_trace, descriptor_assets, incompatibility_reason, parse_checksums,
-        parse_git_refs, patch_revision, peel_tag_from_refs, release_asset_url, require_uri_host,
-        route_from_region_probes, routed_url, select_automatic, select_requested, should_try_proxy,
-        sort_catalog, stable_release_version, validate_declared_asset, validate_descriptor,
-        version_key,
+        BUILD_TARGET, CSA_REPOSITORY, CompatibilityRelease, GitHubClient, GitHubRoute,
+        InstallCandidate, InstallCatalog, InstallCatalogEntry, MAX_ARTIFACT_BYTES,
+        OPENAI_REPOSITORY, ProgressReader, ReleaseFile, UpstreamRelease, compatibility_tags,
+        country_from_alibaba_region, country_from_cloudflare_trace, descriptor_assets,
+        install_candidates, parse_checksums, parse_git_refs, patch_revision, peel_tag_from_refs,
+        release_asset_url, require_uri_host, route_from_region_probes, routed_url,
+        select_automatic, should_try_proxy, stable_release_version, take_selected_candidate,
+        valid_recorded_on, validate_declared_asset, validate_descriptor, validate_install_catalog,
     };
     use crate::manager::InstallEvent;
     use std::collections::BTreeMap;
@@ -1277,38 +1521,31 @@ mod tests {
 
     #[test]
     fn compatibility_catalog_uses_the_greatest_numeric_patch_revision() {
-        let entry = |compat_id: &str, version: &str, target: &str| CompatibilityEntry {
+        let entry = |compat_id: &str| InstallCandidate {
             compat_id: compat_id.to_owned(),
-            codex_version: version.to_owned(),
-            build_target: target.to_owned(),
-            version_key: version_key(version).unwrap(),
+            codex_version: "0.10.0".to_owned(),
+            build_target: BUILD_TARGET.to_owned(),
             patch_revision: patch_revision(compat_id).unwrap(),
-            csa_commit: "a".repeat(40),
-            unavailable: incompatibility_reason(version, target, "0.10.0"),
+            recorded_on: "2026-08-29".to_owned(),
+            recommended: false,
+            release_tag: format!("compat-{compat_id}"),
+            release_commit: "a".repeat(40),
         };
-        let mut catalog = vec![
-            entry("rust-v0.10.0-native-join-p9", "0.10.0", BUILD_TARGET),
-            entry("rust-v0.10.0-native-join-p10", "0.10.0", BUILD_TARGET),
-            entry("rust-v0.10.0-native-join-p99", "0.10.0", "other-target"),
+        let catalog = vec![
+            entry("rust-v0.10.0-native-join-p9"),
+            entry("rust-v0.10.0-native-join-p10"),
         ];
-        sort_catalog(&mut catalog);
         assert_eq!(
             catalog[select_automatic(&catalog).unwrap()].compat_id,
             "rust-v0.10.0-native-join-p10"
         );
         assert_eq!(
-            catalog[select_requested(&catalog, "rust-v0.10.0-native-join-p9").unwrap()].compat_id,
-            "rust-v0.10.0-native-join-p9"
-        );
-        assert!(select_requested(&catalog, "rust-v0.10.0-native-join-p99").is_err());
-        assert!(select_requested(&catalog, "missing").is_err());
-        assert_eq!(
-            select_automatic(&catalog[0..1]).unwrap_err().code,
+            select_automatic(&[]).unwrap_err().code,
             "no_installable_compatibility_releases"
         );
         let tie = [
-            entry("rust-v0.10.0-native-join-p10", "0.10.0", BUILD_TARGET),
-            entry("rust-v0.10.0-orbit-p10", "0.10.0", BUILD_TARGET),
+            entry("rust-v0.10.0-native-join-p10"),
+            entry("rust-v0.10.0-orbit-p10"),
         ];
         assert_eq!(
             select_automatic(&tie).unwrap_err().code,
@@ -1321,6 +1558,100 @@ mod tests {
         ] {
             assert!(patch_revision(malformed).is_err());
         }
+    }
+
+    #[test]
+    fn install_catalog_is_strict_and_bound_to_git_refs() {
+        let source_tag = "compat-rust-v0.10.0-native-join-p10";
+        let source_commit = "a".repeat(40);
+        let mut refs = BTreeMap::new();
+        refs.insert(format!("refs/tags/{source_tag}"), source_commit.clone());
+        let catalog = InstallCatalog {
+            schema: 1,
+            repository: "DSLZL/CSA".to_owned(),
+            source_release_tag: source_tag.to_owned(),
+            source_commit: source_commit.clone(),
+            entries: vec![InstallCatalogEntry {
+                compat_id: "rust-v0.10.0-native-join-p10".to_owned(),
+                release_tag: source_tag.to_owned(),
+                release_commit: source_commit,
+                codex_version: "0.10.0".to_owned(),
+                build_target: BUILD_TARGET.to_owned(),
+                patch_revision: 10,
+                recorded_on: "2026-08-29".to_owned(),
+            }],
+        };
+        validate_install_catalog(&catalog, &refs, Some(source_tag)).unwrap();
+        assert!(valid_recorded_on("2024-02-29"));
+        assert!(!valid_recorded_on("2025-02-29"));
+        assert!(!valid_recorded_on("0000-01-01"));
+    }
+
+    #[test]
+    fn bundled_install_catalog_is_valid_against_its_reviewed_refs() {
+        let catalog: InstallCatalog =
+            serde_json::from_str(super::INSTALL_CATALOG_BOOTSTRAP).unwrap();
+        let mut refs = BTreeMap::new();
+        for entry in &catalog.entries {
+            refs.insert(
+                format!("refs/tags/{}", entry.release_tag),
+                entry.release_commit.clone(),
+            );
+        }
+        validate_install_catalog(&catalog, &refs, None).unwrap();
+    }
+
+    #[test]
+    fn display_catalog_filters_one_hundred_candidates_and_revalidates_selection() {
+        let entries: Vec<_> = (1..=100)
+            .rev()
+            .map(|revision| {
+                let compat_id = format!("rust-v0.10.0-native-join-p{revision}");
+                InstallCatalogEntry {
+                    release_tag: format!("compat-{compat_id}"),
+                    release_commit: format!("{revision:040x}"),
+                    compat_id,
+                    codex_version: "0.10.0".to_owned(),
+                    build_target: BUILD_TARGET.to_owned(),
+                    patch_revision: revision,
+                    recorded_on: "2026-08-29".to_owned(),
+                }
+            })
+            .collect();
+        let source = &entries[0];
+        let mut refs = BTreeMap::new();
+        for entry in &entries {
+            refs.insert(
+                format!("refs/tags/{}", entry.release_tag),
+                entry.release_commit.clone(),
+            );
+        }
+        let catalog = InstallCatalog {
+            schema: 1,
+            repository: CSA_REPOSITORY.to_owned(),
+            source_release_tag: source.release_tag.clone(),
+            source_commit: source.release_commit.clone(),
+            entries,
+        };
+        validate_install_catalog(&catalog, &refs, None).unwrap();
+        let candidates = install_candidates(catalog, "0.10.0").unwrap();
+        assert_eq!(candidates.len(), 100);
+        assert_eq!(
+            candidates[select_automatic(&candidates).unwrap()].patch_revision,
+            100
+        );
+        assert_eq!(
+            take_selected_candidate(candidates.clone(), "rust-v0.10.0-native-join-p42")
+                .unwrap()
+                .patch_revision,
+            42
+        );
+        assert_eq!(
+            take_selected_candidate(candidates, "missing")
+                .unwrap_err()
+                .code,
+            "invalid_install_selection"
+        );
     }
 
     #[test]

@@ -271,14 +271,17 @@ It does not publish Codex App, Desktop, app-server, exec-server, MCP server, or 
 
 The workflow finalizes a temporary manifest copy, reverifies clean source and the production artifact, packs the flat compatibility payload, enforces one executable product, and uploads the exact local set to a draft.
 
-The current p8 Release contains:
+Each patched Codex Release contains:
 
 - `compatibility-release.json`;
-- one `rust-v0.150.1-native-join-p8--codex.exe`;
+- one `<compat_id>--codex.exe`;
 - the finalized manifest and expected source hashes;
-- 16 ordered patch files;
+- the ordered patch files;
 - the exact test contract;
-- `SHA256SUMS`.
+- `SHA256SUMS`;
+- `install-catalog-v1.json`.
+
+The install catalog is generated from committed, release-enabled compatibility records and formal non-draft, non-prerelease Releases. It is display metadata for version selection and is intentionally excluded from `SHA256SUMS` and `compatibility-release.json`; older Managers therefore keep accepting the existing payload contract.
 
 ## Recover a draft safely
 
@@ -310,9 +313,9 @@ Rustup, xwin, build-tool, runtime, Cargo, and sccache saves are best-effort. Cor
 
 ## Manager discovery and trust boundary
 
-The Manager already implements online discovery. It queries the fixed `DSLZL/CSA` GitHub Releases endpoint, ignores drafts and prereleases, parses formal `compat-*` tags, and downloads only the expected metadata and assets.
+The Manager discovers formal `compat-*` tags through unauthenticated Git smart-HTTP refs, then probes a bounded number of newest tags for `install-catalog-v1.json`. Direct GitHub and the existing China mirror route are supported without requiring `GITHUB_TOKEN` or `GH_TOKEN`; the reviewed embedded catalog covers immutable Releases that predate the catalog asset.
 
-It does not trust a mutable remote compatibility index. Each selected Release must prove its tag, source commit, descriptor, manifest, exact asset set, sizes, and hashes. Unexpected redirects, duplicate metadata, malformed tags, missing or extra assets, and checksum drift fail closed.
+The catalog is not installation authority. Its source tag, source commit, and candidate refs are cross-checked only to build the picker; after selection, the Manager independently proves the exact tag, source commit, descriptor, manifest, asset set, sizes, and hashes. Unexpected redirects, duplicate metadata, malformed tags, missing or extra assets, and checksum drift fail closed.
 
 Adding a compatibility does not require hard-coding its ID in the Manager, but it does require a formal compatible Release and a Manager build whose target and runtime detection support that entry.
 

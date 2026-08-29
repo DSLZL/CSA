@@ -1,0 +1,35 @@
+{
+  "schema": 1,
+  "repository": "DSLZL/CSA",
+  "source_release_tag": "compat-rust-v0.150.1-native-join-p9",
+  "source_commit": "0d69e6c82a3f648899d32c1eced2b5abb89d7072",
+  "entries": [
+    {
+      "compat_id": "rust-v0.150.1-native-join-p9",
+      "release_tag": "compat-rust-v0.150.1-native-join-p9",
+      "release_commit": "0d69e6c82a3f648899d32c1eced2b5abb89d7072",
+      "codex_version": "0.150.1",
+      "build_target": "x86_64-pc-windows-msvc",
+      "patch_revision": 9,
+      "recorded_on": "2026-08-29"
+    },
+    {
+      "compat_id": "rust-v0.150.1-native-join-p8",
+      "release_tag": "compat-rust-v0.150.1-native-join-p8",
+      "release_commit": "2fa0e59d810b7b404aef696923c3f83947eb0759",
+      "codex_version": "0.150.1",
+      "build_target": "x86_64-pc-windows-msvc",
+      "patch_revision": 8,
+      "recorded_on": "2026-08-28"
+    },
+    {
+      "compat_id": "rust-v0.149.0-native-join-p3",
+      "release_tag": "compat-rust-v0.149.0-native-join-p3",
+      "release_commit": "1a764defaf1a65291bafe7f8af5cf73f90c51e10",
+      "codex_version": "0.149.0",
+      "build_target": "x86_64-pc-windows-msvc",
+      "patch_revision": 3,
+      "recorded_on": "2026-08-23"
+    }
+  ]
+}

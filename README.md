@@ -79,7 +79,9 @@ csa install
 csa status
 ```
 
-`csa install` detects the installed official Codex version and platform, then automatically selects the matching public `compat-*` Release with the greatest numeric `-pN` revision. Interactive terminals show install stages plus artifact bytes, percentage, and transfer rate; redirected output stays JSON-only. No GitHub login is required: five-second Cloudflare and Alibaba/Taobao country probes run in parallel, and either one reporting mainland China (`CN`) starts with `gh-proxy.com`; otherwise CSA starts with GitHub directly and keeps the direct-to-mirror fallback.
+`csa install` detects the installed official Codex version and platform. When stdin, stdout, and stderr are interactive terminals, it shows a five-row version picker with `Recommended` and `Installed` markers; use the arrow or paging keys, type to search, and press Enter to install. Escape or Ctrl+C cancels before the patched executable is downloaded. Use `csa install --yes`, `--json`, or redirected input/output to select the unique greatest numeric `-pN` revision without prompting.
+
+The picker uses a small display-only catalog, but the selected Release still has to pass the existing peeled-tag, descriptor, checksum, size, SHA-256, upstream, and target checks. No GitHub login is required: five-second Cloudflare and Alibaba/Taobao country probes run in parallel, and either one reporting mainland China (`CN`) starts with `gh-proxy.com`; otherwise CSA starts with GitHub directly and keeps the direct-to-mirror fallback.
 
 In an interactive terminal, `status` leads with installed, active, healthy, official-version, compatibility, and command-resolution conclusions. `doctor` prints ordered `PASS`/`WARN`/`FAIL` checks, impact and recovery guidance, then aggregate totals. Use `csa --json <command>` or `csa <command> --json` for the stable machine report; redirected stdout also selects JSON automatically.
 
@@ -167,7 +169,7 @@ Normal shim launches inherit the current `CODEX_HOME`, working directory, termin
 | Command | Purpose |
 | --- | --- |
 | `csa doctor` | Diagnose the official installation, prepared state, activation, command precedence, and optional compatibility inputs without modifying state |
-| `csa install` | Automatically install the greatest exact matching Release, or install an exact local payload |
+| `csa install` | Pick an exact matching Release interactively, auto-select it with `--yes`, or install an exact local payload |
 | `csa uninstall` | Withdraw the shim and remove Manager-owned prepared state |
 | `csa prepare` | Validate or build an exact local payload without activating it |
 | `csa plug` | Publish the checksum-bound shim inside `<manager-root>/bin` |

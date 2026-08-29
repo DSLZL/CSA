@@ -21,6 +21,9 @@ class ReleaseAssetSetTests(unittest.TestCase):
         root = Path(holder.name)
         (root / "codex.exe").write_bytes(b"codex")
         descriptor = {
+            "repository": "DSLZL/CSA",
+            "release_tag": "compat-rust-v9.9.9-native-join-p9",
+            "source_commit": "a" * 40,
             "artifact": {
                 "path": "codex.exe",
                 "asset": "codex.exe",
@@ -67,6 +70,34 @@ class ReleaseAssetSetTests(unittest.TestCase):
             ]
         }
         self.assertEqual(MODULE.remote_inventory(remote), local)
+
+    def test_required_install_catalog_is_validated_outside_payload_checksums(self) -> None:
+        holder, root = self.fixture()
+        self.addCleanup(holder.cleanup)
+        catalog = {
+            "schema": 1,
+            "repository": "DSLZL/CSA",
+            "source_release_tag": "compat-rust-v9.9.9-native-join-p9",
+            "source_commit": "a" * 40,
+            "entries": [
+                {
+                    "compat_id": "rust-v9.9.9-native-join-p9",
+                    "release_tag": "compat-rust-v9.9.9-native-join-p9",
+                    "release_commit": "a" * 40,
+                    "codex_version": "9.9.9",
+                    "build_target": "x86_64-pc-windows-msvc",
+                    "patch_revision": 9,
+                    "recorded_on": "2026-08-29",
+                }
+            ],
+        }
+        (root / "install-catalog-v1.json").write_text(json.dumps(catalog), encoding="utf-8")
+        inventory = MODULE.local_inventory(root, "codex.exe", require_install_catalog=True)
+        self.assertIn("install-catalog-v1.json", inventory)
+        with (root / "SHA256SUMS").open("a", encoding="ascii") as stream:
+            stream.write("0" * 64 + "  install-catalog-v1.json\n")
+        with self.assertRaisesRegex(ValueError, "outside"):
+            MODULE.local_inventory(root, "codex.exe", require_install_catalog=True)
 
 
 if __name__ == "__main__":

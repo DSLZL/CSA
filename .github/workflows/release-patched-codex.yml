@@ -471,12 +471,31 @@ jobs:
           name: patched-codex-cli-release-${{ needs.build.outputs.compat_id }}
           path: ${{ runner.temp }}/patched-codex-release-assets
 
+      - name: Build no-login install display catalog
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.build.outputs.release_tag }}
+        run: |
+          set -euo pipefail
+          git fetch --force --tags origin
+          formal_tags="$RUNNER_TEMP/formal-compat-tags.txt"
+          gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+            --jq '.[] | select(.draft == false and .prerelease == false and (.tag_name | startswith("compat-"))) | .tag_name' \
+            > "$formal_tags"
+          python scripts/compat_catalog.py install-catalog \
+            --repository . \
+            --formal-tags "$formal_tags" \
+            --current-release-tag "$TAG" \
+            --current-source-commit "$GITHUB_SHA" \
+            --output "$RUNNER_TEMP/patched-codex-release-assets/install-catalog-v1.json"
+
       - name: Recheck exact local asset authority
         run: |
           set -euo pipefail
           python scripts/verify_release_asset_set.py local \
             --root "$RUNNER_TEMP/patched-codex-release-assets" \
-            --expected-executable '${{ needs.build.outputs.artifact_asset }}'
+            --expected-executable '${{ needs.build.outputs.artifact_asset }}' \
+            --require-install-catalog
 
       - name: Create or validate annotated compatibility tag
         env:
@@ -493,7 +512,6 @@ jobs:
               -f type=commit \
               --jq .sha
           }
-          git fetch --force --tags origin
           if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
             existing="$(git rev-parse "$TAG^{commit}")"
             if [[ "$existing" != "$RELEASE_SHA" ]]; then
@@ -570,7 +588,8 @@ jobs:
               python scripts/verify_release_asset_set.py remote \
                 --root "$root" \
                 --expected-executable "$EXPECTED_EXECUTABLE" \
-                --release-json "$remote"
+                --release-json "$remote" \
+                --require-install-catalog
               echo "Published release already exists with the exact reviewed asset set."
               exit 0
             fi
@@ -627,7 +646,8 @@ jobs:
             if python scripts/verify_release_asset_set.py remote \
               --root "$root" \
               --expected-executable "$EXPECTED_EXECUTABLE" \
-              --release-json "$remote"; then
+              --release-json "$remote" \
+              --require-install-catalog; then
               verified=true
               break
             fi

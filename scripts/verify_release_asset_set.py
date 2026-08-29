@@ -11,6 +11,8 @@ import sys
 from pathlib import Path
 from typing import Any
 
+from compat_catalog import CatalogError, INSTALL_CATALOG_NAME, load_json, validate_install_catalog
+
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 FORBIDDEN_PRODUCT_TOKENS = ("app-server", "desktop", "codex-app", "exec-server", "mcp")
 EXECUTABLE_SUFFIXES = {".exe", ".app", ".msi", ".dmg"}
@@ -24,7 +26,11 @@ def digest(path: Path) -> str:
     return value.hexdigest()
 
 
-def local_inventory(root: Path, expected_executable: str) -> dict[str, dict[str, Any]]:
+def local_inventory(
+    root: Path,
+    expected_executable: str,
+    require_install_catalog: bool = False,
+) -> dict[str, dict[str, Any]]:
     root = root.resolve(strict=True)
     descriptor_path = root / "compatibility-release.json"
     if not descriptor_path.is_file():
@@ -48,6 +54,29 @@ def local_inventory(root: Path, expected_executable: str) -> dict[str, dict[str,
     }
     if "SHA256SUMS" not in inventory or "compatibility-release.json" not in inventory:
         raise ValueError("release asset directory must contain SHA256SUMS and compatibility-release.json")
+    catalog_path = root / INSTALL_CATALOG_NAME
+    if require_install_catalog and not catalog_path.is_file():
+        raise ValueError(f"{INSTALL_CATALOG_NAME} is missing")
+    if catalog_path.is_file():
+        identity = [descriptor.get(key) for key in ("repository", "release_tag", "source_commit")]
+        if not all(isinstance(value, str) and value for value in identity):
+            raise ValueError("release descriptor has no catalog source identity")
+        try:
+            validate_install_catalog(
+                load_json(catalog_path),
+                expected_repository=identity[0],
+                expected_source_release_tag=identity[1],
+                expected_source_commit=identity[2],
+            )
+        except CatalogError as error:
+            raise ValueError(str(error)) from error
+        checksum_names = {
+            line.split(maxsplit=1)[1].strip().lstrip("*")
+            for line in (root / "SHA256SUMS").read_text(encoding="ascii").splitlines()
+            if len(line.split(maxsplit=1)) == 2
+        }
+        if INSTALL_CATALOG_NAME in checksum_names:
+            raise ValueError(f"{INSTALL_CATALOG_NAME} must stay outside the immutable payload checksum set")
     return inventory
 
 
@@ -76,12 +105,12 @@ def remote_inventory(release: dict[str, Any]) -> dict[str, dict[str, Any]]:
 
 
 def command_local(args: argparse.Namespace) -> None:
-    inventory = local_inventory(Path(args.root), args.expected_executable)
+    inventory = local_inventory(Path(args.root), args.expected_executable, args.require_install_catalog)
     print(json.dumps({"schema": 1, "status": "pass", "assets": inventory}, indent=2, sort_keys=True))
 
 
 def command_remote(args: argparse.Namespace) -> None:
-    local = local_inventory(Path(args.root), args.expected_executable)
+    local = local_inventory(Path(args.root), args.expected_executable, args.require_install_catalog)
     release = json.loads(Path(args.release_json).read_text(encoding="utf-8"))
     remote = remote_inventory(release)
     if local != remote:
@@ -100,11 +129,13 @@ def parser() -> argparse.ArgumentParser:
     local = sub.add_parser("local")
     local.add_argument("--root", required=True)
     local.add_argument("--expected-executable", required=True)
+    local.add_argument("--require-install-catalog", action="store_true")
     local.set_defaults(handler=command_local)
     remote = sub.add_parser("remote")
     remote.add_argument("--root", required=True)
     remote.add_argument("--expected-executable", required=True)
     remote.add_argument("--release-json", required=True)
+    remote.add_argument("--require-install-catalog", action="store_true")
     remote.set_defaults(handler=command_remote)
     return result
 

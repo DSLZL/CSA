@@ -1,14 +1,15 @@
 mod ui;
 
 use crate::ui::{
-    InstallProgress, Operation, OutputMode, output_mode, write_doctor_error, write_doctor_report,
-    write_error, write_report,
+    INSTALLATION_CANCELLED, InstallProgress, Operation, OutputMode, output_mode,
+    pick_install_candidate, streams_are_interactive, write_doctor_error, write_doctor_report,
+    write_error, write_install_cancelled, write_report,
 };
 use csa::cli::{Cli, Invocation, USAGE, json_requested};
 use csa::error::ManagerError;
 use csa::manager::{
-    InstallEvent, OfflineArtifactProvider, doctor, exec, install_with_progress, prepare, status,
-    uninstall,
+    InstallEvent, InstallOptions, OfflineArtifactProvider, doctor, exec, install_with_progress,
+    install_with_progress_and_selector, prepare, status, uninstall,
 };
 use csa::process::RealProcessRunner;
 use csa::state::SystemClock;
@@ -34,7 +35,7 @@ fn run() -> i32 {
     let mode = output_mode(invocation.explicit_json);
     let operation = match &invocation.command {
         Cli::Doctor(_) => Operation::Doctor,
-        Cli::Install(_) => Operation::Install,
+        Cli::Install { .. } => Operation::Install,
         Cli::Uninstall { .. } => Operation::Uninstall,
         Cli::Prepare(_) => Operation::Prepare,
         Cli::Plug { .. } => Operation::Plug,
@@ -51,19 +52,48 @@ fn run() -> i32 {
                 Err(error) => write_doctor_error(mode, &error),
             };
         }
-        Cli::Install(options) => {
-            let mut progress = InstallProgress::new(mode);
+        Cli::Install { options, yes } => {
+            let picker = install_picker_requested(mode, yes, &options, streams_are_interactive());
+            let installed = if picker {
+                match &options {
+                    InstallOptions::Online(options) => {
+                        status(options.manager_root.clone(), &runner)
+                            .ok()
+                            .filter(|report| report.status == "prepared")
+                            .and_then(|report| report.state.map(|state| state.compat_id))
+                    }
+                    InstallOptions::Local(_) => None,
+                }
+            } else {
+                None
+            };
+            let mut progress = InstallProgress::new(mode, picker);
+            let mut selector = |candidates: &[csa::online::InstallCandidate]| {
+                pick_install_candidate(candidates, installed.as_deref())
+            };
             let result = std::env::current_exe()
                 .map_err(|error| ManagerError::io("resolve manager executable", error))
                 .and_then(|source| {
-                    install_with_progress(
-                        options,
-                        &runner,
-                        &SystemClock,
-                        &OfflineArtifactProvider,
-                        &source,
-                        &mut |event| progress.event(event),
-                    )
+                    if picker {
+                        install_with_progress_and_selector(
+                            options,
+                            &runner,
+                            &SystemClock,
+                            &OfflineArtifactProvider,
+                            &source,
+                            &mut |event| progress.event(event),
+                            Some(&mut selector),
+                        )
+                    } else {
+                        install_with_progress(
+                            options,
+                            &runner,
+                            &SystemClock,
+                            &OfflineArtifactProvider,
+                            &source,
+                            &mut |event| progress.event(event),
+                        )
+                    }
                 })
                 .and_then(|mut report| {
                     activate_user_path(&mut report.activation, &runner, &mut |event| {
@@ -116,8 +146,21 @@ fn run() -> i32 {
     };
     match result {
         Ok(()) => 0,
+        Err(error) if error.code == INSTALLATION_CANCELLED => write_install_cancelled(),
         Err(error) => write_error(mode, operation, &error),
     }
+}
+
+fn install_picker_requested(
+    mode: OutputMode,
+    yes: bool,
+    options: &InstallOptions,
+    streams_interactive: bool,
+) -> bool {
+    mode == OutputMode::Human
+        && !yes
+        && streams_interactive
+        && matches!(options, InstallOptions::Online(options) if options.compat.is_none())
 }
 
 fn run_doctor_command(
@@ -194,3 +237,53 @@ fn remove_user_path(
 }
 
 use csa::activation::{forward_current_shim, is_current_process_shim, plug, purge, unplug};
+
+#[cfg(test)]
+mod tests {
+    use super::install_picker_requested;
+    use crate::ui::OutputMode;
+    use csa::manager::{InstallOptions, OnlineInstallOptions};
+
+    fn online(compat: Option<&str>) -> InstallOptions {
+        InstallOptions::Online(OnlineInstallOptions {
+            manager_root: None,
+            official: None,
+            official_native: None,
+            compat: compat.map(str::to_owned),
+        })
+    }
+
+    #[test]
+    fn install_picker_requires_bare_human_three_stream_tty_mode() {
+        assert!(install_picker_requested(
+            OutputMode::Human,
+            false,
+            &online(None),
+            true
+        ));
+        assert!(!install_picker_requested(
+            OutputMode::Human,
+            true,
+            &online(None),
+            true
+        ));
+        assert!(!install_picker_requested(
+            OutputMode::Json,
+            false,
+            &online(None),
+            true
+        ));
+        assert!(!install_picker_requested(
+            OutputMode::Human,
+            false,
+            &online(Some("rust-v0.150.1-native-join-p9")),
+            true
+        ));
+        assert!(!install_picker_requested(
+            OutputMode::Human,
+            false,
+            &online(None),
+            false
+        ));
+    }
+}

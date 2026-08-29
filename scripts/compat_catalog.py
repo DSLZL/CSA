@@ -17,6 +17,7 @@ import json
 import os
 import re
 import shlex
+import subprocess
 import sys
 import tempfile
 import tomllib
@@ -30,6 +31,11 @@ from urllib.parse import urlparse
 SAFE_ID = re.compile(r"[A-Za-z0-9._-]+\Z")
 LOWER_SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 LOWER_SHA1 = re.compile(r"[0-9a-f]{40}\Z")
+CODEX_VERSION = re.compile(r"(\d+)\.(\d+)\.(\d+)\Z")
+PATCH_REVISION = re.compile(r"-p(\d+)\Z")
+INSTALL_CATALOG_NAME = "install-catalog-v1.json"
+INSTALL_CATALOG_MAX_ENTRIES = 1_000
+CSA_REPOSITORY = "DSLZL/CSA"
 OUTPUT_KEYS = (
     "compat_id",
     "release_tag",
@@ -165,6 +171,113 @@ def require_exact_keys(
     if unknown:
         fail(f"{label} contains unknown keys: {', '.join(unknown)}")
     return value
+
+
+def _install_catalog_sort_key(entry: dict[str, Any]) -> tuple[int, int, int, int, str]:
+    match = CODEX_VERSION.fullmatch(entry["codex_version"])
+    assert match is not None
+    major, minor, patch = (int(value) for value in match.groups())
+    return (-major, -minor, -patch, -entry["patch_revision"], entry["compat_id"])
+
+
+def validate_install_catalog(
+    value: Any,
+    *,
+    expected_repository: str | None = None,
+    expected_source_release_tag: str | None = None,
+    expected_source_commit: str | None = None,
+) -> dict[str, Any]:
+    catalog = require_exact_keys(
+        value,
+        {"schema", "repository", "source_release_tag", "source_commit", "entries"},
+        {"schema", "repository", "source_release_tag", "source_commit", "entries"},
+        INSTALL_CATALOG_NAME,
+    )
+    if require_int(catalog.get("schema"), f"{INSTALL_CATALOG_NAME}.schema", minimum=1) != 1:
+        fail("unsupported install catalog schema")
+    repository = require_string(catalog.get("repository"), f"{INSTALL_CATALOG_NAME}.repository")
+    source_tag = require_string(
+        catalog.get("source_release_tag"), f"{INSTALL_CATALOG_NAME}.source_release_tag"
+    )
+    source_commit = require_string(
+        catalog.get("source_commit"), f"{INSTALL_CATALOG_NAME}.source_commit", pattern=LOWER_SHA1
+    )
+    if expected_repository is not None and repository.casefold() != expected_repository.casefold():
+        fail("install catalog repository differs from the expected repository")
+    if expected_source_release_tag is not None and source_tag != expected_source_release_tag:
+        fail("install catalog source release tag differs from the containing release")
+    if expected_source_commit is not None and source_commit != expected_source_commit:
+        fail("install catalog source commit differs from the containing release")
+
+    entries = catalog.get("entries")
+    if not isinstance(entries, list) or not 1 <= len(entries) <= INSTALL_CATALOG_MAX_ENTRIES:
+        fail(f"install catalog entries must contain 1..{INSTALL_CATALOG_MAX_ENTRIES} items")
+    seen_ids: set[str] = set()
+    seen_tags: set[str] = set()
+    normalized: list[dict[str, Any]] = []
+    for index, raw in enumerate(entries):
+        label = f"{INSTALL_CATALOG_NAME}.entries[{index}]"
+        entry = require_exact_keys(
+            raw,
+            {
+                "compat_id", "release_tag", "release_commit", "codex_version",
+                "build_target", "patch_revision", "recorded_on",
+            },
+            {
+                "compat_id", "release_tag", "release_commit", "codex_version",
+                "build_target", "patch_revision", "recorded_on",
+            },
+            label,
+        )
+        compat_id = require_string(entry.get("compat_id"), f"{label}.compat_id", pattern=SAFE_ID)
+        release_tag = require_string(entry.get("release_tag"), f"{label}.release_tag")
+        release_commit = require_string(
+            entry.get("release_commit"), f"{label}.release_commit", pattern=LOWER_SHA1
+        )
+        codex_version = require_string(entry.get("codex_version"), f"{label}.codex_version")
+        version_match = CODEX_VERSION.fullmatch(codex_version)
+        if version_match is None or ".".join(str(int(part)) for part in version_match.groups()) != codex_version:
+            fail(f"{label}.codex_version must be canonical numeric X.Y.Z")
+        build_target = require_string(entry.get("build_target"), f"{label}.build_target", pattern=SAFE_ID)
+        patch_revision = require_int(entry.get("patch_revision"), f"{label}.patch_revision")
+        revision_match = PATCH_REVISION.search(compat_id)
+        if revision_match is None or int(revision_match.group(1)) != patch_revision:
+            fail(f"{label}.patch_revision differs from the compatibility ID")
+        if release_tag != f"compat-{compat_id}":
+            fail(f"{label}.release_tag differs from the compatibility ID")
+        recorded_on = require_string(entry.get("recorded_on"), f"{label}.recorded_on")
+        try:
+            if dt.date.fromisoformat(recorded_on).isoformat() != recorded_on:
+                raise ValueError(recorded_on)
+        except ValueError:
+            fail(f"{label}.recorded_on must be a valid YYYY-MM-DD date")
+        if compat_id in seen_ids or release_tag in seen_tags:
+            fail("install catalog repeats a compatibility ID or release tag")
+        seen_ids.add(compat_id)
+        seen_tags.add(release_tag)
+        normalized.append(
+            {
+                "compat_id": compat_id,
+                "release_tag": release_tag,
+                "release_commit": release_commit,
+                "codex_version": codex_version,
+                "build_target": build_target,
+                "patch_revision": patch_revision,
+                "recorded_on": recorded_on,
+            }
+        )
+    if normalized != sorted(normalized, key=_install_catalog_sort_key):
+        fail("install catalog entries are not in deterministic newest-first order")
+    source_entries = [entry for entry in normalized if entry["release_tag"] == source_tag]
+    if len(source_entries) != 1 or source_entries[0]["release_commit"] != source_commit:
+        fail("install catalog source identity is not represented by exactly one entry")
+    return {
+        "schema": 1,
+        "repository": repository,
+        "source_release_tag": source_tag,
+        "source_commit": source_commit,
+        "entries": normalized,
+    }
 
 
 def safe_repo_file(repository: Path, value: Any, label: str, prefix: str) -> tuple[str, Path]:
@@ -760,6 +873,111 @@ def validate_all(repository: Path) -> list[dict[str, Any]]:
     return results
 
 
+def _git_tag_commit(repository: Path, tag: str) -> str | None:
+    completed = subprocess.run(
+        ["git", "-C", str(repository), "rev-parse", "--verify", f"{tag}^{{commit}}"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if completed.returncode != 0:
+        return None
+    commit = completed.stdout.strip()
+    if LOWER_SHA1.fullmatch(commit) is None:
+        fail(f"Git returned an invalid commit for {tag}")
+    return commit
+
+
+def build_install_catalog(
+    repository: Path,
+    formal_tags_path: Path,
+    current_release_tag: str,
+    current_source_commit: str,
+    target: str,
+) -> dict[str, Any]:
+    repository = repository.resolve(strict=True)
+    current_release_tag = require_string(current_release_tag, "current release tag")
+    if not current_release_tag.startswith("compat-") or SAFE_ID.fullmatch(current_release_tag[7:]) is None:
+        fail("current release tag must be compat-<safe-compat-id>")
+    current_source_commit = require_string(
+        current_source_commit, "current source commit", pattern=LOWER_SHA1
+    )
+    target = require_string(target, "target", pattern=SAFE_ID)
+    try:
+        tags = [line.strip() for line in formal_tags_path.read_text(encoding="utf-8").splitlines() if line.strip()]
+    except (OSError, UnicodeError) as error:
+        fail(f"cannot read formal release tags: {error}")
+    if len(tags) != len(set(tags)):
+        fail("formal release tag input contains duplicates")
+    formal_tags = set(tags)
+    formal_tags.add(current_release_tag)
+
+    existing_current = _git_tag_commit(repository, current_release_tag)
+    if existing_current is not None and existing_current != current_source_commit:
+        fail("current release tag already resolves to a different commit")
+
+    index = load_json(repository / "release" / "compatibility-index.json")
+    entries = index.get("compatibilities")
+    if not isinstance(entries, dict):
+        fail("compatibility index has no compatibilities object")
+    catalog_entries: list[dict[str, Any]] = []
+    for compat_id, index_entry in entries.items():
+        release_tag = f"compat-{compat_id}"
+        if (
+            not isinstance(index_entry, dict)
+            or index_entry.get("release_enabled") is not True
+            or release_tag not in formal_tags
+        ):
+            continue
+        resolved = resolve(
+            repository,
+            compat_id,
+            target,
+            require_acceptance=True,
+            require_release=True,
+        )
+        release_commit = (
+            current_source_commit
+            if release_tag == current_release_tag
+            else _git_tag_commit(repository, release_tag)
+        )
+        if release_commit is None:
+            fail(f"formal compatibility release tag is missing locally: {release_tag}")
+        acceptance = resolved.get("acceptance")
+        if not isinstance(acceptance, dict):
+            fail(f"formal compatibility has no acceptance record: {compat_id}")
+        revision_match = PATCH_REVISION.search(compat_id)
+        if revision_match is None:
+            fail(f"compatibility ID has no numeric patch revision: {compat_id}")
+        catalog_entries.append(
+            {
+                "compat_id": compat_id,
+                "release_tag": release_tag,
+                "release_commit": release_commit,
+                "codex_version": resolved["codex_version"],
+                "build_target": target,
+                "patch_revision": int(revision_match.group(1)),
+                "recorded_on": require_string(
+                    acceptance.get("recorded_at"), f"acceptance recorded_at for {compat_id}"
+                ),
+            }
+        )
+    catalog_entries.sort(key=_install_catalog_sort_key)
+    catalog = {
+        "schema": 1,
+        "repository": CSA_REPOSITORY,
+        "source_release_tag": current_release_tag,
+        "source_commit": current_source_commit,
+        "entries": catalog_entries,
+    }
+    return validate_install_catalog(
+        catalog,
+        expected_repository=CSA_REPOSITORY,
+        expected_source_release_tag=current_release_tag,
+        expected_source_commit=current_source_commit,
+    )
+
+
 
 def new_repo_file(repository: Path, value: Path, label: str, prefix: str) -> tuple[str, Path]:
     path = value if value.is_absolute() else repository / value
@@ -1165,6 +1383,28 @@ def command_list(args: argparse.Namespace) -> None:
         print("\n".join(selected))
 
 
+def command_install_catalog(args: argparse.Namespace) -> None:
+    catalog = build_install_catalog(
+        Path(args.repository),
+        args.formal_tags,
+        args.current_release_tag,
+        args.current_source_commit,
+        args.target,
+    )
+    write_json_atomic(args.output, catalog)
+    print(
+        json.dumps(
+            {
+                "schema": 1,
+                "status": "written",
+                "output": str(args.output),
+                "entries": len(catalog["entries"]),
+            },
+            sort_keys=True,
+        )
+    )
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -1191,6 +1431,17 @@ def build_parser() -> argparse.ArgumentParser:
     list_parser.add_argument("--release", action="store_true")
     list_parser.add_argument("--format", choices=("lines", "json"), default="lines")
     list_parser.set_defaults(handler=command_list)
+
+    install_catalog_parser = subparsers.add_parser(
+        "install-catalog", help="build the untrusted display catalog for interactive installs"
+    )
+    install_catalog_parser.add_argument("--repository", default=".")
+    install_catalog_parser.add_argument("--formal-tags", type=Path, required=True)
+    install_catalog_parser.add_argument("--current-release-tag", required=True)
+    install_catalog_parser.add_argument("--current-source-commit", required=True)
+    install_catalog_parser.add_argument("--target", default="x86_64-pc-windows-msvc")
+    install_catalog_parser.add_argument("--output", type=Path, required=True)
+    install_catalog_parser.set_defaults(handler=command_install_catalog)
 
     stage_parser = subparsers.add_parser(
         "stage-candidate", help="register one newly ported compatibility as a non-releasable candidate"
@@ -1237,7 +1488,7 @@ def main() -> int:
     parser = build_parser()
     args = parser.parse_args()
     try:
-        if args.command in {"resolve", "validate", "list"}:
+        if args.command in {"resolve", "validate", "list", "install-catalog"}:
             args.handler(args)
         else:
             repository = Path(args.repository).resolve(strict=True) if hasattr(args, "repository") else None
