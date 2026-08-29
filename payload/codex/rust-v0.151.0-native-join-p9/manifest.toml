@@ -9,7 +9,7 @@ rust_toolchain = "1.95.0"
 rustc_commit = "59807616e1fa2540724bfbac14d7976d7e4a3860"
 build_target = "x86_64-pc-windows-msvc"
 source_hashes = "expected/source-hashes.json"
-source_hashes_sha256 = "af6a815daa2b7cda47bb533d76fb65ae952a27617a2bcea3a4bd1c3f6bd1db3f"
+source_hashes_sha256 = "700b14c02f32b2b8ffdbe31f709e3e9de73164f95b83a27982861cfd5fd18c18"
 preimage_absent = [
   "codex-rs/core/src/agent/completion.rs",
   "codex-rs/core/src/tools/handlers/multi_agents_v2/join.rs",
@@ -73,7 +73,7 @@ sha256 = "b63e1a940ed2d903da87fc8079653b4f36ca47c2e468140c5284020681e8402b"
 
 [[patches]]
 path = "patches/0013-subagent-live-polish.patch"
-sha256 = "250af1a1cad1359b70602e93fab1cdddc45989df44f4dda8992dc4e4b481122b"
+sha256 = "d4ef4a57ff7e7aab8c74e4fac2247ef485baa8ffd9125d5c3981564466af3a15"
 
 [[patches]]
 path = "patches/0014-csa-version-snapshots.patch"
@@ -143,6 +143,7 @@ sha256 = "137e762c3520b3283e2f51aaf7f8e19b8f305fc98394fcc365e73fb08550e6ff"
 "codex-rs/tui/src/chatwidget/status_surfaces.rs" = "ed0d34e3a8da0047128f99e2768c8881cbf3b1722a351a973e7ca4f3d7550bc9"
 "codex-rs/tui/src/chatwidget/tests/app_server.rs" = "a0c8ac34ecd100836836829579fc127d95a1d13e221a0747dc059f2fe696fa1d"
 "codex-rs/tui/src/chatwidget/tests/composer_submission.rs" = "1940b417cc97adedd71094c66a0c0b11a72d0cb514160c03db51ababc763e266"
+"codex-rs/tui/src/chatwidget/tests/terminal_title.rs" = "c9c3e9d80566bf33797b394a6d61abc4dff3e97e6ce22a602b38a5fd36f31895"
 "codex-rs/tui/src/custom_terminal.rs" = "81a4781ea319709071a4f87283db2d6968d4f5e7ef821a2f9131d0e1a0409be6"
 "codex-rs/tui/src/cwd_prompt.rs" = "3d1c77c093dc92766e942fdcbb6edbf44e8997e680db0bf58c307d554f2f99d9"
 "codex-rs/tui/src/external_agent_config_migration/mod.rs" = "4c64d96e3df60630a453f7dd7958d17fe846f521b0421742ebe9d0dad280f8ce"

@@ -66,6 +66,7 @@
     "codex-rs/tui/src/chatwidget/status_surfaces.rs": "ed0d34e3a8da0047128f99e2768c8881cbf3b1722a351a973e7ca4f3d7550bc9",
     "codex-rs/tui/src/chatwidget/tests/app_server.rs": "a0c8ac34ecd100836836829579fc127d95a1d13e221a0747dc059f2fe696fa1d",
     "codex-rs/tui/src/chatwidget/tests/composer_submission.rs": "1940b417cc97adedd71094c66a0c0b11a72d0cb514160c03db51ababc763e266",
+    "codex-rs/tui/src/chatwidget/tests/terminal_title.rs": "c9c3e9d80566bf33797b394a6d61abc4dff3e97e6ce22a602b38a5fd36f31895",
     "codex-rs/tui/src/custom_terminal.rs": "81a4781ea319709071a4f87283db2d6968d4f5e7ef821a2f9131d0e1a0409be6",
     "codex-rs/tui/src/cwd_prompt.rs": "3d1c77c093dc92766e942fdcbb6edbf44e8997e680db0bf58c307d554f2f99d9",
     "codex-rs/tui/src/external_agent_config_migration/mod.rs": "4c64d96e3df60630a453f7dd7958d17fe846f521b0421742ebe9d0dad280f8ce",

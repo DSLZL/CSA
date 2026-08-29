@@ -2386,3 +2386,16 @@ index 8ab9a04..861a546 100644
  #[test]
  fn transition_guard_emits_enable_and_disable_and_tracks_safe_state() {
      let capture = MouseCapture::default();
+diff --git a/codex-rs/tui/src/chatwidget/tests/terminal_title.rs b/codex-rs/tui/src/chatwidget/tests/terminal_title.rs
+index 0d7d089..d2d09f9 100644
+--- a/codex-rs/tui/src/chatwidget/tests/terminal_title.rs
++++ b/codex-rs/tui/src/chatwidget/tests/terminal_title.rs
+@@ -70,7 +70,7 @@ async fn terminal_title_shows_action_required_while_exec_approval_is_pending() {
+     chat.bottom_pane.set_task_running(/*running*/ true);
+     let before_refresh = Instant::now();
+     chat.refresh_terminal_title();
+-    let spinner_interval = std::time::Duration::from_millis(/*millis*/ 100);
++    let spinner_interval = crate::motion::ORBIT_FRAME_INTERVAL;
+     assert!(
+         (before_refresh + spinner_interval..=Instant::now() + spinner_interval)
+             .contains(&chat.terminal_title_next_refresh.expect("spinner deadline"))
