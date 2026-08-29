@@ -1,0 +1,1536 @@
+diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
+index 6621bca..993caa0 100644
+--- a/codex-rs/tui/src/app.rs
++++ b/codex-rs/tui/src/app.rs
+@@ -70,10 +70,15 @@ use crate::multi_agents::sub_agent_activity_display;
+ use crate::pager_overlay::Overlay;
+ use crate::render::highlight::highlight_bash_to_lines;
+ use crate::render::renderable::Renderable;
++use crate::render::renderable::RenderableItem;
+ use crate::resume_picker::SessionSelection;
+ use crate::resume_picker::SessionTarget;
+ use crate::session_state::ThreadSessionState;
+ use crate::startup_draft::StartupDraftPump;
++use crate::subagent_live_panel::LivePanelAgent;
++use crate::subagent_live_panel::LivePanelFrame;
++use crate::subagent_live_panel::LivePanelSnapshot;
++use crate::subagent_live_panel::SubagentLivePanelRenderable;
+ #[cfg(test)]
+ use crate::test_support::PathBufExt;
+ #[cfg(test)]
+@@ -174,6 +179,9 @@ use crossterm::event::KeyCode;
+ use crossterm::event::KeyEvent;
+ use crossterm::event::KeyEventKind;
+ use crossterm::event::KeyModifiers;
++use crossterm::event::MouseButton;
++use crossterm::event::MouseEvent;
++use crossterm::event::MouseEventKind;
+ use ratatui::backend::Backend;
+ use ratatui::layout::Rect;
+ use ratatui::layout::Size;
+@@ -181,6 +189,7 @@ use ratatui::style::Stylize;
+ use ratatui::text::Line;
+ use ratatui::widgets::Paragraph;
+ use ratatui::widgets::Wrap;
++use std::cell::RefCell;
+ use std::collections::BTreeMap;
+ use std::collections::HashMap;
+ use std::collections::HashSet;
+@@ -234,6 +243,7 @@ mod session_lifecycle;
+ mod side;
+ mod startup;
+ mod startup_prompts;
++mod subagent_live;
+ mod thread_event_buffer;
+ mod thread_events;
+ mod thread_goal_actions;
+@@ -246,7 +256,12 @@ mod working_directory;
+ 
+ use self::agent_navigation::AgentNavigationDirection;
+ use self::agent_navigation::AgentNavigationState;
++pub(crate) use self::agent_status_feed::ActivityStatus;
++pub(crate) use self::agent_status_feed::WorkActivityInput;
++#[cfg(test)]
++pub(crate) use self::agent_status_feed::WorkActivityKind;
+ use self::app_server_requests::PendingAppServerRequests;
++use self::loaded_threads::LoadedSubagentThread;
+ use self::loaded_threads::find_loaded_subagent_threads_for_primary;
+ use self::pending_interactive_replay::PendingInteractiveReplayState;
+ use self::platform_actions::*;
+@@ -254,6 +269,9 @@ use self::side::SideParentStatus;
+ use self::side::SideParentStatusChange;
+ use self::side::SideThreadState;
+ use self::startup_prompts::*;
++pub(crate) use self::subagent_live::LiveAgentState;
++pub(crate) use self::subagent_live::LiveAgentStatus;
++pub(crate) use self::subagent_live::SubagentLiveState;
+ use self::thread_events::*;
+ 
+ const EXTERNAL_EDITOR_HINT: &str = "Save and close external editor to continue.";
+@@ -567,6 +585,7 @@ pub(crate) struct App {
+     pub(crate) enhanced_keys_supported: bool,
+     pub(crate) keymap: RuntimeKeymap,
+     pub(crate) key_chord_matcher: KeyChordMatcher,
++    suppress_left_return_for_key_event: bool,
+ 
+     /// The foreground loop owns stream pacing; stopped animations have no timer.
+     pub(crate) commit_animation: Option<tokio::time::Interval>,
+@@ -607,6 +626,8 @@ pub(crate) struct App {
+     temporary_structured_requests: HashMap<ThreadId, mpsc::UnboundedSender<ServerNotification>>,
+     thread_event_listener_tasks: HashMap<ThreadId, JoinHandle<()>>,
+     agent_navigation: AgentNavigationState,
++    subagent_live: SubagentLiveState,
++    subagent_live_panel_frame: RefCell<LivePanelFrame>,
+     agents_overview: agents_overview::AgentsOverviewState,
+     side_threads: HashMap<ThreadId, SideThreadState>,
+     abandoned_side_threads: HashSet<ThreadId>,
+@@ -746,6 +767,11 @@ fn active_turn_interrupt_race(error: &TypedRequestError) -> Option<String> {
+ }
+ 
+ impl App {
++    #[cfg(test)]
++    pub(crate) fn subagent_live_state(&self) -> &SubagentLiveState {
++        &self.subagent_live
++    }
++
+     pub fn chatwidget_init_for_forked_or_resumed_thread(
+         &self,
+         tui: &mut tui::Tui,
+@@ -785,7 +811,9 @@ impl App {
+         event: TuiEvent,
+     ) -> Result<AppRunControl> {
+         let screen_size = tui.screen_size_for_event(&event)?;
+-        if !matches!(
++        if matches!(&event, TuiEvent::Mouse(_)) {
++            self.cancel_pending_key_chord();
++        } else if !matches!(
+             &event,
+             TuiEvent::Key(_) | TuiEvent::Paste(_) | TuiEvent::FocusLost
+         ) {
+@@ -821,6 +849,11 @@ impl App {
+         }
+ 
+         if self.overlay.is_some() {
++            self.subagent_live_panel_frame.borrow_mut().clear();
++            tui.sync_subagent_live_mouse_capture(
++                /*panel_renderable*/ false,
++                self.chat_widget.raw_output_mode(),
++            )?;
+             let _ = self
+                 .handle_backtrack_overlay_event(tui, app_server, event)
+                 .await?;
+@@ -829,6 +862,7 @@ impl App {
+                 TuiEvent::Key(key_event) => {
+                     self.handle_key_event(tui, app_server, key_event).await;
+                 }
++                TuiEvent::Mouse(mouse_event) => self.handle_mouse_event(mouse_event),
+                 TuiEvent::Paste(pasted) => {
+                     // Pasted text may contain CRLF pairs or bare CRs (e.g., from iTerm2),
+                     // but tui-textarea expects LF. Normalize CRLF pairs before bare CRs so
+@@ -839,6 +873,7 @@ impl App {
+                     self.chat_widget.handle_paste(pasted);
+                 }
+                 TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained => {
++                    let _ = self.subagent_live.cleanup_expired(Instant::now());
+                     if self.backtrack_render_pending {
+                         self.rebuild_transcript_after_backtrack(tui, screen_size.into())?;
+                         self.backtrack_render_pending = false;
+@@ -855,6 +890,15 @@ impl App {
+                     let had_active_view = self.chat_widget.has_active_view();
+                     self.chat_widget.pre_draw_tick();
+                     let rendered_area = self.render_chat_widget_frame(tui, screen_size)?;
++                    let panel_renderable = self
++                        .subagent_live_panel_frame
++                        .borrow()
++                        .panel_rect()
++                        .is_some();
++                    tui.sync_subagent_live_mouse_capture(
++                        panel_renderable,
++                        self.chat_widget.raw_output_mode(),
++                    )?;
+                     if !had_active_view
+                         && self.chat_widget.has_active_view()
+                         && self.startup_protected_input_boundary
+@@ -920,7 +964,7 @@ impl App {
+             self.schedule_immediate_resize_reflow(tui);
+             self.maybe_run_resize_reflow(tui, screen_size)?;
+         }
+-        self.with_chat_widget_frame(screen_size.width, |desired_height, chat_widget| {
++        self.with_chat_widget_frame(screen_size, |desired_height, chat_widget| {
+             let desired_height = if dashboard_visible {
+                 screen_size.height
+             } else {
+@@ -943,11 +987,69 @@ impl App {
+ 
+     fn with_chat_widget_frame<T>(
+         &self,
+-        width: u16,
++        screen_size: Size,
+         render: impl FnOnce(u16, &dyn Renderable) -> T,
+     ) -> T {
+-        let chat_widget = self.chat_widget.as_renderable();
+-        render(chat_widget.desired_height(width), &chat_widget)
++        let panel = self.subagent_live_panel_renderable(screen_size, Instant::now());
++        let chat_widget = self.chat_widget.as_renderable_with_live_panel(
++            panel.map(|panel| RenderableItem::Owned(Box::new(panel))),
++        );
++        render(chat_widget.desired_height(screen_size.width), &chat_widget)
++    }
++
++    fn subagent_live_panel_renderable(
++        &self,
++        screen_size: Size,
++        now: Instant,
++    ) -> Option<SubagentLivePanelRenderable<'_>> {
++        let Some(primary_thread_id) = self.primary_thread_id else {
++            self.subagent_live_panel_frame.borrow_mut().clear();
++            return None;
++        };
++        let visible = self.current_displayed_thread_id() == Some(primary_thread_id)
++            && self.overlay.is_none()
++            && !self.chat_widget.raw_output_mode()
++            && !self.chat_widget.has_active_view()
++            && self.subagent_live.has_renderable_rows_at(now);
++        if !visible {
++            self.subagent_live_panel_frame.borrow_mut().clear();
++            return None;
++        }
++
++        self.subagent_live_panel_frame
++            .borrow_mut()
++            .prepare_resize(screen_size);
++        let agents = self
++            .agent_navigation
++            .ordered_threads()
++            .into_iter()
++            .filter_map(|(thread_id, _)| {
++                (thread_id != primary_thread_id && self.agent_navigation.is_parent_owned(thread_id))
++                    .then(|| self.subagent_live.agent(thread_id))
++                    .flatten()
++                    .filter(|state| state.is_renderable_at(now))
++                    .map(|state| {
++                        LivePanelAgent::new(thread_id, self.thread_label(thread_id), state)
++                    })
++            })
++            .collect::<Vec<_>>();
++        let snapshot = LivePanelSnapshot::new(self.subagent_live.revision(), agents);
++        if snapshot.is_empty() {
++            self.subagent_live_panel_frame.borrow_mut().clear();
++            return None;
++        }
++
++        let bottom_pane_height = self
++            .chat_widget
++            .bottom_pane_desired_height(screen_size.width);
++        let color_enabled = supports_color::on_cached(supports_color::Stream::Stdout).is_some();
++        Some(SubagentLivePanelRenderable::new(
++            snapshot,
++            screen_size,
++            bottom_pane_height,
++            color_enabled,
++            &self.subagent_live_panel_frame,
++        ))
+     }
+ }
+ 
+diff --git a/codex-rs/tui/src/app/input.rs b/codex-rs/tui/src/app/input.rs
+index 814f8be..88f395b 100644
+--- a/codex-rs/tui/src/app/input.rs
++++ b/codex-rs/tui/src/app/input.rs
+@@ -7,6 +7,50 @@ use super::*;
+ use crate::app_backtrack::SIDE_EDIT_PREVIOUS_UNAVAILABLE_MESSAGE;
+ 
+ impl App {
++    pub(super) fn handle_mouse_event(&mut self, mouse_event: MouseEvent) {
++        let render_revision = self.subagent_live_panel_frame.borrow().render_revision();
++        self.handle_mouse_event_at_revision(mouse_event, render_revision);
++    }
++
++    pub(super) fn handle_mouse_event_at_revision(
++        &mut self,
++        mouse_event: MouseEvent,
++        render_revision: u64,
++    ) {
++        if mouse_event.kind != MouseEventKind::Down(MouseButton::Left)
++            || self.overlay.is_some()
++            || !self.chat_widget.no_modal_or_popup_active()
++            || self.chat_widget.has_active_view()
++            || self.chat_widget.raw_output_mode()
++        {
++            return;
++        }
++        let Some(primary_thread_id) = self.primary_thread_id else {
++            return;
++        };
++        if self.current_displayed_thread_id() != Some(primary_thread_id) {
++            return;
++        }
++        let thread_id = self.subagent_live_panel_frame.borrow().hit_test(
++            mouse_event.column,
++            mouse_event.row,
++            render_revision,
++        );
++        let Some(thread_id) = thread_id else {
++            return;
++        };
++        if !self.agent_navigation.is_parent_owned(thread_id) {
++            tracing::debug!(
++                event = "subagent_live_mouse_stale_thread",
++                %thread_id,
++                "ignored click for a removed sub-agent thread"
++            );
++            return;
++        }
++        self.app_event_tx
++            .send(AppEvent::SelectAgentThread(thread_id));
++    }
++
+     pub(super) fn route_key_chord_event(
+         &mut self,
+         tui: &mut tui::Tui,
+@@ -14,6 +58,7 @@ impl App {
+     ) -> Option<KeyEvent> {
+         let contexts = self.active_keymap_contexts();
+         let was_pending = self.key_chord_matcher.is_pending();
++        self.suppress_left_return_for_key_event = was_pending;
+         match self.key_chord_matcher.advance(
+             key_event,
+             &self.keymap.chords,
+@@ -167,6 +212,11 @@ impl App {
+         } else {
+             self.chat_widget.set_raw_output_mode(enabled);
+         }
++        if let Err(err) =
++            tui.sync_subagent_live_mouse_capture(/*panel_renderable*/ false, enabled)
++        {
++            tracing::warn!(error = %err, "failed to update mouse capture for raw output mode");
++        }
+         let terminal_width = tui.terminal.last_known_screen_size.into();
+         if let Err(err) = self.reflow_transcript_now(tui, terminal_width) {
+             tracing::warn!(error = %err, "failed to reflow transcript after raw output mode toggle");
+@@ -223,6 +273,11 @@ impl App {
+             }
+             return;
+         }
++        if let Some(primary_thread_id) = self.left_return_target(key_event) {
++            self.app_event_tx
++                .send(AppEvent::SelectAgentThread(primary_thread_id));
++            return;
++        }
+         if matches!(self.app_server_target, AppServerTarget::LocalDaemon { .. })
+             && self.overlay.is_none()
+             && self.chat_widget.no_modal_or_popup_active()
+@@ -436,6 +491,33 @@ impl App {
+         };
+     }
+ 
++    pub(super) fn left_return_target(&self, key_event: KeyEvent) -> Option<ThreadId> {
++        if self.suppress_left_return_for_key_event
++            || key_event.code != KeyCode::Left
++            || !key_event.modifiers.is_empty()
++            || !matches!(key_event.kind, KeyEventKind::Press | KeyEventKind::Repeat)
++        {
++            return None;
++        }
++        self.navigation_safe_primary_thread_id()
++    }
++
++    pub(super) fn navigation_safe_primary_thread_id(&self) -> Option<ThreadId> {
++        if self.key_chord_matcher.is_pending()
++            || self.overlay.is_some()
++            || !self.chat_widget.no_modal_or_popup_active()
++            || !self.chat_widget.composer_text_with_pending().is_empty()
++        {
++            return None;
++        }
++
++        let primary_thread_id = self.primary_thread_id?;
++        let displayed_thread_id = self.current_displayed_thread_id()?;
++        (displayed_thread_id != primary_thread_id
++            && self.agent_navigation.is_parent_owned(displayed_thread_id))
++        .then_some(primary_thread_id)
++    }
++
+     pub(super) fn should_handle_backtrack_esc(&self, key_event: KeyEvent) -> bool {
+         !self.chat_widget.side_conversation_active()
+             && self.chat_widget.is_normal_backtrack_mode()
+diff --git a/codex-rs/tui/src/app/resize_reflow.rs b/codex-rs/tui/src/app/resize_reflow.rs
+index 9de5ebc..c85c93a 100644
+--- a/codex-rs/tui/src/app/resize_reflow.rs
++++ b/codex-rs/tui/src/app/resize_reflow.rs
+@@ -259,8 +259,9 @@ impl App {
+ 
+     pub(super) fn update_visible_history_rows(&mut self, screen_size: Size) {
+         let width = screen_size.width.max(/*other*/ 1);
++        let screen_size = Size::new(width, screen_size.height);
+         let viewport_height = self
+-            .with_chat_widget_frame(width, |desired_height, _| desired_height)
++            .with_chat_widget_frame(screen_size, |desired_height, _| desired_height)
+             .min(screen_size.height);
+         self.transcript_reflow.set_visible_history_rows(
+             screen_size
+@@ -394,6 +395,7 @@ impl App {
+         tui: &mut tui::Tui,
+         size: ratatui::layout::Size,
+     ) -> Result<()> {
++        self.sync_active_agent_footer_label();
+         let should_rebuild_transcript = self.handle_draw_size_change(
+             size,
+             tui.terminal.last_known_screen_size,
+diff --git a/codex-rs/tui/src/app/resize_reflow_tests.rs b/codex-rs/tui/src/app/resize_reflow_tests.rs
+index b3e989b..ee1ea1f 100644
+--- a/codex-rs/tui/src/app/resize_reflow_tests.rs
++++ b/codex-rs/tui/src/app/resize_reflow_tests.rs
+@@ -28,7 +28,7 @@ async fn resize_reflow_preserves_configured_scrollback_beyond_the_visible_viewpo
+     app.config.terminal_resize_reflow.max_rows = TerminalResizeReflowMaxRows::Limit(32);
+     app.transcript_cells = plain_history_cells(/*count*/ 64);
+     let screen_size = Size::new(/*width*/ 80, /*height*/ 24);
+-    let chat_height = app.with_chat_widget_frame(screen_size.width, |height, _| height);
++    let chat_height = app.with_chat_widget_frame(screen_size, |height, _| height);
+     let visible_history_rows = screen_size
+         .height
+         .saturating_sub(chat_height)
+diff --git a/codex-rs/tui/src/app/startup.rs b/codex-rs/tui/src/app/startup.rs
+index 3f9e665..5848e31 100644
+--- a/codex-rs/tui/src/app/startup.rs
++++ b/codex-rs/tui/src/app/startup.rs
+@@ -494,6 +494,7 @@ See the Codex keymap documentation for supported actions and examples."
+             enhanced_keys_supported,
+             keymap: runtime_keymap,
+             key_chord_matcher: KeyChordMatcher::default(),
++            suppress_left_return_for_key_event: false,
+             transcript_cells: Vec::new(),
+             last_rendered_history_tail: None,
+             last_thread_usage_status_cell: None,
+@@ -521,6 +522,8 @@ See the Codex keymap documentation for supported actions and examples."
+             temporary_structured_requests: HashMap::new(),
+             thread_event_listener_tasks: HashMap::new(),
+             agent_navigation: AgentNavigationState::default(),
++            subagent_live: SubagentLiveState::default(),
++            subagent_live_panel_frame: RefCell::new(LivePanelFrame::default()),
+             agents_overview: Default::default(),
+             side_threads: HashMap::new(),
+             abandoned_side_threads: HashSet::new(),
+diff --git a/codex-rs/tui/src/app/test_support.rs b/codex-rs/tui/src/app/test_support.rs
+index 82b833b..8b125f0 100644
+--- a/codex-rs/tui/src/app/test_support.rs
++++ b/codex-rs/tui/src/app/test_support.rs
+@@ -46,6 +46,7 @@ pub(super) async fn make_test_app() -> App {
+         enhanced_keys_supported: false,
+         keymap: crate::keymap::RuntimeKeymap::defaults(),
+         key_chord_matcher: crate::keymap::KeyChordMatcher::default(),
++        suppress_left_return_for_key_event: false,
+         commit_animation: None,
+         status_line_invalid_items_warned: Arc::new(AtomicBool::new(false)),
+         terminal_title_invalid_items_warned: Arc::new(AtomicBool::new(false)),
+@@ -63,6 +64,8 @@ pub(super) async fn make_test_app() -> App {
+         temporary_structured_requests: HashMap::new(),
+         thread_event_listener_tasks: HashMap::new(),
+         agent_navigation: AgentNavigationState::default(),
++        subagent_live: SubagentLiveState::default(),
++        subagent_live_panel_frame: RefCell::new(LivePanelFrame::default()),
+         agents_overview: Default::default(),
+         side_threads: HashMap::new(),
+         abandoned_side_threads: HashSet::new(),
+diff --git a/codex-rs/tui/src/app/tests/key_chords.rs b/codex-rs/tui/src/app/tests/key_chords.rs
+index 62210a3..3973db7 100644
+--- a/codex-rs/tui/src/app/tests/key_chords.rs
++++ b/codex-rs/tui/src/app/tests/key_chords.rs
+@@ -17,6 +17,7 @@ use codex_app_server_protocol::ToolRequestUserInputQuestion;
+ use codex_config::types::KeybindingSpec;
+ use codex_config::types::KeybindingsSpec;
+ use codex_config::types::TuiKeymap;
++use codex_protocol::ThreadId;
+ use crossterm::event::KeyCode;
+ use crossterm::event::KeyEvent;
+ use crossterm::event::KeyModifiers;
+@@ -134,6 +135,26 @@ async fn wrong_second_stroke_passes_through_but_escape_is_consumed() -> Result<(
+     Ok(())
+ }
+ 
++#[tokio::test]
++async fn pending_chord_left_is_not_promoted_to_child_back_navigation() -> Result<()> {
++    let (mut app, mut tui, mut app_server) = chord_app().await?;
++    let main_thread_id = ThreadId::new();
++    let child_thread_id = ThreadId::new();
++    app.primary_thread_id = Some(main_thread_id);
++    app.active_thread_id = Some(child_thread_id);
++    app.agent_navigation.mark_parent_owned(child_thread_id);
++    let left = KeyEvent::new(KeyCode::Left, KeyModifiers::NONE);
++
++    press(&mut app, &mut tui, &mut app_server, ctrl('x')).await?;
++    assert!(app.key_chord_matcher.is_pending());
++    assert_eq!(app.route_key_chord_event(&mut tui, left), Some(left));
++    assert_eq!(app.left_return_target(left), None);
++
++    assert_eq!(app.route_key_chord_event(&mut tui, left), Some(left));
++    assert_eq!(app.left_return_target(left), Some(main_thread_id));
++    Ok(())
++}
++
+ #[tokio::test]
+ async fn physical_dispatch_band_events_are_dropped() -> Result<()> {
+     let (mut app, mut tui, mut app_server) = chord_app().await?;
+diff --git a/codex-rs/tui/src/chatwidget/rendering.rs b/codex-rs/tui/src/chatwidget/rendering.rs
+index fd6fc7a..4b2ec0f 100644
+--- a/codex-rs/tui/src/chatwidget/rendering.rs
++++ b/codex-rs/tui/src/chatwidget/rendering.rs
+@@ -8,6 +8,13 @@ use std::cell::Cell;
+ 
+ impl ChatWidget {
+     pub(crate) fn as_renderable(&self) -> RenderableItem<'_> {
++        self.as_renderable_with_live_panel(None)
++    }
++
++    pub(crate) fn as_renderable_with_live_panel<'a>(
++        &'a self,
++        live_panel: Option<RenderableItem<'a>>,
++    ) -> RenderableItem<'a> {
+         if self
+             .bottom_pane
+             .selected_index_for_active_view(crate::app::AGENTS_OVERVIEW_VIEW_ID)
+@@ -80,6 +87,9 @@ impl ChatWidget {
+                 })),
+             );
+         }
++        if let Some(live_panel) = live_panel {
++            flex.push(/*flex*/ 0, live_panel);
++        }
+         flex.push(
+             /*flex*/ 0,
+             self.bottom_pane
+@@ -91,6 +101,15 @@ impl ChatWidget {
+         RenderableItem::Owned(Box::new(flex))
+     }
+ 
++    pub(crate) fn bottom_pane_desired_height(&self, width: u16) -> u16 {
++        self.bottom_pane
++            .as_renderable_with_composer_right_reserve(self.ambient_pet_wrap_reserved_cols())
++            .inset(Insets::tlbr(
++                /*top*/ 1, /*left*/ 0, /*bottom*/ 0, /*right*/ 0,
++            ))
++            .desired_height(width)
++    }
++
+     pub(crate) fn note_rendered_width(&self, width: u16) {
+         self.last_rendered_width.set(Some(width));
+     }
+diff --git a/codex-rs/tui/src/chatwidget/rendering_tests.rs b/codex-rs/tui/src/chatwidget/rendering_tests.rs
+index beac194..1b474dc 100644
+--- a/codex-rs/tui/src/chatwidget/rendering_tests.rs
++++ b/codex-rs/tui/src/chatwidget/rendering_tests.rs
+@@ -14,6 +14,18 @@ struct CountingHistoryCell {
+     stable_height: bool,
+ }
+ 
++struct LivePanelMarker;
++
++impl Renderable for LivePanelMarker {
++    fn render(&self, area: Rect, buf: &mut Buffer) {
++        Renderable::render(&"LIVE_PANEL_MARKER", area, buf);
++    }
++
++    fn desired_height(&self, _width: u16) -> u16 {
++        1
++    }
++}
++
+ impl HistoryCell for CountingHistoryCell {
+     fn display_lines(&self, _width: u16) -> Vec<Line<'static>> {
+         let frame = self.display_lines_calls.fetch_add(1, Ordering::Relaxed) + 1;
+@@ -142,6 +154,40 @@ fn active_transcript_preserves_clipped_markdown_hyperlinks() {
+     assert!(output.contains("\x1b]8;;https://example.com/\x07https://example.com/\x1b]8;;\x07"));
+ }
+ 
++#[tokio::test]
++async fn live_panel_is_a_fixed_child_immediately_before_the_bottom_pane() {
++    let (widget, _sender, _events, _operations) = make_chatwidget_manual_with_sender().await;
++    let width = 80;
++    let baseline_height = widget.as_renderable().desired_height(width);
++    let bottom_pane_height = widget.bottom_pane_desired_height(width);
++    let renderable = widget
++        .as_renderable_with_live_panel(Some(RenderableItem::Owned(Box::new(LivePanelMarker))));
++    let height = renderable.desired_height(width);
++    let area = Rect::new(0, 0, width, height);
++    let mut buffer = Buffer::empty(area);
++    renderable.render(area, &mut buffer);
++
++    let marker_rows = buffer
++        .content
++        .chunks(usize::from(width))
++        .enumerate()
++        .filter_map(|(row, cells)| {
++            cells
++                .iter()
++                .map(ratatui::buffer::Cell::symbol)
++                .collect::<String>()
++                .contains("LIVE_PANEL_MARKER")
++                .then_some(row)
++        })
++        .collect::<Vec<_>>();
++
++    assert_eq!(height, baseline_height + 1);
++    assert_eq!(
++        marker_rows,
++        vec![usize::from(height - bottom_pane_height - 1)]
++    );
++}
++
+ #[tokio::test]
+ async fn initial_session_header_starts_at_the_top_of_the_viewport() {
+     let (mut widget, _sender, _events, _operations) = make_chatwidget_manual_with_sender().await;
+@@ -169,7 +215,7 @@ async fn initial_session_header_starts_at_the_top_of_the_viewport() {
+ 
+     insta::assert_snapshot!(header.replace(&cwd, &normalized_cwd), @r"
+     ╭───────────────────────────────────────╮
+-    │ >_ OpenAI Codex (v<VERSION>)              │
++    │ >_ OpenAI Codex (v<VERSION>-CSA)          │
+     │                                       │
+     │ model:     loading   /model to change │
+     │ directory: /tmp/project               │
+diff --git a/codex-rs/tui/src/lib.rs b/codex-rs/tui/src/lib.rs
+index 0cd2d7e..342b9da 100644
+--- a/codex-rs/tui/src/lib.rs
++++ b/codex-rs/tui/src/lib.rs
+@@ -188,6 +188,7 @@ mod status;
+ mod status_indicator_widget;
+ mod streaming;
+ mod style;
++mod subagent_live_panel;
+ mod task_mentions;
+ mod temporary_structured_request;
+ mod terminal_hyperlinks;
+@@ -1615,6 +1616,11 @@ async fn run_ratatui_app(
+             shutdown_app_server_if_present(app_server.take()).await;
+         }
+     }
++    tui.set_subagent_live_mouse_mode(config.tui_subagent_live_mouse);
++    tui.sync_subagent_live_mouse_capture(
++        /*panel_renderable*/ false,
++        config.tui_raw_output_mode,
++    )?;
+     let mut app_server = match app_server {
+         Some(app_server) => app_server,
+         None => match startup_draft
+diff --git a/codex-rs/tui/src/subagent_live_panel.rs b/codex-rs/tui/src/subagent_live_panel.rs
+new file mode 100644
+index 0000000..b874c79
+--- /dev/null
++++ b/codex-rs/tui/src/subagent_live_panel.rs
+@@ -0,0 +1,916 @@
++//! Resident, non-scrollback rendering for the App-owned sub-agent projection.
++
++use crate::app::ActivityStatus;
++use crate::app::LiveAgentState;
++use crate::app::LiveAgentStatus;
++use crate::history_cell::sanitize_user_text;
++use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
++use crate::render::renderable::Renderable;
++use codex_protocol::ThreadId;
++use ratatui::buffer::Buffer;
++use ratatui::layout::Rect;
++use ratatui::layout::Size;
++use ratatui::style::Stylize;
++use ratatui::text::Line;
++use ratatui::text::Span;
++use ratatui::widgets::Clear;
++use ratatui::widgets::Widget;
++use std::borrow::Cow;
++use std::cell::RefCell;
++
++const MIN_CONVERSATION_HEIGHT: u16 = 8;
++const PANEL_HARD_CAP: u16 = 12;
++const FULL_MODE_MIN_WIDTH: u16 = 96;
++const COMPACT_MODE_MIN_WIDTH: u16 = 72;
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum LivePanelMode {
++    Full,
++    Compact,
++    Minimal,
++}
++
++pub(crate) struct LivePanelAgent<'a> {
++    thread_id: ThreadId,
++    label: String,
++    state: &'a LiveAgentState,
++}
++
++impl<'a> LivePanelAgent<'a> {
++    pub(crate) fn new(thread_id: ThreadId, label: String, state: &'a LiveAgentState) -> Self {
++        Self {
++            thread_id,
++            label,
++            state,
++        }
++    }
++}
++
++pub(crate) struct LivePanelSnapshot<'a> {
++    state_revision: u64,
++    agents: Vec<LivePanelAgent<'a>>,
++}
++
++impl<'a> LivePanelSnapshot<'a> {
++    pub(crate) fn new(state_revision: u64, agents: Vec<LivePanelAgent<'a>>) -> Self {
++        Self {
++            state_revision,
++            agents,
++        }
++    }
++
++    pub(crate) fn is_empty(&self) -> bool {
++        self.agents.is_empty()
++    }
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) struct LiveAgentHitRegion {
++    pub(crate) thread_id: ThreadId,
++    pub(crate) rect: Rect,
++    pub(crate) render_revision: u64,
++    pub(crate) state_revision: u64,
++}
++
++#[derive(Debug, Default)]
++pub(crate) struct LivePanelFrame {
++    render_revision: u64,
++    state_revision: u64,
++    screen_size: Option<Size>,
++    panel_rect: Option<Rect>,
++    mode: Option<LivePanelMode>,
++    hidden_count: usize,
++    hit_regions: Vec<LiveAgentHitRegion>,
++}
++
++#[allow(dead_code)] // TUI-06 consumes revisioned hit testing; TUI-05 verifies the contract.
++impl LivePanelFrame {
++    pub(crate) fn render_revision(&self) -> u64 {
++        self.render_revision
++    }
++
++    pub(crate) fn state_revision(&self) -> u64 {
++        self.state_revision
++    }
++
++    pub(crate) fn panel_rect(&self) -> Option<Rect> {
++        self.panel_rect
++    }
++
++    pub(crate) fn mode(&self) -> Option<LivePanelMode> {
++        self.mode
++    }
++
++    pub(crate) fn hidden_count(&self) -> usize {
++        self.hidden_count
++    }
++
++    pub(crate) fn hit_regions(&self) -> &[LiveAgentHitRegion] {
++        &self.hit_regions
++    }
++
++    pub(crate) fn prepare_resize(&mut self, screen_size: Size) {
++        if self.screen_size != Some(screen_size) {
++            self.clear_visible_frame();
++            self.screen_size = Some(screen_size);
++        }
++    }
++
++    pub(crate) fn clear(&mut self) {
++        self.clear_visible_frame();
++        self.screen_size = None;
++    }
++
++    pub(crate) fn hit_test(
++        &self,
++        x: u16,
++        y: u16,
++        expected_render_revision: u64,
++    ) -> Option<ThreadId> {
++        if expected_render_revision != self.render_revision {
++            return None;
++        }
++        self.hit_regions
++            .iter()
++            .find(|region| {
++                x >= region.rect.x
++                    && x < region.rect.right()
++                    && y >= region.rect.y
++                    && y < region.rect.bottom()
++            })
++            .map(|region| region.thread_id)
++    }
++
++    fn clear_visible_frame(&mut self) {
++        if self.panel_rect.is_some() || !self.hit_regions.is_empty() {
++            self.render_revision = self.render_revision.wrapping_add(1);
++        }
++        self.state_revision = 0;
++        self.panel_rect = None;
++        self.mode = None;
++        self.hidden_count = 0;
++        self.hit_regions.clear();
++    }
++
++    fn publish(
++        &mut self,
++        screen_size: Size,
++        state_revision: u64,
++        panel_rect: Rect,
++        mode: LivePanelMode,
++        hidden_count: usize,
++        regions: Vec<(ThreadId, Rect)>,
++    ) {
++        self.render_revision = self.render_revision.wrapping_add(1);
++        self.state_revision = state_revision;
++        self.screen_size = Some(screen_size);
++        self.panel_rect = Some(panel_rect);
++        self.mode = Some(mode);
++        self.hidden_count = hidden_count;
++        self.hit_regions = regions
++            .into_iter()
++            .map(|(thread_id, rect)| LiveAgentHitRegion {
++                thread_id,
++                rect,
++                render_revision: self.render_revision,
++                state_revision,
++            })
++            .collect();
++    }
++}
++
++pub(crate) struct SubagentLivePanelRenderable<'a> {
++    snapshot: LivePanelSnapshot<'a>,
++    screen_size: Size,
++    bottom_pane_height: u16,
++    color_enabled: bool,
++    frame: &'a RefCell<LivePanelFrame>,
++}
++
++impl<'a> SubagentLivePanelRenderable<'a> {
++    pub(crate) fn new(
++        snapshot: LivePanelSnapshot<'a>,
++        screen_size: Size,
++        bottom_pane_height: u16,
++        color_enabled: bool,
++        frame: &'a RefCell<LivePanelFrame>,
++    ) -> Self {
++        Self {
++            snapshot,
++            screen_size,
++            bottom_pane_height,
++            color_enabled,
++            frame,
++        }
++    }
++
++    fn panel_cap(&self) -> u16 {
++        let hard_cap = PANEL_HARD_CAP.min(self.screen_size.height / 3);
++        let safe_cap = self
++            .screen_size
++            .height
++            .saturating_sub(self.bottom_pane_height)
++            .saturating_sub(MIN_CONVERSATION_HEIGHT);
++        hard_cap.min(safe_cap)
++    }
++
++    fn plan(&self, width: u16) -> Option<PanelPlan> {
++        let panel_cap = self.panel_cap();
++        if panel_cap == 0 || self.snapshot.agents.is_empty() {
++            return None;
++        }
++
++        let full_height = self.snapshot.agents.iter().fold(0u16, |height, agent| {
++            height.saturating_add(1 + u16::try_from(agent.state.recent().len().min(3)).unwrap_or(3))
++        });
++        if width >= FULL_MODE_MIN_WIDTH && panel_cap >= 4 && full_height <= panel_cap {
++            return Some(PanelPlan {
++                mode: LivePanelMode::Full,
++                height: full_height,
++                visible_count: self.snapshot.agents.len(),
++                hidden_count: 0,
++                show_footer: false,
++            });
++        }
++
++        if width >= COMPACT_MODE_MIN_WIDTH && panel_cap >= 3 {
++            let capacity = usize::from(panel_cap);
++            let (visible_count, show_footer) = if self.snapshot.agents.len() <= capacity {
++                (self.snapshot.agents.len(), false)
++            } else {
++                (capacity.saturating_sub(1), true)
++            };
++            let hidden_count = self.snapshot.agents.len().saturating_sub(visible_count);
++            return Some(PanelPlan {
++                mode: LivePanelMode::Compact,
++                height: u16::try_from(visible_count + usize::from(show_footer))
++                    .unwrap_or(panel_cap)
++                    .min(panel_cap),
++                visible_count,
++                hidden_count,
++                show_footer,
++            });
++        }
++
++        Some(PanelPlan {
++            mode: LivePanelMode::Minimal,
++            height: 1,
++            visible_count: usize::from(self.snapshot.agents.len() == 1),
++            hidden_count: usize::from(self.snapshot.agents.len() != 1) * self.snapshot.agents.len(),
++            show_footer: false,
++        })
++    }
++
++    fn render_line(&self, line: Line<'static>, y: u16, area: Rect, buf: &mut Buffer) {
++        if y >= area.bottom() {
++            return;
++        }
++        let line = truncate_line_with_ellipsis_if_overflow(line, usize::from(area.width));
++        line.render(Rect::new(area.x, y, area.width, 1), buf);
++    }
++
++    fn render_full(&self, plan: PanelPlan, area: Rect, buf: &mut Buffer) -> Vec<(ThreadId, Rect)> {
++        let mut y = area.y;
++        let mut regions = Vec::with_capacity(plan.visible_count);
++        for agent in self.snapshot.agents.iter().take(plan.visible_count) {
++            let block_start = y;
++            self.render_line(agent_header_line(agent, self.color_enabled), y, area, buf);
++            y = y.saturating_add(1);
++            for activity in agent.state.recent().iter().take(3) {
++                self.render_line(activity_line(activity, self.color_enabled), y, area, buf);
++                y = y.saturating_add(1);
++            }
++            regions.push((
++                agent.thread_id,
++                Rect::new(
++                    area.x,
++                    block_start,
++                    area.width,
++                    y.saturating_sub(block_start),
++                ),
++            ));
++        }
++        regions
++    }
++
++    fn render_compact(
++        &self,
++        plan: PanelPlan,
++        area: Rect,
++        buf: &mut Buffer,
++    ) -> Vec<(ThreadId, Rect)> {
++        let mut y = area.y;
++        let mut regions = Vec::with_capacity(plan.visible_count);
++        for agent in self.snapshot.agents.iter().take(plan.visible_count) {
++            self.render_line(compact_agent_line(agent, self.color_enabled), y, area, buf);
++            regions.push((agent.thread_id, Rect::new(area.x, y, area.width, 1)));
++            y = y.saturating_add(1);
++        }
++        if plan.show_footer {
++            self.render_line(
++                overflow_line(
++                    plan.hidden_count,
++                    waiting_approval_count(&self.snapshot.agents),
++                ),
++                y,
++                area,
++                buf,
++            );
++        }
++        regions
++    }
++
++    fn render_minimal(&self, area: Rect, buf: &mut Buffer) -> Vec<(ThreadId, Rect)> {
++        self.render_line(minimal_line(&self.snapshot.agents), area.y, area, buf);
++        if self.snapshot.agents.len() == 1 {
++            vec![(
++                self.snapshot.agents[0].thread_id,
++                Rect::new(area.x, area.y, area.width, 1),
++            )]
++        } else {
++            Vec::new()
++        }
++    }
++}
++
++impl Renderable for SubagentLivePanelRenderable<'_> {
++    fn render(&self, area: Rect, buf: &mut Buffer) {
++        let Some(plan) = self.plan(area.width) else {
++            self.frame.borrow_mut().clear();
++            return;
++        };
++        if area.is_empty() {
++            self.frame.borrow_mut().clear();
++            return;
++        }
++
++        let panel_rect = Rect::new(area.x, area.y, area.width, area.height.min(plan.height));
++        Clear.render(panel_rect, buf);
++        let regions = match plan.mode {
++            LivePanelMode::Full => self.render_full(plan, panel_rect, buf),
++            LivePanelMode::Compact => self.render_compact(plan, panel_rect, buf),
++            LivePanelMode::Minimal => self.render_minimal(panel_rect, buf),
++        };
++        self.frame.borrow_mut().publish(
++            self.screen_size,
++            self.snapshot.state_revision,
++            panel_rect,
++            plan.mode,
++            plan.hidden_count,
++            regions,
++        );
++    }
++
++    fn desired_height(&self, width: u16) -> u16 {
++        self.plan(width).map_or(0, |plan| plan.height)
++    }
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++struct PanelPlan {
++    mode: LivePanelMode,
++    height: u16,
++    visible_count: usize,
++    hidden_count: usize,
++    show_footer: bool,
++}
++
++fn agent_header_line(agent: &LivePanelAgent<'_>, color_enabled: bool) -> Line<'static> {
++    let (symbol, state_word) = agent_status_copy(agent.state.lifecycle());
++    let mut spans = vec![
++        status_span(symbol, agent.state.lifecycle(), color_enabled),
++        " ".into(),
++        sanitized_single_line(&agent.label).bold(),
++        "  ".into(),
++        status_span(state_word, agent.state.lifecycle(), color_enabled),
++    ];
++    if spans[2].content.is_empty() {
++        spans[2] = "Agent".bold();
++    }
++    Line::from(spans)
++}
++
++fn compact_agent_line(agent: &LivePanelAgent<'_>, color_enabled: bool) -> Line<'static> {
++    let mut line = agent_header_line(agent, color_enabled);
++    if let Some(activity) = agent.state.recent().back() {
++        line.spans.push(" · ".into());
++        line.spans.extend(activity_spans(
++            activity,
++            color_enabled,
++            /*include_indent*/ false,
++        ));
++    }
++    line
++}
++
++fn activity_line(activity: &crate::app::WorkActivityInput, color_enabled: bool) -> Line<'static> {
++    Line::from(activity_spans(
++        activity,
++        color_enabled,
++        /*include_indent*/ true,
++    ))
++}
++
++fn activity_spans(
++    activity: &crate::app::WorkActivityInput,
++    color_enabled: bool,
++    include_indent: bool,
++) -> Vec<Span<'static>> {
++    let (symbol, state_word) = activity_status_copy(activity.status);
++    let mut spans = Vec::with_capacity(6);
++    if include_indent {
++        spans.push("  ".into());
++    }
++    spans.push(activity_status_span(symbol, activity.status, color_enabled));
++    spans.push(" ".into());
++    spans.push(sanitized_single_line(&activity.label).into());
++    spans.push("  ".into());
++    spans.push(activity_status_span(
++        state_word,
++        activity.status,
++        color_enabled,
++    ));
++    spans
++}
++
++fn overflow_line(hidden_count: usize, waiting_approval: usize) -> Line<'static> {
++    let waiting = if waiting_approval == 0 {
++        String::new()
++    } else {
++        format!(" · {waiting_approval} waiting approval")
++    };
++    format!("… +{hidden_count} more{waiting} · /subagents")
++        .dim()
++        .into()
++}
++
++fn minimal_line(agents: &[LivePanelAgent<'_>]) -> Line<'static> {
++    let waiting = waiting_approval_count(agents);
++    let failed = agents
++        .iter()
++        .filter(|agent| agent.state.lifecycle() == LiveAgentStatus::Failed)
++        .count();
++    let cancelled = agents
++        .iter()
++        .filter(|agent| agent.state.lifecycle() == LiveAgentStatus::Cancelled)
++        .count();
++    let symbol = if waiting > 0 {
++        "!"
++    } else if failed > 0 {
++        "✗"
++    } else if cancelled > 0 {
++        "×"
++    } else {
++        "●"
++    };
++    let noun = if agents.len() == 1 {
++        "subagent"
++    } else {
++        "subagents"
++    };
++    let mut text = format!("{symbol} {} {noun}", agents.len());
++    if waiting > 0 {
++        text.push_str(&format!(" · {waiting} waiting approval"));
++    }
++    if failed > 0 {
++        text.push_str(&format!(" · {failed} failed"));
++    }
++    if cancelled > 0 {
++        text.push_str(&format!(" · {cancelled} cancelled"));
++    }
++    text.push_str(" · /subagents");
++    text.into()
++}
++
++fn waiting_approval_count(agents: &[LivePanelAgent<'_>]) -> usize {
++    agents
++        .iter()
++        .filter(|agent| agent.state.lifecycle() == LiveAgentStatus::WaitingApproval)
++        .count()
++}
++
++fn sanitized_single_line(value: &str) -> String {
++    sanitize_user_text(Cow::Borrowed(value))
++        .split_whitespace()
++        .collect::<Vec<_>>()
++        .join(" ")
++}
++
++fn agent_status_copy(status: LiveAgentStatus) -> (&'static str, &'static str) {
++    match status {
++        LiveAgentStatus::Starting => ("◌", "starting"),
++        LiveAgentStatus::Running => ("●", "running"),
++        LiveAgentStatus::WaitingApproval => ("!", "waiting approval"),
++        LiveAgentStatus::Waiting => ("◌", "waiting"),
++        LiveAgentStatus::Failed => ("✗", "failed"),
++        LiveAgentStatus::Cancelled => ("×", "cancelled"),
++        LiveAgentStatus::Completed => ("✓", "completed"),
++    }
++}
++
++fn activity_status_copy(status: ActivityStatus) -> (&'static str, &'static str) {
++    match status {
++        ActivityStatus::Running => ("●", "running"),
++        ActivityStatus::WaitingApproval => ("!", "waiting approval"),
++        ActivityStatus::Succeeded => ("✓", "succeeded"),
++        ActivityStatus::Failed => ("✗", "failed"),
++        ActivityStatus::Declined => ("×", "declined"),
++        ActivityStatus::Cancelled => ("×", "cancelled"),
++    }
++}
++
++fn status_span(text: &'static str, status: LiveAgentStatus, color_enabled: bool) -> Span<'static> {
++    let span = Span::raw(text);
++    if !color_enabled {
++        return span;
++    }
++    match status {
++        LiveAgentStatus::Starting | LiveAgentStatus::Waiting => span.dim(),
++        LiveAgentStatus::Running | LiveAgentStatus::Completed => span.green(),
++        LiveAgentStatus::WaitingApproval => span.bold(),
++        LiveAgentStatus::Failed | LiveAgentStatus::Cancelled => span.red(),
++    }
++}
++
++fn activity_status_span(
++    text: &'static str,
++    status: ActivityStatus,
++    color_enabled: bool,
++) -> Span<'static> {
++    let span = Span::raw(text);
++    if !color_enabled {
++        return span;
++    }
++    match status {
++        ActivityStatus::Running | ActivityStatus::Succeeded => span.green(),
++        ActivityStatus::WaitingApproval => span.bold(),
++        ActivityStatus::Failed | ActivityStatus::Declined | ActivityStatus::Cancelled => span.red(),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::app::SubagentLiveState;
++    use crate::app::WorkActivityInput;
++    use crate::app::WorkActivityKind;
++    use pretty_assertions::assert_eq;
++    use std::time::Instant;
++
++    struct Fixture {
++        state: SubagentLiveState,
++        agents: Vec<(ThreadId, String)>,
++    }
++
++    struct Rendered {
++        text: String,
++        buffer: Buffer,
++        frame: LivePanelFrame,
++        desired_height: u16,
++    }
++
++    impl Fixture {
++        fn new() -> Self {
++            Self {
++                state: SubagentLiveState::default(),
++                agents: Vec::new(),
++            }
++        }
++
++        fn add_agent(&mut self, label: &str, status: LiveAgentStatus) -> ThreadId {
++            let index = self.agents.len() + 1;
++            let thread_id = ThreadId::from_string(&format!("00000000-0000-0000-0000-{index:012}"))
++                .expect("fixed thread id");
++            let _ = self
++                .state
++                .set_agent_status(thread_id, status, Instant::now());
++            self.agents.push((thread_id, label.to_string()));
++            thread_id
++        }
++
++        fn add_activity(
++            &mut self,
++            thread_id: ThreadId,
++            id: &str,
++            label: &str,
++            status: ActivityStatus,
++        ) {
++            let _ = self.state.reduce_activity(
++                thread_id,
++                WorkActivityInput {
++                    id: id.to_string(),
++                    kind: WorkActivityKind::Command,
++                    label: label.to_string(),
++                    status,
++                },
++            );
++        }
++
++        fn set_status(&mut self, thread_id: ThreadId, status: LiveAgentStatus) {
++            let _ = self
++                .state
++                .set_agent_status(thread_id, status, Instant::now());
++        }
++
++        fn render(
++            &self,
++            screen_size: Size,
++            bottom_pane_height: u16,
++            color_enabled: bool,
++        ) -> Rendered {
++            let frame = RefCell::new(LivePanelFrame::default());
++            let (text, buffer, desired_height) =
++                self.render_with_frame(screen_size, bottom_pane_height, color_enabled, &frame);
++            Rendered {
++                text,
++                buffer,
++                frame: frame.into_inner(),
++                desired_height,
++            }
++        }
++
++        fn render_with_frame(
++            &self,
++            screen_size: Size,
++            bottom_pane_height: u16,
++            color_enabled: bool,
++            frame: &RefCell<LivePanelFrame>,
++        ) -> (String, Buffer, u16) {
++            let now = Instant::now();
++            let agents = self
++                .agents
++                .iter()
++                .filter_map(|(thread_id, label)| {
++                    self.state
++                        .agent(*thread_id)
++                        .filter(|state| state.is_renderable_at(now))
++                        .map(|state| LivePanelAgent::new(*thread_id, label.clone(), state))
++                })
++                .collect();
++            let snapshot = LivePanelSnapshot::new(self.state.revision(), agents);
++            let panel = SubagentLivePanelRenderable::new(
++                snapshot,
++                screen_size,
++                bottom_pane_height,
++                color_enabled,
++                frame,
++            );
++            let desired_height = panel.desired_height(screen_size.width);
++            let area = Rect::new(0, 0, screen_size.width, desired_height);
++            let mut buffer = Buffer::empty(area);
++            panel.render(area, &mut buffer);
++            let text = buffer_text(&buffer);
++            (text, buffer, desired_height)
++        }
++    }
++
++    fn buffer_text(buffer: &Buffer) -> String {
++        (0..buffer.area.height)
++            .map(|row| {
++                let mut line = String::new();
++                let mut column = 0;
++                while column < buffer.area.width {
++                    let symbol = buffer[(column, row)].symbol();
++                    line.push_str(symbol);
++                    column = column.saturating_add(
++                        u16::try_from(unicode_width::UnicodeWidthStr::width(symbol).max(1))
++                            .unwrap_or(1),
++                    );
++                }
++                line.trim_end().to_string()
++            })
++            .collect::<Vec<_>>()
++            .join("\n")
++    }
++
++    #[test]
++    fn full_snapshots_cover_zero_one_and_three_activities() {
++        let mut zero = Fixture::new();
++        zero.add_agent("Zero", LiveAgentStatus::Starting);
++        let zero = zero.render(Size::new(120, 40), 4, false);
++
++        let mut one = Fixture::new();
++        let one_id = one.add_agent("One", LiveAgentStatus::Running);
++        one.add_activity(one_id, "one", "cargo check", ActivityStatus::Running);
++        let one = one.render(Size::new(120, 40), 4, false);
++
++        let mut three = Fixture::new();
++        let three_id = three.add_agent("Three", LiveAgentStatus::Running);
++        three.add_activity(three_id, "a", "cargo fmt", ActivityStatus::Succeeded);
++        three.add_activity(three_id, "b", "cargo test", ActivityStatus::Failed);
++        three.add_activity(three_id, "c", "read failure", ActivityStatus::Running);
++        let three = three.render(Size::new(120, 40), 4, false);
++
++        insta::assert_snapshot!(
++            format!("{}\n---\n{}\n---\n{}", zero.text, one.text, three.text),
++            @r"
++        ◌ Zero  starting
++        ---
++        ● One  running
++          ● cargo check  running
++        ---
++        ● Three  running
++          ✓ cargo fmt  succeeded
++          ✗ cargo test  failed
++          ● read failure  running
++        "
++        );
++        assert_eq!(zero.frame.mode(), Some(LivePanelMode::Full));
++        assert_eq!(one.frame.hit_regions()[0].rect, Rect::new(0, 0, 120, 2));
++        assert_eq!(three.frame.hit_regions()[0].rect, Rect::new(0, 0, 120, 4));
++    }
++
++    #[test]
++    fn multi_agent_snapshots_cover_completed_waiting_failed_and_overflow() {
++        let mut lifecycle = Fixture::new();
++        lifecycle.add_agent("Done", LiveAgentStatus::Completed);
++        let waiting = lifecycle.add_agent("Needs approval", LiveAgentStatus::Running);
++        lifecycle.add_activity(
++            waiting,
++            "approval",
++            "Remove cache",
++            ActivityStatus::WaitingApproval,
++        );
++        lifecycle.set_status(waiting, LiveAgentStatus::WaitingApproval);
++        let running = lifecycle.add_agent("Test agent", LiveAgentStatus::Running);
++        lifecycle.add_activity(running, "failed", "cargo test", ActivityStatus::Failed);
++        lifecycle.add_activity(running, "read", "read failure", ActivityStatus::Running);
++        let lifecycle = lifecycle.render(Size::new(120, 40), 4, false);
++
++        let mut three = Fixture::new();
++        three.add_agent("First", LiveAgentStatus::Running);
++        three.add_agent("Second", LiveAgentStatus::Running);
++        three.add_agent("Third", LiveAgentStatus::Running);
++        let three = three.render(Size::new(120, 40), 4, false);
++
++        let mut overflow = Fixture::new();
++        let overflow_ids = [
++            "Agent 1", "Agent 2", "Agent 3", "Agent 4", "Agent 5", "Agent 6",
++        ]
++        .into_iter()
++        .map(|label| overflow.add_agent(label, LiveAgentStatus::Running))
++        .collect::<Vec<_>>();
++        let overflow = overflow.render(Size::new(80, 15), 4, false);
++
++        insta::assert_snapshot!(
++            format!(
++                "{}\n---\n{}\n---\n{}",
++                lifecycle.text, three.text, overflow.text
++            ),
++            @r"
++        ! Needs approval  waiting approval
++          ! Remove cache  waiting approval
++        ● Test agent  running
++          ✗ cargo test  failed
++          ● read failure  running
++        ---
++        ● First  running
++        ● Second  running
++        ● Third  running
++        ---
++        ● Agent 1  running
++        ● Agent 2  running
++        … +4 more · /subagents
++        "
++        );
++        assert_eq!(lifecycle.frame.hit_regions().len(), 2);
++        assert_eq!(
++            lifecycle.frame.hit_regions()[1].rect,
++            Rect::new(0, 2, 120, 3)
++        );
++        assert_eq!(overflow.frame.mode(), Some(LivePanelMode::Compact));
++        assert_eq!(overflow.frame.hidden_count(), 4);
++        assert_eq!(overflow.frame.hit_regions().len(), 2);
++        let revision = overflow.frame.render_revision();
++        assert_eq!(
++            overflow.frame.hit_test(0, 0, revision),
++            Some(overflow_ids[0])
++        );
++        assert_eq!(
++            overflow.frame.hit_test(0, 1, revision),
++            Some(overflow_ids[1])
++        );
++        assert_eq!(overflow.frame.hit_test(0, 2, revision), None);
++        assert_eq!(overflow.frame.hit_test(80, 0, revision), None);
++        assert_eq!(overflow.frame.hit_test(0, 3, revision), None);
++    }
++
++    #[test]
++    fn compact_80x24_unicode_long_text_and_no_color_remain_readable() {
++        let mut compact = Fixture::new();
++        let reviewer = compact.add_agent("审查员 [worker]", LiveAgentStatus::Running);
++        compact.add_activity(
++            reviewer,
++            "cjk",
++            "读取 C:\\项目\\源代码\\文件.rs",
++            ActivityStatus::Running,
++        );
++        let emoji = compact.add_agent("emoji-agent", LiveAgentStatus::Running);
++        compact.add_activity(
++            emoji,
++            "emoji",
++            "cargo test --features 你好-👩‍💻-é",
++            ActivityStatus::Succeeded,
++        );
++        let rendered = compact.render(Size::new(80, 24), 4, false);
++
++        insta::assert_snapshot!(rendered.text, @r"
++        ● 审查员 [worker]  running · ● 读取 C:\项目\源代码\文件.rs  running
++        ● emoji-agent  running · ✓ cargo test --features 你好-👩‍💻-é  succeeded
++        ");
++        assert_eq!(rendered.frame.mode(), Some(LivePanelMode::Compact));
++        assert!(
++            rendered.buffer.content.iter().all(|cell| {
++                matches!(cell.style().fg, None | Some(ratatui::style::Color::Reset))
++            }),
++            "NO_COLOR rendering must not rely on foreground color"
++        );
++
++        let mut long = Fixture::new();
++        let long_id = long.add_agent(&"nickname-role-".repeat(12), LiveAgentStatus::Running);
++        long.add_activity(
++            long_id,
++            "long",
++            &format!("cargo test {}", "--very-long-argument ".repeat(12)),
++            ActivityStatus::Running,
++        );
++        let long = long.render(Size::new(80, 24), 4, false);
++        assert!(long.text.contains('…'));
++        assert!(!long.text.contains('\n'));
++    }
++
++    #[test]
++    fn minimal_snapshot_keeps_aggregate_words_and_unambiguous_hit_policy() {
++        let mut fixture = Fixture::new();
++        fixture.add_agent("Running", LiveAgentStatus::Running);
++        fixture.add_agent("Waiting", LiveAgentStatus::WaitingApproval);
++        fixture.add_agent("Failed", LiveAgentStatus::Failed);
++        let rendered = fixture.render(Size::new(60, 24), 4, false);
++
++        insta::assert_snapshot!(rendered.text, @"! 3 subagents · 1 waiting approval · 1 failed · /subagents");
++        assert_eq!(rendered.frame.mode(), Some(LivePanelMode::Minimal));
++        assert!(rendered.frame.hit_regions().is_empty());
++
++        let mut single = Fixture::new();
++        let single_id = single.add_agent("Only", LiveAgentStatus::Running);
++        let single = single.render(Size::new(60, 24), 4, false);
++        let revision = single.frame.render_revision();
++        assert_eq!(single.frame.hit_test(0, 0, revision), Some(single_id));
++    }
++
++    #[test]
++    fn strict_budget_modes_and_zero_safe_rows_follow_the_formula() {
++        let mut fixture = Fixture::new();
++        let id = fixture.add_agent("Budget", LiveAgentStatus::Running);
++        for (index, label) in ["one", "two", "three"].into_iter().enumerate() {
++            fixture.add_activity(id, &index.to_string(), label, ActivityStatus::Running);
++        }
++
++        let full = fixture.render(Size::new(120, 40), 4, false);
++        let compact = fixture.render(Size::new(120, 15), 4, false);
++        let minimal = fixture.render(Size::new(60, 40), 4, false);
++        let hidden = fixture.render(Size::new(120, 10), 2, false);
++
++        assert_eq!(
++            (full.frame.mode(), full.desired_height),
++            (Some(LivePanelMode::Full), 4)
++        );
++        assert_eq!(
++            (compact.frame.mode(), compact.desired_height),
++            (Some(LivePanelMode::Compact), 1)
++        );
++        assert_eq!(
++            (minimal.frame.mode(), minimal.desired_height),
++            (Some(LivePanelMode::Minimal), 1)
++        );
++        assert_eq!(hidden.desired_height, 0);
++        assert_eq!(hidden.frame.panel_rect(), None);
++    }
++
++    #[test]
++    fn frame_revisions_reject_stale_hits_and_resize_clears_geometry() {
++        let mut fixture = Fixture::new();
++        let id = fixture.add_agent("Clickable", LiveAgentStatus::Running);
++        fixture.add_activity(id, "work", "cargo test", ActivityStatus::Running);
++        let frame = RefCell::new(LivePanelFrame::default());
++
++        fixture.render_with_frame(Size::new(120, 40), 4, false, &frame);
++        let first_revision = frame.borrow().render_revision();
++        assert_eq!(frame.borrow().hit_test(4, 1, first_revision), Some(id));
++        assert_eq!(frame.borrow().state_revision(), fixture.state.revision());
++
++        fixture.render_with_frame(Size::new(120, 40), 4, false, &frame);
++        let second_revision = frame.borrow().render_revision();
++        assert!(second_revision > first_revision);
++        assert_eq!(frame.borrow().hit_test(4, 1, first_revision), None);
++        assert_eq!(frame.borrow().hit_test(4, 1, second_revision), Some(id));
++
++        frame.borrow_mut().prepare_resize(Size::new(80, 24));
++        assert_eq!(frame.borrow().panel_rect(), None);
++        assert_eq!(frame.borrow().hit_test(4, 1, second_revision), None);
++
++        fixture.render_with_frame(Size::new(80, 24), 4, false, &frame);
++        assert_eq!(frame.borrow().mode(), Some(LivePanelMode::Compact));
++        assert_eq!(frame.borrow().panel_rect(), Some(Rect::new(0, 0, 80, 1)));
++    }
++}

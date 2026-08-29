@@ -1,0 +1,279 @@
+diff --git a/codex-rs/install-context/src/lib.rs b/codex-rs/install-context/src/lib.rs
+index a88e2e2..d6d9e0a 100644
+--- a/codex-rs/install-context/src/lib.rs
++++ b/codex-rs/install-context/src/lib.rs
+@@ -13,6 +13,7 @@ const CODE_MODE_HOST_EXECUTABLE_NAME: &str = if cfg!(windows) {
+ } else {
+     "codex-code-mode-host"
+ };
++const CSA_OFFICIAL_PACKAGE_ROOT_ENV: &str = "CSA_CODEX_OFFICIAL_PACKAGE_ROOT";
+ const PACKAGE_METADATA_FILENAME: &str = "codex-package.json";
+ const PATH_DIRNAME: &str = "codex-path";
+ const RELEASES_DIRNAME: &str = "releases";
+@@ -101,7 +102,27 @@ impl InstallContext {
+         method_override: Option<InstallMethod>,
+         codex_home: Option<&Path>,
+     ) -> Self {
+-        let package_layout = current_exe.and_then(CodexPackageLayout::from_exe);
++        Self::from_exe_with_official_package_root(
++            is_macos,
++            current_exe,
++            method_override,
++            codex_home,
++            None,
++        )
++    }
++
++    fn from_exe_with_official_package_root(
++        is_macos: bool,
++        current_exe: Option<&Path>,
++        method_override: Option<InstallMethod>,
++        codex_home: Option<&Path>,
++        official_package_root: Option<&Path>,
++    ) -> Self {
++        let package_layout = match official_package_root {
++            Some(package_root) => current_exe
++                .and_then(|exe| CodexPackageLayout::from_overlay_and_official(exe, package_root)),
++            None => current_exe.and_then(CodexPackageLayout::from_exe),
++        };
+         let method = if let Some(method) = method_override {
+             method
+         } else if let Some(exe_path) = current_exe {
+@@ -128,10 +149,15 @@ impl InstallContext {
+             } else {
+                 None
+             };
+-            Self::from_exe(
++            let codex_home = codex_utils_home_dir::find_codex_home().ok();
++            let official_package_root =
++                std::env::var_os(CSA_OFFICIAL_PACKAGE_ROOT_ENV).map(PathBuf::from);
++            Self::from_exe_with_official_package_root(
+                 cfg!(target_os = "macos"),
+                 current_exe.as_deref(),
+                 method_override,
++                codex_home.as_deref(),
++                official_package_root.as_deref(),
+             )
+         })
+     }
+@@ -147,12 +173,9 @@ impl InstallContext {
+ 
+     pub fn rg_command(&self) -> PathBuf {
+         if let Some(package_layout) = &self.package_layout
+-            && let Some(path_dir) = &package_layout.path_dir
++            && let Some(bundled_rg) = package_layout.path_file(default_rg_command())
+         {
+-            let bundled_rg = path_dir.join(default_rg_command());
+-            if bundled_rg.is_file() {
+-                return bundled_rg.into_path_buf();
+-            }
++            return bundled_rg.into_path_buf();
+         }
+ 
+         if let InstallMethod::Standalone {
+@@ -179,20 +202,22 @@ impl InstallContext {
+     }
+ 
+     fn code_mode_host_program_from_exe(&self, current_exe: Option<&Path>) -> PathBuf {
+-        let executable_dir = if let Some(package_layout) = &self.package_layout {
+-            Some(package_layout.bin_dir.clone())
++        let executable = if let Some(package_layout) = &self.package_layout {
++            package_layout.bin_file(CODE_MODE_HOST_EXECUTABLE_NAME)
+         } else if let InstallMethod::Standalone { release_dir, .. } = &self.method {
+-            Some(release_dir.clone())
++            let executable = release_dir.join(CODE_MODE_HOST_EXECUTABLE_NAME);
++            executable.is_file().then_some(executable)
+         } else {
+             current_exe
+                 .and_then(Path::parent)
+                 .and_then(canonical_absolute_path)
++                .and_then(|directory| {
++                    let executable = directory.join(CODE_MODE_HOST_EXECUTABLE_NAME);
++                    executable.is_file().then_some(executable)
++                })
+         };
+-        if let Some(executable_dir) = executable_dir {
+-            let executable = executable_dir.join(CODE_MODE_HOST_EXECUTABLE_NAME);
+-            if executable.is_file() {
+-                return executable.into_path_buf();
+-            }
++        if let Some(executable) = executable {
++            return executable.into_path_buf();
+         }
+ 
+         current_exe
+@@ -203,12 +228,9 @@ impl InstallContext {
+ 
+     pub fn bundled_resource(&self, file_name: impl AsRef<Path>) -> Option<AbsolutePathBuf> {
+         if let Some(package_layout) = &self.package_layout
+-            && let Some(resources_dir) = &package_layout.resources_dir
++            && let Some(resource) = package_layout.resource_file(file_name.as_ref())
+         {
+-            let resource = resources_dir.join(file_name.as_ref());
+-            if resource.is_file() {
+-                return Some(resource);
+-            }
++            return Some(resource);
+         }
+ 
+         if let InstallMethod::Standalone {
+@@ -268,6 +290,48 @@ impl CodexPackageLayout {
+             bin_dir,
+         })
+     }
++
++    fn from_overlay_and_official(exe_path: &Path, official_package_root: &Path) -> Option<Self> {
++        let overlay_bin_dir = canonical_absolute_path(exe_path)?.parent()?;
++        if overlay_bin_dir.file_name() != Some(OsStr::new(BIN_DIRNAME)) {
++            return None;
++        }
++        let overlay_root = overlay_bin_dir.parent()?;
++        let official_root = canonical_absolute_path(official_package_root)?;
++        let official = Self::from_package_bin_dir(official_root.join(BIN_DIRNAME))?;
++        Some(Self {
++            package_dir: official.package_dir,
++            bin_dir: overlay_bin_dir,
++            resources_dir: existing_dir(overlay_root.join(RESOURCES_DIRNAME))
++                .or(official.resources_dir),
++            path_dir: existing_dir(overlay_root.join(PATH_DIRNAME)).or(official.path_dir),
++        })
++    }
++
++    fn bin_file(&self, file_name: impl AsRef<Path>) -> Option<AbsolutePathBuf> {
++        existing_file(self.bin_dir.join(file_name.as_ref()))
++            .or_else(|| existing_file(self.package_dir.join(BIN_DIRNAME).join(file_name.as_ref())))
++    }
++
++    fn resource_file(&self, file_name: impl AsRef<Path>) -> Option<AbsolutePathBuf> {
++        self.resources_dir
++            .as_ref()
++            .and_then(|directory| existing_file(directory.join(file_name.as_ref())))
++            .or_else(|| {
++                existing_file(
++                    self.package_dir
++                        .join(RESOURCES_DIRNAME)
++                        .join(file_name.as_ref()),
++                )
++            })
++    }
++
++    fn path_file(&self, file_name: impl AsRef<Path>) -> Option<AbsolutePathBuf> {
++        self.path_dir
++            .as_ref()
++            .and_then(|directory| existing_file(directory.join(file_name.as_ref())))
++            .or_else(|| existing_file(self.package_dir.join(PATH_DIRNAME).join(file_name.as_ref())))
++    }
+ }
+ 
+ fn install_method_from_exe(
+@@ -332,6 +396,10 @@ fn existing_dir(path: AbsolutePathBuf) -> Option<AbsolutePathBuf> {
+     path.is_dir().then_some(path)
+ }
+ 
++fn existing_file(path: AbsolutePathBuf) -> Option<AbsolutePathBuf> {
++    path.is_file().then_some(path)
++}
++
+ fn default_rg_command() -> PathBuf {
+     if cfg!(windows) {
+         PathBuf::from("rg.exe")
+@@ -730,6 +798,99 @@ mod tests {
+         Ok(())
+     }
+ 
++    #[test]
++    fn csa_overlay_prefers_owned_files_and_falls_back_to_the_official_package()
++    -> std::io::Result<()> {
++        let root = tempfile::tempdir()?;
++        let overlay = root.path().join("overlay/runtime");
++        let overlay_bin = overlay.join(BIN_DIRNAME);
++        let overlay_resources = overlay.join(RESOURCES_DIRNAME);
++        let overlay_path = overlay.join(PATH_DIRNAME);
++        let official = root.path().join("official");
++        let official_bin = official.join(BIN_DIRNAME);
++        let official_resources = official.join(RESOURCES_DIRNAME);
++        let official_path = official.join(PATH_DIRNAME);
++        for directory in [
++            &overlay_bin,
++            &overlay_resources,
++            &overlay_path,
++            &official_bin,
++            &official_resources,
++            &official_path,
++        ] {
++            fs::create_dir_all(directory)?;
++        }
++        fs::write(
++            official.join(PACKAGE_METADATA_FILENAME),
++            r#"{"version":"1.2.3"}"#,
++        )?;
++        let exe = overlay_bin.join(if cfg!(windows) { "codex.exe" } else { "codex" });
++        let overlay_host = overlay_bin.join(CODE_MODE_HOST_EXECUTABLE_NAME);
++        let official_host = official_bin.join(CODE_MODE_HOST_EXECUTABLE_NAME);
++        let overlay_resource = overlay_resources.join(TEST_RESOURCE_NAME);
++        let official_resource = official_resources.join(TEST_RESOURCE_NAME);
++        let overlay_rg = overlay_path.join(default_rg_command());
++        let official_rg = official_path.join(default_rg_command());
++        for (path, contents) in [
++            (&exe, "patched codex"),
++            (&overlay_host, "overlay host"),
++            (&official_host, "official host"),
++            (&overlay_resource, "overlay resource"),
++            (&official_resource, "official resource"),
++            (&overlay_rg, "overlay rg"),
++            (&official_rg, "official rg"),
++        ] {
++            fs::write(path, contents)?;
++        }
++
++        let context = InstallContext::from_exe_with_official_package_root(
++            /*is_macos*/ false,
++            /*current_exe*/ Some(&exe),
++            /*method_override*/ Some(InstallMethod::Bun),
++            /*codex_home*/ None,
++            /*official_package_root*/ Some(&official),
++        );
++        assert_eq!(
++            context.package_manifest(),
++            Some(CodexPackageManifest {
++                version: Version::new(1, 2, 3),
++            })
++        );
++        assert_eq!(
++            context.code_mode_host_program(),
++            AbsolutePathBuf::from_absolute_path(overlay_host.canonicalize()?)?.into_path_buf()
++        );
++        assert_eq!(
++            context.rg_command(),
++            AbsolutePathBuf::from_absolute_path(overlay_rg.canonicalize()?)?.into_path_buf()
++        );
++        assert_eq!(
++            context.bundled_resource(TEST_RESOURCE_NAME),
++            Some(AbsolutePathBuf::from_absolute_path(
++                overlay_resource.canonicalize()?
++            )?)
++        );
++
++        fs::remove_file(overlay_host)?;
++        fs::remove_file(overlay_resource)?;
++        fs::remove_file(overlay_rg)?;
++        assert_eq!(
++            context.code_mode_host_program(),
++            AbsolutePathBuf::from_absolute_path(official_host.canonicalize()?)?.into_path_buf()
++        );
++        assert_eq!(
++            context.rg_command(),
++            AbsolutePathBuf::from_absolute_path(official_rg.canonicalize()?)?.into_path_buf()
++        );
++        assert_eq!(
++            context.bundled_resource(TEST_RESOURCE_NAME),
++            Some(AbsolutePathBuf::from_absolute_path(
++                official_resource.canonicalize()?
++            )?)
++        );
++        Ok(())
++    }
++
+     #[test]
+     fn standalone_package_rg_falls_back_when_codex_path_is_missing() -> std::io::Result<()> {
+         let package_dir = tempfile::tempdir()?;
