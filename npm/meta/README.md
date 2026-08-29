@@ -22,9 +22,13 @@ csa unplug
 csa purge
 ```
 
-Bare `install` lists formal patched Codex Releases and prompts for an installable
-version; automation must pass an exact `--compat`. Use absolute paths for local
-compatibility manifests and artifacts/sources. `install` never edits PATH. `uninstall`
-withdraws the shim before removing manager-owned data. Adding the managed bin
-directory to PATH remains an explicit, separate user action. See the release
-documentation for supported compatibility IDs and rollback procedures.
+Bare `install` detects the official Codex version and Manager target, then installs
+the matching public Release with the greatest numeric terminal `-pN` revision. Use
+`--compat` only to pin an older exact match, and use absolute paths for local
+compatibility manifests and artifacts/sources. On Windows, a successful install puts
+the verified managed bin first in the user PATH and silently rechecks `where.exe codex`.
+
+Interactive terminals use concise Human output and show install progress. Pass
+`--json`, or redirect stdout, for stable machine reports. `status` summarizes the
+installed and active command; `doctor` reports ordered PASS/WARN/FAIL checks and exits
+0 for PASS/WARN, 1 for diagnosed failures, or 2 for incomplete diagnostics.

@@ -1,10 +1,17 @@
-use csa::cli::{Cli, USAGE};
+mod ui;
+
+use crate::ui::{
+    InstallProgress, Operation, OutputMode, output_mode, write_doctor_error, write_doctor_report,
+    write_error, write_report,
+};
+use csa::cli::{Cli, Invocation, USAGE, json_requested};
 use csa::error::ManagerError;
-use csa::manager::{OfflineArtifactProvider, doctor, exec, install, prepare, status, uninstall};
+use csa::manager::{
+    InstallEvent, OfflineArtifactProvider, doctor, exec, install_with_progress, prepare, status,
+    uninstall,
+};
 use csa::process::RealProcessRunner;
 use csa::state::SystemClock;
-use serde::Serialize;
-use std::io::{self, Write};
 
 fn main() {
     std::process::exit(run());
@@ -15,56 +22,87 @@ fn run() -> i32 {
     if is_current_process_shim() {
         return match forward_current_shim(std::env::args_os().skip(1).collect(), &runner) {
             Ok(exit_code) => exit_code,
-            Err(error) => print_error(&error),
+            Err(error) => write_error(output_mode(false), Operation::Shim, &error),
         };
     }
-    let cli = match Cli::parse(std::env::args_os().skip(1)) {
-        Ok(cli) => cli,
-        Err(error) => return print_error(&error),
+    let args: Vec<_> = std::env::args_os().skip(1).collect();
+    let parse_mode = output_mode(json_requested(&args));
+    let invocation = match Invocation::parse(args) {
+        Ok(invocation) => invocation,
+        Err(error) => return write_error(parse_mode, Operation::Parse, &error),
     };
-    let result = match cli {
-        Cli::Doctor(options) => doctor(options, &runner).and_then(print_json),
-        Cli::Install(options) => std::env::current_exe()
-            .map_err(|error| ManagerError::io("resolve manager executable", error))
-            .and_then(|source| {
-                install(
-                    options,
-                    &runner,
-                    &SystemClock,
-                    &OfflineArtifactProvider,
-                    &source,
-                )
-            })
-            .and_then(|mut report| {
-                activate_user_path(&mut report.activation, &runner)?;
-                print_json(&report)?;
-                Ok(())
-            }),
+    let mode = output_mode(invocation.explicit_json);
+    let operation = match &invocation.command {
+        Cli::Doctor(_) => Operation::Doctor,
+        Cli::Install(_) => Operation::Install,
+        Cli::Uninstall { .. } => Operation::Uninstall,
+        Cli::Prepare(_) => Operation::Prepare,
+        Cli::Plug { .. } => Operation::Plug,
+        Cli::Unplug { .. } => Operation::Unplug,
+        Cli::Status { .. } => Operation::Status,
+        Cli::Purge { .. } => Operation::Purge,
+        Cli::Exec(_) => Operation::Exec,
+        Cli::Help | Cli::Version => Operation::Parse,
+    };
+    let result = match invocation.command {
+        Cli::Doctor(options) => {
+            return match run_doctor_command(options, mode, &runner) {
+                Ok(exit_code) => exit_code,
+                Err(error) => write_doctor_error(mode, &error),
+            };
+        }
+        Cli::Install(options) => {
+            let mut progress = InstallProgress::new(mode);
+            let result = std::env::current_exe()
+                .map_err(|error| ManagerError::io("resolve manager executable", error))
+                .and_then(|source| {
+                    install_with_progress(
+                        options,
+                        &runner,
+                        &SystemClock,
+                        &OfflineArtifactProvider,
+                        &source,
+                        &mut |event| progress.event(event),
+                    )
+                })
+                .and_then(|mut report| {
+                    activate_user_path(&mut report.activation, &runner, &mut |event| {
+                        progress.event(event)
+                    })?;
+                    write_report(mode, &report)?;
+                    Ok(())
+                });
+            progress.finish();
+            result
+        }
         Cli::Uninstall { manager_root } => uninstall(manager_root).and_then(|report| {
             remove_user_path(&report.manager_root, &runner)?;
-            print_json(report)
+            write_report(mode, &report)
         }),
-        Cli::Prepare(options) => {
-            prepare(options, &runner, &SystemClock, &OfflineArtifactProvider).and_then(print_json)
-        }
+        Cli::Prepare(options) => prepare(options, &runner, &SystemClock, &OfflineArtifactProvider)
+            .and_then(|report| write_report(mode, &report)),
         Cli::Plug { manager_root } => std::env::current_exe()
             .map_err(|error| ManagerError::io("resolve manager executable", error))
             .and_then(|source| plug(manager_root, &runner, &SystemClock, &source))
             .and_then(|mut report| {
-                activate_user_path(&mut report, &runner)?;
-                print_json(&report)?;
+                activate_user_path(&mut report, &runner, &mut |_| {})?;
+                write_report(mode, &report)?;
                 Ok(())
             }),
-        Cli::Unplug { manager_root } => unplug(manager_root).and_then(print_json),
-        Cli::Status { manager_root } => status(manager_root, &runner).and_then(print_json),
+        Cli::Unplug { manager_root } => {
+            unplug(manager_root).and_then(|report| write_report(mode, &report))
+        }
+        Cli::Status { manager_root } => {
+            status(manager_root, &runner).and_then(|report| write_report(mode, &report))
+        }
         Cli::Purge { manager_root } => purge(manager_root).and_then(|report| {
             remove_user_path(&report.manager_root, &runner)?;
-            print_json(report)
+            write_report(mode, &report)
         }),
         Cli::Exec(options) => {
             return match exec(options, &runner) {
                 Ok(outcome) => outcome.exit_code,
-                Err(error) => print_error(&error),
+                Err(error) => write_error(mode, Operation::Exec, &error),
             };
         }
         Cli::Help => {
@@ -78,23 +116,30 @@ fn run() -> i32 {
     };
     match result {
         Ok(()) => 0,
-        Err(error) => print_error(&error),
+        Err(error) => write_error(mode, operation, &error),
     }
 }
 
-fn print_json(value: impl Serialize) -> csa::error::Result<()> {
-    let stdout = io::stdout();
-    let mut lock = stdout.lock();
-    serde_json::to_writer_pretty(&mut lock, &value).map_err(|error| {
-        ManagerError::new("output_error", format!("serialize JSON output: {error}"))
-    })?;
-    writeln!(lock).map_err(|error| ManagerError::io("write JSON output", error))
+fn run_doctor_command(
+    options: csa::manager::DoctorOptions,
+    mode: OutputMode,
+    runner: &RealProcessRunner,
+) -> csa::error::Result<i32> {
+    let report = doctor(options, runner)?;
+    let status_report = if mode == OutputMode::Human {
+        Some(status(Some(report.manager_root.clone()), runner)?)
+    } else {
+        None
+    };
+    write_doctor_report(mode, &report, status_report.as_ref())
 }
 
 fn activate_user_path(
     report: &mut csa::activation::PlugReport,
     runner: &RealProcessRunner,
+    progress: &mut dyn FnMut(InstallEvent),
 ) -> csa::error::Result<()> {
+    progress(InstallEvent::PrioritizingCommand);
     #[cfg(windows)]
     {
         let manager_root = report
@@ -111,6 +156,7 @@ fn activate_user_path(
         ) {
             Ok(user_path) => user_path,
             Err(install_error) => {
+                progress(InstallEvent::RollingBack);
                 let path_rollback = csa::activation::remove_windows_user_path(
                     &report.activation.managed_bin,
                     runner,
@@ -132,6 +178,7 @@ fn activate_user_path(
     }
     #[cfg(not(windows))]
     let _ = (report, runner);
+    progress(InstallEvent::Completed);
     Ok(())
 }
 
@@ -146,18 +193,4 @@ fn remove_user_path(
     Ok(())
 }
 
-fn print_error(error: &ManagerError) -> i32 {
-    let value = serde_json::json!({
-        "schema": 1,
-        "error": {
-            "code": error.code,
-            "message": error.message,
-        }
-    });
-    let stderr = io::stderr();
-    let mut lock = stderr.lock();
-    let _ = serde_json::to_writer_pretty(&mut lock, &value);
-    let _ = writeln!(lock);
-    2
-}
 use csa::activation::{forward_current_shim, is_current_process_shim, plug, purge, unplug};

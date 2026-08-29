@@ -1033,7 +1033,9 @@ def test_release_stream_contracts() -> None:
     online = (REPOSITORY / "src" / "online.rs").read_text(encoding="utf-8")
     assert "compatibility_id_for_version" not in online
     assert "discover_catalog" in online
-    assert "prompt_catalog" in online
+    assert "select_automatic" in online
+    assert "prompt_catalog" not in online
+    assert "io::stdin" not in online
     assert "releases/latest" not in online
     assert 'format!("rust-v{upstream_version}-native-join-p2")' not in online
     assert 'format!("rust-v{upstream_version}-native-join-p1")' not in online

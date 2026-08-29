@@ -8,6 +8,8 @@ use std::ffi::OsString;
 use std::path::PathBuf;
 
 pub const USAGE: &str = "\
+csa [--json] <command>
+
 csa doctor [--manager-root PATH] [--official PATH] [--official-native PATH] [--manifest PATH]
 csa install [--manager-root PATH] [--official PATH] [--official-native PATH] [--compat ID | --manifest PATH (--artifact PATH | --source PATH)]
 csa uninstall [--manager-root PATH]
@@ -16,7 +18,9 @@ csa plug [--manager-root PATH]
 csa unplug [--manager-root PATH]
 csa status [--manager-root PATH]
 csa purge [--manager-root PATH]
-csa exec --isolated [--manager-root PATH] --codex-home PATH --cwd PATH --logs-dir PATH --state-dir PATH --record PATH [--npm-prefix PATH] -- [CODEX_ARGS...]";
+csa exec --isolated [--manager-root PATH] --codex-home PATH --cwd PATH --logs-dir PATH --state-dir PATH --record PATH [--npm-prefix PATH] -- [CODEX_ARGS...]
+
+Global option: --json writes machine-readable output and may appear before or after the command.";
 
 #[derive(Clone, Debug)]
 pub enum Cli {
@@ -33,36 +37,76 @@ pub enum Cli {
     Version,
 }
 
-impl Cli {
+#[derive(Clone, Debug)]
+pub struct Invocation {
+    pub command: Cli,
+    pub explicit_json: bool,
+}
+
+impl Invocation {
     pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
         let mut args: VecDeque<_> = args.into_iter().collect();
+        let mut explicit_json = false;
+        while args.front().is_some_and(|arg| arg == "--json") {
+            args.pop_front();
+            set_json(&mut explicit_json)?;
+        }
         let Some(command) = args.pop_front() else {
-            return Ok(Self::Help);
+            return Ok(Self {
+                command: Cli::Help,
+                explicit_json,
+            });
         };
         let command = command.to_str().ok_or_else(|| {
             ManagerError::new("invalid_cli", "command name must be valid Unicode")
         })?;
-        match command {
-            "doctor" => parse_doctor(args),
-            "install" => parse_install(args),
-            "uninstall" => parse_root_only(args, |manager_root| Cli::Uninstall { manager_root }),
-            "prepare" => parse_prepare(args, "prepare", Cli::Prepare),
-            "plug" => parse_root_only(args, |manager_root| Cli::Plug { manager_root }),
-            "unplug" => parse_root_only(args, |manager_root| Cli::Unplug { manager_root }),
-            "status" => parse_root_only(args, |manager_root| Cli::Status { manager_root }),
-            "purge" => parse_root_only(args, |manager_root| Cli::Purge { manager_root }),
-            "exec" => parse_exec(args),
-            "help" | "--help" | "-h" => Ok(Self::Help),
-            "--version" | "-V" => Ok(Self::Version),
+        let command = match command {
+            "doctor" => parse_doctor(args, &mut explicit_json),
+            "install" => parse_install(args, &mut explicit_json),
+            "uninstall" => parse_root_only(args, &mut explicit_json, |manager_root| {
+                Cli::Uninstall { manager_root }
+            }),
+            "prepare" => parse_prepare(args, "prepare", &mut explicit_json, Cli::Prepare),
+            "plug" => parse_root_only(args, &mut explicit_json, |manager_root| Cli::Plug {
+                manager_root,
+            }),
+            "unplug" => parse_root_only(args, &mut explicit_json, |manager_root| Cli::Unplug {
+                manager_root,
+            }),
+            "status" => parse_root_only(args, &mut explicit_json, |manager_root| Cli::Status {
+                manager_root,
+            }),
+            "purge" => parse_root_only(args, &mut explicit_json, |manager_root| Cli::Purge {
+                manager_root,
+            }),
+            "exec" => parse_exec(args, &mut explicit_json),
+            "help" | "--help" | "-h" => parse_no_args(args, &mut explicit_json, Cli::Help),
+            "--version" | "-V" => parse_no_args(args, &mut explicit_json, Cli::Version),
             _ => Err(ManagerError::new(
                 "invalid_cli",
                 format!("unknown command: {command}"),
             )),
-        }
+        }?;
+        Ok(Self {
+            command,
+            explicit_json,
+        })
     }
 }
 
-fn parse_install(mut args: VecDeque<OsString>) -> Result<Cli> {
+pub fn json_requested(args: &[OsString]) -> bool {
+    args.iter()
+        .take_while(|argument| argument.as_os_str() != "--")
+        .any(|argument| argument.as_os_str() == "--json")
+}
+
+impl Cli {
+    pub fn parse(args: impl IntoIterator<Item = OsString>) -> Result<Self> {
+        Invocation::parse(args).map(|invocation| invocation.command)
+    }
+}
+
+fn parse_install(mut args: VecDeque<OsString>, explicit_json: &mut bool) -> Result<Cli> {
     let mut manager_root = None;
     let mut official = None;
     let mut official_native = None;
@@ -99,6 +143,7 @@ fn parse_install(mut args: VecDeque<OsString>) -> Result<Cli> {
             )?,
             "--source" => set_path(&mut source, take_value(&mut args, "--source")?, "--source")?,
             "--compat" => set_string(&mut compat, take_value(&mut args, "--compat")?, "--compat")?,
+            "--json" => set_json(explicit_json)?,
             "--help" | "-h" => return Ok(Cli::Help),
             flag => return Err(unknown_flag(flag)),
         }
@@ -140,7 +185,7 @@ fn parse_install(mut args: VecDeque<OsString>) -> Result<Cli> {
     Ok(Cli::Install(options))
 }
 
-fn parse_doctor(mut args: VecDeque<OsString>) -> Result<Cli> {
+fn parse_doctor(mut args: VecDeque<OsString>, explicit_json: &mut bool) -> Result<Cli> {
     let mut manager_root = None;
     let mut official = None;
     let mut official_native = None;
@@ -167,6 +212,7 @@ fn parse_doctor(mut args: VecDeque<OsString>) -> Result<Cli> {
                 take_value(&mut args, "--manifest")?,
                 "--manifest",
             )?,
+            "--json" => set_json(explicit_json)?,
             "--help" | "-h" => return Ok(Cli::Help),
             flag => return Err(unknown_flag(flag)),
         }
@@ -182,6 +228,7 @@ fn parse_doctor(mut args: VecDeque<OsString>) -> Result<Cli> {
 fn parse_prepare(
     mut args: VecDeque<OsString>,
     command: &str,
+    explicit_json: &mut bool,
     make: impl FnOnce(PrepareOptions) -> Cli,
 ) -> Result<Cli> {
     let mut manager_root = None;
@@ -218,6 +265,7 @@ fn parse_prepare(
                 "--artifact",
             )?,
             "--source" => set_path(&mut source, take_value(&mut args, "--source")?, "--source")?,
+            "--json" => set_json(explicit_json)?,
             "--help" | "-h" => return Ok(Cli::Help),
             flag => return Err(unknown_flag(flag)),
         }
@@ -237,6 +285,7 @@ fn parse_prepare(
 
 fn parse_root_only(
     mut args: VecDeque<OsString>,
+    explicit_json: &mut bool,
     make: impl FnOnce(Option<PathBuf>) -> Cli,
 ) -> Result<Cli> {
     let mut manager_root = None;
@@ -247,6 +296,7 @@ fn parse_root_only(
                 take_value(&mut args, "--manager-root")?,
                 "--manager-root",
             )?,
+            "--json" => set_json(explicit_json)?,
             "--help" | "-h" => return Ok(Cli::Help),
             flag => return Err(unknown_flag(flag)),
         }
@@ -254,7 +304,7 @@ fn parse_root_only(
     Ok(make(manager_root))
 }
 
-fn parse_exec(mut args: VecDeque<OsString>) -> Result<Cli> {
+fn parse_exec(mut args: VecDeque<OsString>, explicit_json: &mut bool) -> Result<Cli> {
     let mut isolated = false;
     let mut manager_root = None;
     let mut codex_home = None;
@@ -305,6 +355,7 @@ fn parse_exec(mut args: VecDeque<OsString>) -> Result<Cli> {
                 take_value(&mut args, "--npm-prefix")?,
                 "--npm-prefix",
             )?,
+            "--json" => set_json(explicit_json)?,
             "--help" | "-h" => return Ok(Cli::Help),
             flag => return Err(unknown_flag(flag)),
         }
@@ -333,6 +384,20 @@ fn parse_exec(mut args: VecDeque<OsString>) -> Result<Cli> {
         },
         args: child_args,
     }))
+}
+
+fn parse_no_args(
+    mut args: VecDeque<OsString>,
+    explicit_json: &mut bool,
+    command: Cli,
+) -> Result<Cli> {
+    while let Some(flag) = args.pop_front() {
+        match unicode_flag(&flag)? {
+            "--json" => set_json(explicit_json)?,
+            flag => return Err(unknown_flag(flag)),
+        }
+    }
+    Ok(command)
 }
 
 fn take_value(args: &mut VecDeque<OsString>, flag: &str) -> Result<OsString> {
@@ -381,13 +446,60 @@ fn duplicate_flag(flag: &str) -> ManagerError {
     ManagerError::new("invalid_cli", format!("duplicate option: {flag}"))
 }
 
+fn set_json(explicit_json: &mut bool) -> Result<()> {
+    if *explicit_json {
+        return Err(duplicate_flag("--json"));
+    }
+    *explicit_json = true;
+    Ok(())
+}
+
 #[cfg(test)]
 mod tests {
-    use super::{Cli, InstallOptions};
+    use super::{Cli, InstallOptions, Invocation, json_requested};
     use std::ffi::OsString;
 
     fn parse(args: &[&str]) -> crate::error::Result<Cli> {
         Cli::parse(args.iter().map(OsString::from))
+    }
+
+    fn invocation(args: &[&str]) -> crate::error::Result<Invocation> {
+        Invocation::parse(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn json_is_global_but_stops_at_the_exec_separator() {
+        assert!(invocation(&["--json", "status"]).unwrap().explicit_json);
+        assert!(invocation(&["status", "--json"]).unwrap().explicit_json);
+        assert!(invocation(&["--json", "status", "--json"]).is_err());
+
+        let invocation = invocation(&[
+            "exec",
+            "--isolated",
+            "--codex-home",
+            "C:/tmp/home",
+            "--cwd",
+            "C:/tmp/cwd",
+            "--logs-dir",
+            "C:/tmp/logs",
+            "--state-dir",
+            "C:/tmp/state",
+            "--record",
+            "C:/tmp/record.json",
+            "--",
+            "--json",
+        ])
+        .unwrap();
+        assert!(!invocation.explicit_json);
+        let Cli::Exec(options) = invocation.command else {
+            panic!("expected exec")
+        };
+        assert_eq!(options.args, ["--json"].map(OsString::from));
+        assert!(!json_requested(&[
+            OsString::from("exec"),
+            OsString::from("--"),
+            OsString::from("--json"),
+        ]));
     }
 
     #[test]

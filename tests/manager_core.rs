@@ -9,8 +9,8 @@ use csa::error::Result;
 use csa::hash::sha256_bytes;
 use csa::isolation::IsolationRequest;
 use csa::manager::{
-    ExecOptions, InstallOptions, OfflineArtifactProvider, PrepareOptions, exec, install, prepare,
-    status, uninstall,
+    ExecOptions, InstallEvent, InstallOptions, OfflineArtifactProvider, PrepareOptions, exec,
+    install, install_with_progress, prepare, status, uninstall,
 };
 use csa::process::{CommandResult, CommandSpec, ProcessRunner};
 use csa::state::{Clock, ManagerPaths, PrepareLock};
@@ -1019,16 +1019,26 @@ fn cold_install_and_uninstall_are_idempotent_and_rollback_activation_failure() {
     fs::write(&sentinel, b"keep").unwrap();
     let runner = FakeRunner::new(&fixture.artifact_bytes);
 
-    let first = install(
+    let mut events = Vec::new();
+    let first = install_with_progress(
         InstallOptions::Local(fixture.options(root.clone())),
         &runner,
         &FixedClock,
         &OfflineArtifactProvider,
         &manager,
+        &mut |event| events.push(event),
     )
     .unwrap();
     assert_eq!(first.status, "installed");
     assert!(first.activation.changed);
+    assert_eq!(
+        events,
+        [
+            InstallEvent::Preparing,
+            InstallEvent::Activating,
+            InstallEvent::Activated,
+        ]
+    );
     let second = install(
         InstallOptions::Local(fixture.options(root.clone())),
         &runner,
@@ -1044,15 +1054,18 @@ fn cold_install_and_uninstall_are_idempotent_and_rollback_activation_failure() {
     assert_eq!(fs::read(&sentinel).unwrap(), b"keep");
     assert_eq!(fs::read(&fixture.official).unwrap(), b"official-launcher");
 
-    let error = install(
+    let mut events = Vec::new();
+    let error = install_with_progress(
         InstallOptions::Local(fixture.options(root.clone())),
         &runner,
         &FixedClock,
         &OfflineArtifactProvider,
         &fixture.official,
+        &mut |event| events.push(event),
     )
     .unwrap_err();
     assert_eq!(error.code, "unsafe_shim_source");
+    assert_eq!(events.last(), Some(&InstallEvent::RollingBack));
     let paths = ManagerPaths::resolve(Some(root.clone())).unwrap();
     assert!(!shim_path(&paths).exists());
     assert!(!paths.active.exists());

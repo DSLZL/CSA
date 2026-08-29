@@ -10,7 +10,7 @@ use crate::detect::{
 use crate::error::{ManagerError, Result};
 use crate::hash::sha256_bytes;
 use crate::isolation::{IsolationPlan, IsolationRequest};
-use crate::online::resolve_online_install;
+use crate::online::resolve_online_install_with_progress;
 use crate::process::{CommandResult, CommandSpec, ProcessRunner};
 use crate::state::{
     Clock, ManagerPaths, PrepareLock, PreparedState, StateStore, ensure_managed_directory,
@@ -72,6 +72,26 @@ pub struct OnlineInstallOptions {
 pub enum InstallOptions {
     Online(OnlineInstallOptions),
     Local(PrepareOptions),
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum InstallEvent {
+    DetectingOfficial,
+    DiscoveringCompatibility,
+    SelectedCompatibility {
+        compat_id: String,
+    },
+    ArtifactProgress {
+        downloaded_bytes: u64,
+        total_bytes: u64,
+    },
+    VerifyingArtifact,
+    Preparing,
+    Activating,
+    Activated,
+    RollingBack,
+    PrioritizingCommand,
+    Completed,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -317,18 +337,42 @@ pub fn install(
     provider: &dyn ArtifactProvider,
     manager_executable: &Path,
 ) -> Result<InstallReport> {
+    install_with_progress(
+        options,
+        runner,
+        clock,
+        provider,
+        manager_executable,
+        &mut |_| {},
+    )
+}
+
+pub fn install_with_progress(
+    options: InstallOptions,
+    runner: &dyn ProcessRunner,
+    clock: &dyn Clock,
+    provider: &dyn ArtifactProvider,
+    manager_executable: &Path,
+    progress: &mut dyn FnMut(InstallEvent),
+) -> Result<InstallReport> {
     match options {
-        InstallOptions::Local(options) => {
-            install_local(options, runner, clock, provider, manager_executable)
-        }
+        InstallOptions::Local(options) => install_local(
+            options,
+            runner,
+            clock,
+            provider,
+            manager_executable,
+            progress,
+        ),
         InstallOptions::Online(options) => {
-            let bundle = resolve_online_install(&options, runner)?;
+            let bundle = resolve_online_install_with_progress(&options, runner, progress)?;
             install_local(
                 bundle.prepare_options(),
                 runner,
                 clock,
                 provider,
                 manager_executable,
+                progress,
             )
         }
     }
@@ -340,12 +384,16 @@ fn install_local(
     clock: &dyn Clock,
     provider: &dyn ArtifactProvider,
     manager_executable: &Path,
+    progress: &mut dyn FnMut(InstallEvent),
 ) -> Result<InstallReport> {
     let manager_root = options.manager_root.clone();
+    progress(InstallEvent::Preparing);
     let prepare = prepare(options, runner, clock, provider)?;
+    progress(InstallEvent::Activating);
     let activation = match plug(manager_root.clone(), runner, clock, manager_executable) {
         Ok(report) => report,
         Err(install_error) => {
+            progress(InstallEvent::RollingBack);
             if let Err(rollback_error) = unplug(manager_root) {
                 return Err(ManagerError::new(
                     "install_rollback_failed",
@@ -355,6 +403,7 @@ fn install_local(
             return Err(install_error);
         }
     };
+    progress(InstallEvent::Activated);
     Ok(InstallReport {
         schema: 1,
         status: "installed",

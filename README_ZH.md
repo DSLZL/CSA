@@ -71,7 +71,7 @@ npx --yes @dslzl/csa@0.1.3 --version
 
 ### 检查并安装 patched Codex
 
-在交互式终端中运行：
+在终端中运行：
 
 ```powershell
 csa doctor
@@ -79,9 +79,11 @@ csa install
 csa status
 ```
 
-`csa install` 会按版本顺序列出固定元数据完整的公开 `compat-*` Release。无法安装的条目会标出原因，然后让你选择可安装版本。无需登录 GitHub：CSA 会并行运行五秒上限的 Cloudflare 与阿里系淘宝 IP 国家探测，任意一个明确返回中国大陆（`CN`）就从 `gh-proxy.com` 开始下载；没有 `CN` 时默认直连 GitHub，并保留直连到镜像的兜底。
+`csa install` 会检测已安装的官方 Codex 版本和当前平台，并自动选择完全匹配且数字 `-pN` 修订号最大的公开 `compat-*` Release。交互式终端会显示安装阶段、产物字节数、百分比和传输速率；重定向输出只保留 JSON。无需登录 GitHub：CSA 会并行运行五秒上限的 Cloudflare 与阿里系淘宝 IP 国家探测，任意一个明确返回中国大陆（`CN`）就从 `gh-proxy.com` 开始下载；没有 `CN` 时默认直连 GitHub，并保留直连到镜像的兜底。
 
-自动化环境必须传入完整的 compatibility ID：
+在交互式终端中，`status` 会优先给出是否安装、是否激活、是否健康、官方版本、compatibility 和命令解析结论；`doctor` 会按顺序显示 `PASS`/`WARN`/`FAIL`、影响、恢复动作和汇总计数。稳定的机器报告可使用 `csa --json <command>` 或 `csa <command> --json`；stdout 被重定向时也会自动使用 JSON。
+
+如需固定到较旧但仍完全匹配的 Release，可传入完整的 compatibility ID：
 
 ```powershell
 csa install --compat rust-v0.150.1-native-join-p8
@@ -164,17 +166,17 @@ CSA 把四个身份分开管理：
 
 | 命令 | 用途 |
 | --- | --- |
-| `csa doctor` | 检查官方安装和可选 compatibility inputs，不修改状态 |
-| `csa install` | 列出正式 Release 并安装一个精确匹配项，或安装精确的本地 payload |
+| `csa doctor` | 诊断官方安装、prepared state、激活、命令优先级和可选 compatibility inputs，不修改状态 |
+| `csa install` | 自动安装修订号最大的精确匹配 Release，或安装精确的本地 payload |
 | `csa uninstall` | 撤回 shim，删除 Manager 自己的 prepared state |
 | `csa prepare` | 验证或构建精确的本地 payload，但不激活 |
 | `csa plug` | 在 `<manager-root>/bin` 中发布绑定 checksum 的 shim |
 | `csa unplug` | 撤回 shim，保留 prepared data |
-| `csa status` | 报告 prepared state、激活状态、路径和 drift |
+| `csa status` | 汇总安装状态、激活健康度、命令解析和 drift |
 | `csa purge` | 删除所有 Manager 受管的 prepared、source、build、shim 和 state 数据 |
 | `csa exec --isolated` | 使用明确的隔离目录运行 prepared binary，并记录 evidence |
 
-运行 `csa --help` 可查看完整参数。Manager 命令向 stdout 写入机器可读的 JSON。参数或验证失败时，会向 stderr 写入结构化错误并以退出码 2 结束。
+运行 `csa --help` 可查看完整参数。交互式终端默认使用 Human 输出；`--json` 和重定向 stdout 会保留机器可读 schema。`status` 只要成功渲染状态就退出 `0`；`doctor` 在只有 PASS/WARN 时退出 `0`，诊断出 FAIL 时退出 `1`，参数无效或诊断不完整时退出 `2`。
 
 ## 开发与文档
 

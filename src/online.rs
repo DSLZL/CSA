@@ -3,7 +3,7 @@ use crate::compat::{LoadedCompatibility, validate_relative};
 use crate::detect::{detect_official, parse_codex_version};
 use crate::error::{ManagerError, Result};
 use crate::hash::sha256_file;
-use crate::manager::{OnlineInstallOptions, PrepareOptions};
+use crate::manager::{InstallEvent, OnlineInstallOptions, PrepareOptions};
 use crate::process::ProcessRunner;
 use crate::state::{ManagerPaths, ensure_managed_directory, remove_managed_tree};
 use serde::Deserialize;
@@ -11,7 +11,7 @@ use serde::de::DeserializeOwned;
 use std::cell::Cell;
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
-use std::io::{self, BufRead, IsTerminal, Write};
+use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::time::Duration;
 use ureq::{Agent, ResponseExt};
@@ -34,6 +34,7 @@ struct CompatibilityEntry {
     codex_version: String,
     build_target: String,
     version_key: (u64, u64, u64),
+    patch_revision: u64,
     csa_commit: String,
     unavailable: Option<String>,
 }
@@ -64,18 +65,23 @@ pub fn resolve_online_install(
     options: &OnlineInstallOptions,
     runner: &dyn ProcessRunner,
 ) -> Result<OnlineBundle> {
-    require_selection_mode(
-        options.compat.as_deref(),
-        io::stdin().is_terminal(),
-        io::stderr().is_terminal(),
-    )?;
+    resolve_online_install_with_progress(options, runner, &mut |_| {})
+}
+
+pub fn resolve_online_install_with_progress(
+    options: &OnlineInstallOptions,
+    runner: &dyn ProcessRunner,
+    progress: &mut dyn FnMut(InstallEvent),
+) -> Result<OnlineBundle> {
     let paths = ManagerPaths::resolve(options.manager_root.clone())?;
+    progress(InstallEvent::DetectingOfficial);
     let official = detect_official(
         runner,
         options.official.as_deref(),
         options.official_native.as_deref(),
         std::slice::from_ref(&paths.root),
     )?;
+    progress(InstallEvent::DiscoveringCompatibility);
     let client = GitHubClient::new();
     paths.initialize()?;
     let staging_path = paths
@@ -98,12 +104,13 @@ pub fn resolve_online_install(
     let selected_index = if let Some(requested) = options.compat.as_deref() {
         select_requested(&catalog, requested)?
     } else {
-        let mut input = io::stdin().lock();
-        let mut output = io::stderr().lock();
-        prompt_catalog(&catalog, &mut input, &mut output)?
+        select_automatic(&catalog)?
     };
     let selected = &catalog[selected_index];
     let compat_id = &selected.compat_id;
+    progress(InstallEvent::SelectedCompatibility {
+        compat_id: compat_id.clone(),
+    });
     let release_tag = format!("compat-{compat_id}");
     let csa_commit = client.peel_tag(CSA_REPOSITORY, &release_tag)?;
     if csa_commit != selected.csa_commit {
@@ -186,13 +193,16 @@ pub fn resolve_online_install(
         &paths.root,
         artifact_path.parent().expect("artifact path has a parent"),
     )?;
-    if !client.download_asset(
+    if !client.download_asset_with_progress(
         &release_tag,
         &descriptor.artifact.asset,
         &artifact_path,
-        Some(descriptor.artifact.size),
-        Some(&descriptor.artifact.sha256),
-        MAX_ARTIFACT_BYTES,
+        (
+            Some(descriptor.artifact.size),
+            Some(&descriptor.artifact.sha256),
+            MAX_ARTIFACT_BYTES,
+        ),
+        Some(progress),
     )? {
         return Err(ManagerError::new(
             "invalid_compatibility_release",
@@ -242,11 +252,13 @@ fn discover_catalog(
             continue;
         };
         validate_catalog_descriptor(&descriptor, &release_tag, &csa_commit, compat_id)?;
+        let patch_revision = patch_revision(&descriptor.compat_id)?;
         entries.push(CompatibilityEntry {
             compat_id: descriptor.compat_id,
             codex_version: descriptor.upstream.version.clone(),
             build_target: descriptor.build_target.clone(),
             version_key: version_key(&descriptor.upstream.version)?,
+            patch_revision,
             csa_commit,
             unavailable: incompatibility_reason(
                 &descriptor.upstream.version,
@@ -264,6 +276,7 @@ fn sort_catalog(entries: &mut [CompatibilityEntry]) {
         right
             .version_key
             .cmp(&left.version_key)
+            .then_with(|| right.patch_revision.cmp(&left.patch_revision))
             .then_with(|| left.compat_id.cmp(&right.compat_id))
     });
 }
@@ -327,20 +340,6 @@ fn download_release_metadata(
     Ok(Some((descriptor, checksums)))
 }
 
-fn require_selection_mode(
-    requested: Option<&str>,
-    stdin_terminal: bool,
-    stderr_terminal: bool,
-) -> Result<()> {
-    if requested.is_none() && !(stdin_terminal && stderr_terminal) {
-        return Err(ManagerError::new(
-            "interactive_selection_required",
-            "non-interactive install requires --compat <compat-id>",
-        ));
-    }
-    Ok(())
-}
-
 fn select_requested(catalog: &[CompatibilityEntry], requested: &str) -> Result<usize> {
     let index = catalog
         .iter()
@@ -360,63 +359,50 @@ fn select_requested(catalog: &[CompatibilityEntry], requested: &str) -> Result<u
     Ok(index)
 }
 
-fn prompt_catalog(
-    catalog: &[CompatibilityEntry],
-    input: &mut dyn BufRead,
-    output: &mut dyn Write,
-) -> Result<usize> {
-    writeln!(output, "Available patched Codex CLI releases:")
-        .map_err(|error| ManagerError::io("write compatibility catalog", error))?;
-    for (index, entry) in catalog.iter().enumerate() {
-        writeln!(
-            output,
-            "  {}) Codex {}  {}  {}  {}",
-            index + 1,
-            entry.codex_version,
-            entry.compat_id,
-            entry.build_target,
-            entry.unavailable.as_deref().unwrap_or("installable")
-        )
-        .map_err(|error| ManagerError::io("write compatibility catalog", error))?;
-    }
-    if catalog.iter().all(|entry| entry.unavailable.is_some()) {
+fn select_automatic(catalog: &[CompatibilityEntry]) -> Result<usize> {
+    let greatest = catalog
+        .iter()
+        .filter(|entry| entry.unavailable.is_none())
+        .map(|entry| entry.patch_revision)
+        .max()
+        .ok_or_else(|| {
+            ManagerError::new(
+                "no_installable_compatibility_releases",
+                "no formal compatibility release matches this Manager target and official Codex version",
+            )
+        })?;
+    let mut matches = catalog
+        .iter()
+        .enumerate()
+        .filter(|(_, entry)| entry.unavailable.is_none() && entry.patch_revision == greatest);
+    let selected = matches
+        .next()
+        .expect("greatest revision came from catalog")
+        .0;
+    if matches.next().is_some() {
         return Err(ManagerError::new(
-            "no_installable_compatibility_releases",
-            "no formal compatibility release matches this Manager target and official Codex version",
+            "ambiguous_compatibility_revision",
+            format!("multiple installable compatibility releases use patch revision p{greatest}"),
         ));
     }
-    loop {
-        write!(output, "Select an installable release number: ")
-            .and_then(|()| output.flush())
-            .map_err(|error| ManagerError::io("write compatibility prompt", error))?;
-        let mut line = String::new();
-        if input
-            .read_line(&mut line)
-            .map_err(|error| ManagerError::io("read compatibility selection", error))?
-            == 0
-        {
-            return Err(ManagerError::new(
-                "compatibility_selection_aborted",
-                "compatibility selection ended before a choice was made",
-            ));
-        }
-        let Ok(choice) = line.trim().parse::<usize>() else {
-            writeln!(output, "Enter one of the displayed numbers.")
-                .map_err(|error| ManagerError::io("write compatibility prompt", error))?;
-            continue;
-        };
-        if choice == 0 || choice > catalog.len() {
-            writeln!(output, "Enter one of the displayed numbers.")
-                .map_err(|error| ManagerError::io("write compatibility prompt", error))?;
-            continue;
-        }
-        if let Some(reason) = &catalog[choice - 1].unavailable {
-            writeln!(output, "That release is not installable: {reason}")
-                .map_err(|error| ManagerError::io("write compatibility prompt", error))?;
-            continue;
-        }
-        return Ok(choice - 1);
-    }
+    Ok(selected)
+}
+
+fn patch_revision(compat_id: &str) -> Result<u64> {
+    let revision = compat_id
+        .rsplit_once("-p")
+        .map(|(_, revision)| revision)
+        .filter(|revision| {
+            !revision.is_empty() && revision.bytes().all(|byte| byte.is_ascii_digit())
+        })
+        .and_then(|revision| revision.parse().ok())
+        .ok_or_else(|| {
+            ManagerError::new(
+                "invalid_compatibility_release",
+                "compatibility ID must end with numeric -pN",
+            )
+        })?;
+    Ok(revision)
 }
 
 fn incompatibility_reason(
@@ -462,6 +448,27 @@ fn version_key(version: &str) -> Result<(u64, u64, u64)> {
         ));
     }
     Ok(key)
+}
+
+struct ProgressReader<'a, R> {
+    inner: R,
+    downloaded_bytes: u64,
+    total_bytes: u64,
+    progress: &'a mut dyn FnMut(InstallEvent),
+}
+
+impl<R: Read> Read for ProgressReader<'_, R> {
+    fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
+        let read = self.inner.read(buffer)?;
+        if read != 0 {
+            self.downloaded_bytes += read as u64;
+            (self.progress)(InstallEvent::ArtifactProgress {
+                downloaded_bytes: self.downloaded_bytes,
+                total_bytes: self.total_bytes,
+            });
+        }
+        Ok(read)
+    }
 }
 
 struct GitHubClient {
@@ -538,6 +545,24 @@ impl GitHubClient {
         expected_sha256: Option<&str>,
         max_size: u64,
     ) -> Result<bool> {
+        self.download_asset_with_progress(
+            release_tag,
+            asset_name,
+            destination,
+            (expected_size, expected_sha256, max_size),
+            None,
+        )
+    }
+
+    fn download_asset_with_progress(
+        &self,
+        release_tag: &str,
+        asset_name: &str,
+        destination: &Path,
+        expected: (Option<u64>, Option<&str>, u64),
+        mut progress: Option<&mut dyn FnMut(InstallEvent)>,
+    ) -> Result<bool> {
+        let (expected_size, expected_sha256, max_size) = expected;
         validate_asset_name(release_tag)?;
         validate_asset_name(asset_name)?;
         if expected_size.is_some_and(|size| size == 0 || size > max_size) {
@@ -588,7 +613,19 @@ impl GitHubClient {
                 .with_config()
                 .limit(expected_size.unwrap_or(max_size) + 1)
                 .reader();
-            io::copy(&mut reader, &mut output)
+            if let Some(progress) = progress.as_deref_mut() {
+                io::copy(
+                    &mut ProgressReader {
+                        inner: reader,
+                        downloaded_bytes: 0,
+                        total_bytes: expected_size.unwrap_or(max_size),
+                        progress,
+                    },
+                    &mut output,
+                )
+            } else {
+                io::copy(&mut reader, &mut output)
+            }
         };
         let copied = match copy_result.and_then(|size| output.flush().map(|()| size)) {
             Ok(size) => size,
@@ -610,6 +647,9 @@ impl GitHubClient {
                 "release_asset_size_mismatch",
                 format!("release asset {asset_name} has an unexpected size: {copied} bytes"),
             ));
+        }
+        if let Some(progress) = progress {
+            progress(InstallEvent::VerifyingArtifact);
         }
         let (actual, size) = sha256_file(destination)?;
         if size != copied || expected_sha256.is_some_and(|expected| actual != expected) {
@@ -1214,16 +1254,17 @@ fn network_error(context: &str, error: impl std::fmt::Display) -> ManagerError {
 mod tests {
     use super::{
         BUILD_TARGET, CSA_REPOSITORY, CompatibilityEntry, CompatibilityRelease, GitHubClient,
-        GitHubRoute, MAX_ARTIFACT_BYTES, OPENAI_REPOSITORY, ReleaseFile, UpstreamRelease,
-        compatibility_tags, country_from_alibaba_region, country_from_cloudflare_trace,
-        descriptor_assets, incompatibility_reason, parse_checksums, parse_git_refs,
-        peel_tag_from_refs, prompt_catalog, release_asset_url, require_selection_mode,
-        require_uri_host, route_from_region_probes, routed_url, select_requested, should_try_proxy,
+        GitHubRoute, MAX_ARTIFACT_BYTES, OPENAI_REPOSITORY, ProgressReader, ReleaseFile,
+        UpstreamRelease, compatibility_tags, country_from_alibaba_region,
+        country_from_cloudflare_trace, descriptor_assets, incompatibility_reason, parse_checksums,
+        parse_git_refs, patch_revision, peel_tag_from_refs, release_asset_url, require_uri_host,
+        route_from_region_probes, routed_url, select_automatic, select_requested, should_try_proxy,
         sort_catalog, stable_release_version, validate_declared_asset, validate_descriptor,
         version_key,
     };
+    use crate::manager::InstallEvent;
     use std::collections::BTreeMap;
-    use std::io::Cursor;
+    use std::io::{self, Cursor};
     use std::time::Duration;
 
     #[test]
@@ -1235,44 +1276,74 @@ mod tests {
     }
 
     #[test]
-    fn compatibility_catalog_sorts_and_selects_without_guessing() {
+    fn compatibility_catalog_uses_the_greatest_numeric_patch_revision() {
         let entry = |compat_id: &str, version: &str, target: &str| CompatibilityEntry {
             compat_id: compat_id.to_owned(),
             codex_version: version.to_owned(),
             build_target: target.to_owned(),
             version_key: version_key(version).unwrap(),
+            patch_revision: patch_revision(compat_id).unwrap(),
             csa_commit: "a".repeat(40),
             unavailable: incompatibility_reason(version, target, "0.10.0"),
         };
         let mut catalog = vec![
-            entry("rust-v0.9.0-native-join-p1", "0.9.0", "other-target"),
-            entry("rust-v0.10.0-native-join-p3", "0.10.0", BUILD_TARGET),
-            entry("rust-v0.10.0-native-join-p2", "0.10.0", BUILD_TARGET),
+            entry("rust-v0.10.0-native-join-p9", "0.10.0", BUILD_TARGET),
+            entry("rust-v0.10.0-native-join-p10", "0.10.0", BUILD_TARGET),
+            entry("rust-v0.10.0-native-join-p99", "0.10.0", "other-target"),
         ];
         sort_catalog(&mut catalog);
-        assert_eq!(catalog[0].compat_id, "rust-v0.10.0-native-join-p2");
-        assert_eq!(catalog[1].compat_id, "rust-v0.10.0-native-join-p3");
         assert_eq!(
-            select_requested(&catalog, &catalog[1].compat_id).unwrap(),
-            1
+            catalog[select_automatic(&catalog).unwrap()].compat_id,
+            "rust-v0.10.0-native-join-p10"
         );
-        assert!(select_requested(&catalog, &catalog[2].compat_id).is_err());
+        assert_eq!(
+            catalog[select_requested(&catalog, "rust-v0.10.0-native-join-p9").unwrap()].compat_id,
+            "rust-v0.10.0-native-join-p9"
+        );
+        assert!(select_requested(&catalog, "rust-v0.10.0-native-join-p99").is_err());
         assert!(select_requested(&catalog, "missing").is_err());
-        assert!(require_selection_mode(None, false, true).is_err());
-        assert!(require_selection_mode(Some(&catalog[0].compat_id), false, false).is_ok());
-
-        let mut input = Cursor::new(b"invalid\n3\n2\n");
-        let mut output = Vec::new();
         assert_eq!(
-            prompt_catalog(&catalog, &mut input, &mut output).unwrap(),
-            1
+            select_automatic(&catalog[0..1]).unwrap_err().code,
+            "no_installable_compatibility_releases"
         );
-        let output = String::from_utf8(output).unwrap();
-        assert!(output.contains("Codex 0.10.0"));
-        assert!(output.contains("requires target other-target"));
+        let tie = [
+            entry("rust-v0.10.0-native-join-p10", "0.10.0", BUILD_TARGET),
+            entry("rust-v0.10.0-orbit-p10", "0.10.0", BUILD_TARGET),
+        ];
+        assert_eq!(
+            select_automatic(&tie).unwrap_err().code,
+            "ambiguous_compatibility_revision"
+        );
+        for malformed in [
+            "rust-v0.10.0-native-join",
+            "rust-v0.10.0-native-join-p",
+            "rust-v0.10.0-native-join-px",
+        ] {
+            assert!(patch_revision(malformed).is_err());
+        }
+    }
 
-        let mut input = Cursor::new(Vec::<u8>::new());
-        assert!(prompt_catalog(&catalog[2..], &mut input, &mut Vec::new()).is_err());
+    #[test]
+    fn progress_reader_reports_cumulative_artifact_bytes() {
+        let mut events = Vec::new();
+        let copied = {
+            let mut progress = |event| events.push(event);
+            let mut reader = ProgressReader {
+                inner: Cursor::new(b"patched"),
+                downloaded_bytes: 0,
+                total_bytes: 7,
+                progress: &mut progress,
+            };
+            io::copy(&mut reader, &mut Vec::new()).unwrap()
+        };
+        assert_eq!(copied, 7);
+        assert_eq!(
+            events.last(),
+            Some(&InstallEvent::ArtifactProgress {
+                downloaded_bytes: 7,
+                total_bytes: 7,
+            })
+        );
     }
 
     #[test]

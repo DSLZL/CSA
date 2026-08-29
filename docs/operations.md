@@ -91,7 +91,9 @@ Run `doctor` before installation:
 csa doctor
 ```
 
-The JSON report includes the Manager target, resolved root, official launcher, detected native executable, official version, runtime package information, and optional compatibility checks.
+Interactive output lists ordered `PASS`, `WARN`, and `FAIL` checks for the official installation, prepared state, activation, command precedence, and optional compatibility inputs. Every warning or failure includes its impact and a safe next action. Use `csa doctor --json` to obtain the unchanged Manager target, resolved root, official runtime, command-resolution, and compatibility report.
+
+`doctor` exits `0` when checks contain only PASS/WARN, `1` when it fully diagnoses a FAIL, and `2` when invalid input, I/O, corrupt state, or another operational error prevents a complete assessment.
 
 If automatic discovery is ambiguous, use absolute paths:
 
@@ -105,17 +107,17 @@ Do not point either option at a CSA-owned executable.
 
 ## Install from formal GitHub Releases
 
-In an interactive terminal:
+In a terminal:
 
 ```powershell
 csa install
 ```
 
-CSA discovers public `compat-*` tags without using the GitHub REST API and keeps only tags whose fixed Release assets include `SHA256SUMS`. The list is sorted by Codex version and patch generation. Entries that do not match the current Manager target or installed official Codex version remain visible but cannot be selected.
+CSA discovers public `compat-*` tags without using the GitHub REST API and keeps only tags whose fixed Release assets include `SHA256SUMS`. Bare `csa install` filters to the current Manager target and installed official Codex version, then selects the greatest numeric terminal `-pN` revision. An unresolved greatest-revision tie fails closed.
 
-The selected Release is checked against its peeled tag, CSA commit, upstream Codex tag and commit, manifest, descriptor/checksum coverage, file sizes, and SHA-256 values. A mismatch stops the install.
+The selected Release is checked against its peeled tag, CSA commit, upstream Codex tag and commit, manifest, descriptor/checksum coverage, file sizes, and SHA-256 values. A mismatch stops the install. Interactive terminals show stages and artifact download progress; `--json` and redirected output emit only the final JSON document.
 
-Bare `csa install` needs interactive stdin and stderr. Scripts and CI must select an exact ID:
+To pin an older exact matching Release, select its full ID explicitly:
 
 ```powershell
 csa install --compat rust-v0.150.1-native-join-p8
@@ -194,6 +196,8 @@ csa status
 Get-Command codex -All
 codex --version
 ```
+
+Interactive output leads with the installed, active, and healthy conclusions, then the recorded official Codex version, compatibility ID, resolved `codex` path, activation detail, and any invalidation reason. It exits `0` for every successfully rendered state. Use `csa status --json` for full paths, hashes, runtime files, timestamps, and raw state.
 
 The top-level status is:
 

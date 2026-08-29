@@ -71,7 +71,7 @@ Prebuilt Manager archives and `SHA256SUMS` are available from the [`v0.1.3` Rele
 
 ### Check and install patched Codex
 
-Run these commands in an interactive terminal:
+Run these commands in a terminal:
 
 ```powershell
 csa doctor
@@ -79,9 +79,11 @@ csa install
 csa status
 ```
 
-`csa install` lists public `compat-*` Releases with complete fixed metadata in version order. It marks incompatible entries as unavailable and asks you to select an installable version. No GitHub login is required: five-second Cloudflare and Alibaba/Taobao country probes run in parallel, and either one reporting mainland China (`CN`) starts with `gh-proxy.com`; otherwise CSA starts with GitHub directly and keeps the direct-to-mirror fallback.
+`csa install` detects the installed official Codex version and platform, then automatically selects the matching public `compat-*` Release with the greatest numeric `-pN` revision. Interactive terminals show install stages plus artifact bytes, percentage, and transfer rate; redirected output stays JSON-only. No GitHub login is required: five-second Cloudflare and Alibaba/Taobao country probes run in parallel, and either one reporting mainland China (`CN`) starts with `gh-proxy.com`; otherwise CSA starts with GitHub directly and keeps the direct-to-mirror fallback.
 
-Automation must provide the exact compatibility ID:
+In an interactive terminal, `status` leads with installed, active, healthy, official-version, compatibility, and command-resolution conclusions. `doctor` prints ordered `PASS`/`WARN`/`FAIL` checks, impact and recovery guidance, then aggregate totals. Use `csa --json <command>` or `csa <command> --json` for the stable machine report; redirected stdout also selects JSON automatically.
+
+To pin an older exact matching Release, pass its full compatibility ID:
 
 ```powershell
 csa install --compat rust-v0.150.1-native-join-p8
@@ -164,17 +166,17 @@ Normal shim launches inherit the current `CODEX_HOME`, working directory, termin
 
 | Command | Purpose |
 | --- | --- |
-| `csa doctor` | Check the official installation and optional compatibility inputs without changing state |
-| `csa install` | List formal Releases and install one exact match, or install an exact local payload |
+| `csa doctor` | Diagnose the official installation, prepared state, activation, command precedence, and optional compatibility inputs without modifying state |
+| `csa install` | Automatically install the greatest exact matching Release, or install an exact local payload |
 | `csa uninstall` | Withdraw the shim and remove Manager-owned prepared state |
 | `csa prepare` | Validate or build an exact local payload without activating it |
 | `csa plug` | Publish the checksum-bound shim inside `<manager-root>/bin` |
 | `csa unplug` | Withdraw the shim while keeping prepared data |
-| `csa status` | Report prepared state, activation health, paths, and drift |
+| `csa status` | Summarize installation, activation health, command resolution, and drift |
 | `csa purge` | Remove all Manager-owned prepared, source, build, shim, and state data |
 | `csa exec --isolated` | Run the prepared binary with explicit isolated directories and record evidence |
 
-Run `csa --help` for the complete option list. Manager commands write machine-readable JSON to stdout. Invalid input and verification failures write a structured error to stderr and exit with code 2.
+Run `csa --help` for the complete option list. Interactive terminals default to Human output; `--json` and redirected stdout preserve the machine-readable schemas. `status` exits `0` for every successfully rendered state. `doctor` exits `0` for PASS/WARN-only results, `1` for diagnosed failures, and `2` for invalid or incomplete diagnostics.
 
 ## Development and documentation
 
