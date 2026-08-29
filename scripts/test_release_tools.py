@@ -1098,6 +1098,9 @@ def test_release_stream_contracts() -> None:
     assert 'grep -Fq "E404"' in npm_workflow
     assert npm_workflow.count('npm publish "$tarball"') == 1
     assert "--provenance" in npm_workflow and "--access public" in npm_workflow
+    assert 'if [[ "$VERSION" == "0.1.4" ]]' in npm_workflow
+    assert 'provenance="--provenance=false"' in npm_workflow
+    assert '"$provenance"' in npm_workflow
     assert "NODE_AUTH_TOKEN" not in npm_workflow and "secrets." not in npm_workflow
     publish_order = (
         'publish_one "@dslzl/csa-win32-x64"',

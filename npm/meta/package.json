@@ -3,6 +3,10 @@
   "version": "0.1.4",
   "description": "Fail-closed manager for a side-by-side CSA build",
   "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/DSLZL/CSA"
+  },
   "bin": {
     "csa": "bin/csa.js"
   },

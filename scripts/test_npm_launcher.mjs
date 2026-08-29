@@ -75,6 +75,31 @@ async function testProcessGroupSignal(env, cwd) {
 
 const temporary = realpathSync(mkdtempSync(path.join(os.tmpdir(), 'csa-launcher-')));
 try {
+  const stagedRoot = path.join(temporary, 'stage');
+  const staged = spawnSync(
+    process.execPath,
+    [
+      path.resolve(repository, 'scripts', 'stage_npm_packages.mjs'),
+      '--out',
+      stagedRoot,
+      '--binary',
+      `${selected.id}=${process.execPath}`,
+    ],
+    { encoding: 'utf8' },
+  );
+  assert.equal(staged.status, 0, staged.stderr || staged.stdout);
+  const sourceRepository = { type: 'git', url: 'https://github.com/DSLZL/CSA' };
+  assert.deepEqual(
+    JSON.parse(readFileSync(path.join(stagedRoot, 'meta', 'package.json'), 'utf8')).repository,
+    sourceRepository,
+  );
+  assert.deepEqual(
+    JSON.parse(
+      readFileSync(path.join(stagedRoot, 'platforms', selected.id, 'package.json'), 'utf8'),
+    ).repository,
+    sourceRepository,
+  );
+
   const packageRoot = path.join(temporary, 'node_modules', ...selected.package.split('/'));
   const binary = path.resolve(packageRoot, selected.binary);
   mkdirSync(path.dirname(binary), { recursive: true });

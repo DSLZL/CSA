@@ -167,7 +167,9 @@ npm trust github @dslzl/csa --repo DSLZL/CSA --file publish-npm.yml --allow-publ
 
 That bootstrap requires a maintainer npm login once. After publishing a formal `vX.Y.Z` Release, `release-csa.yml` explicitly dispatches `.github/workflows/publish-npm.yml`; the workflow's `release: published` trigger also covers formal Releases created outside the Manager workflow. Publication uses GitHub OIDC, so no npm token, OTP, or local login is needed for each release.
 
-The workflow downloads only the selected formal, non-prerelease Manager Release; requires its exact 12-asset inventory; validates `SHA256SUMS` coverage and contents; verifies every npm tarball name and version; and publishes with provenance. It publishes the five platform packages before the meta package. A rerun skips an existing version only when the registry integrity exactly matches the Release tarball, so a partial publication can be resumed without overwriting immutable npm versions.
+The workflow downloads only the selected formal, non-prerelease Manager Release; requires its exact 12-asset inventory; validates `SHA256SUMS` coverage and contents; and verifies every npm tarball name and version. It publishes the five platform packages before the meta package. A rerun skips an existing version only when the registry integrity exactly matches the Release tarball, so a partial publication can be resumed without overwriting immutable npm versions.
+
+Current package manifests bind `repository.url` to `https://github.com/DSLZL/CSA`, allowing npm to validate Sigstore provenance for future releases. The immutable `v0.1.4` tarballs predate that metadata, so only the exact `0.1.4` recovery path explicitly disables the provenance statement; authentication still uses the same npm Trusted Publishing OIDC exchange.
 
 To publish an existing formal Release that predates the workflow, or to resume a partial run:
 

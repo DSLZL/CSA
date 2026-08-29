@@ -56,6 +56,12 @@ const metaManifest = JSON.parse(readFileSync(resolve(metaSource, 'package.json')
 if (matrix.schema !== 1 || !Array.isArray(matrix.platforms)) {
   die('unsupported platform matrix');
 }
+if (
+  metaManifest.repository?.type !== 'git' ||
+  metaManifest.repository?.url !== 'https://github.com/DSLZL/CSA'
+) {
+  die('meta repository does not match the npm provenance source');
+}
 const expectedOptional = Object.fromEntries(
   matrix.platforms.map((platform) => [platform.package, metaManifest.version]),
 );
@@ -128,6 +134,7 @@ for (const { platform, sourceReal } of inputs) {
     version: metaManifest.version,
     description: `Rust manager binary for ${platform.target}`,
     license: metaManifest.license,
+    repository: metaManifest.repository,
     os: [platform.os],
     cpu: [platform.arch],
     files: ['bin/', 'README.md', 'LICENSE', 'THIRD_PARTY_NOTICES.md'],

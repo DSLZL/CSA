@@ -98,6 +98,13 @@ jobs:
         run: |
           set -euo pipefail
 
+          provenance="--provenance"
+          # ponytail: v0.1.4's immutable tarballs lack repository.url; keep this exact-version recovery exception only for that Release.
+          if [[ "$VERSION" == "0.1.4" ]]; then
+            provenance="--provenance=false"
+            echo "Publishing immutable v0.1.4 assets through OIDC without Sigstore provenance."
+          fi
+
           local_integrity() {
             node -e 'const fs=require("node:fs"),crypto=require("node:crypto"); process.stdout.write("sha512-"+crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"))' "$1"
           }
@@ -135,7 +142,7 @@ jobs:
             fi
 
             npm publish "$tarball" \
-              --provenance \
+              "$provenance" \
               --access public \
               --registry=https://registry.npmjs.org
 
