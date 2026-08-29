@@ -33,6 +33,7 @@ SAFE_VALUE = re.compile(r"[A-Za-z0-9][A-Za-z0-9._-]*\Z")
 SHA1 = re.compile(r"[0-9a-f]{40}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
 SKIP_TRAILER = re.compile(r"Changelog:\s*skip\Z", re.IGNORECASE)
+REPOSITORY_URL = "https://github.com/DSLZL/CSA"
 
 MANAGER_PREFIXES = (
     "src/",
@@ -479,7 +480,10 @@ def render_changelog(
     title = "Changelog" if stream == "manager" else "Full Changelog"
     lines = [f"## {title}", ""]
     if previous_tag:
-        lines.extend([f"Full Changelog: `{previous_tag}...{current_tag}`", ""])
+        comparison = f"{previous_tag}...{current_tag}"
+        lines.extend(
+            [f"Full Changelog: [{comparison}]({REPOSITORY_URL}/compare/{comparison})", ""]
+        )
     else:
         lines.extend([f"Initial release history through `{current_tag}`.", ""])
     for commit in commits:
@@ -489,20 +493,6 @@ def render_changelog(
         lines.append(f"- `{commit.short}` {markdown(commit.subject)}")
     lines.append("")
     return lines
-
-
-def manager_information() -> list[str]:
-    return [
-        "---",
-        "",
-        "## Release Information",
-        "",
-        "This Release contains the CSA manager distribution only.",
-        "Each supported platform is published as an independent manager archive and verified npm package tarball.",
-        "The @dslzl/csa meta package tarball is included for exact npm publication.",
-        "Patched Codex CLI builds are published separately under `compat-<compat_id>` Releases.",
-        "",
-    ]
 
 
 def compat_information(
@@ -515,8 +505,6 @@ def compat_information(
 ) -> list[str]:
     revision = parse_compat_id(compat_id)[2]
     return [
-        "---",
-        "",
         "## Compatibility",
         "",
         f"- Compatibility ID: `{compat_id}`",
@@ -530,12 +518,6 @@ def compat_information(
         f"- Production executable SHA-256: `{artifact_sha256}`",
         "- Built independently from the reviewed upstream source by GitHub Actions.",
         "- Exact compatibility payload, provenance descriptor, and checksums are included.",
-        "",
-        "## Release Information",
-        "",
-        "This compatibility Release contains exactly one Codex executable product: the patched Codex CLI.",
-        "It does not publish Codex App, Codex Desktop, app-server, exec-server, MCP server, or other Codex binaries.",
-        "The remaining assets are the fail-closed compatibility payload, provenance descriptor, and checksums required by CSA Manager.",
         "",
     ]
 
@@ -585,8 +567,7 @@ def generate(
             raise ReleaseNotesError("Manager generation requires only --version")
         previous_tag = previous_manager_tag(repository, current_commit, version)
         current_tag = f"v{version}"
-        heading = f"# CSA v{version}"
-        fixed = manager_information()
+        fixed: list[str] = []
     elif stream == "compat":
         if version is not None or any(
             value is None
@@ -608,7 +589,6 @@ def generate(
             raise ReleaseNotesError("artifact SHA-256 must be lowercase 64-hex")
         previous_tag = previous_compat_tag(repository, current_commit, compat_id)
         current_tag = f"compat-{compat_id}"
-        heading = f"# CSA Patched Codex CLI {codex_version}"
         fixed = compat_information(
             compat_id,
             codex_version,
@@ -632,15 +612,15 @@ def generate(
     )
     dynamic, visible = render_dynamic(stream, commits)
     changelog = render_changelog(stream, commits, previous_tag, current_tag)
-    text = "\n".join([heading, "", *dynamic, *changelog, *fixed]).rstrip() + "\n"
+    text = "\n".join([*dynamic, *changelog, *fixed]).rstrip() + "\n"
     if "No user-facing changes in this release." not in text and visible == 0:
         raise ReleaseNotesError("release notes contain no categorized changes or explicit empty state")
-    if text.index("## Release Information") <= text.index(
-        "## Changelog" if stream == "manager" else "## Full Changelog"
-    ):
-        raise ReleaseNotesError("fixed release information must follow dynamic history")
-    if previous_tag and f"`{previous_tag}...{current_tag}`" not in text:
-        raise ReleaseNotesError("release notes lost the selected comparison range")
+    if stream == "compat" and text.index("## Compatibility") <= text.index("## Full Changelog"):
+        raise ReleaseNotesError("compatibility facts must follow dynamic history")
+    if previous_tag:
+        comparison = f"{previous_tag}...{current_tag}"
+        if f"[{comparison}]({REPOSITORY_URL}/compare/{comparison})" not in text:
+            raise ReleaseNotesError("release notes lost the selected comparison link")
     if not previous_tag and f"`{current_tag}`" not in text:
         raise ReleaseNotesError("first-release notes lost the current release tag")
     write_atomic(output, text)

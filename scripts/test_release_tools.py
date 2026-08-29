@@ -1140,12 +1140,18 @@ def test_release_stream_contracts() -> None:
         "python scripts/generate_release_notes.py"
     )
     for fact in (
-        "This Release contains the CSA manager distribution only.",
-        "This compatibility Release contains exactly one Codex executable product",
         "Production executable SHA-256",
         "Built independently from the reviewed upstream source",
     ):
         assert fact in generator
+    for obsolete in (
+        "## Release Information",
+        "This Release contains the CSA manager distribution only.",
+        "This compatibility Release contains exactly one Codex executable product",
+        'heading = f"# CSA',
+    ):
+        assert obsolete not in generator
+    assert "REPOSITORY_URL}/compare/{comparison}" in generator
     for label in (
         "feature",
         "enhancement",
@@ -1452,7 +1458,11 @@ def test_release_notes(root: Path) -> None:
     )
     manager = manager_output.read_text(encoding="utf-8")
     assert manager_result["previous_tag"] == "v1.0.0"
-    assert "`v1.0.0...v1.1.0`" in manager
+    assert (
+        "[v1.0.0...v1.1.0](https://github.com/DSLZL/CSA/compare/v1.0.0...v1.1.0)"
+        in manager
+    )
+    assert not manager.startswith("# CSA")
     manager_dynamic = manager.split("## Changelog", 1)[0]
     assert manager_dynamic.count("Choose \\[safe\\] \\*mode\\*.") == 1
     assert "\\# keep heading literal." in manager_dynamic
@@ -1470,7 +1480,8 @@ def test_release_notes(root: Path) -> None:
     assert "Add square orbit" not in manager
     for hidden in ("skipped feature", "hidden manager test", "hidden cleanup"):
         assert hidden not in manager
-    assert manager.index("## CLI") < manager.index("## Release Information")
+    assert manager.index("## CLI") < manager.index("## Changelog")
+    assert "## Release Information" not in manager
     assert manager.count("feat(cli): choose \\[safe\\] \\*mode\\*") == 1
     assert manager.count("feat(cli): CHOOSE \\[safe\\] \\*mode\\*") == 1
 
@@ -1489,7 +1500,14 @@ def test_release_notes(root: Path) -> None:
     )
     compat = compat_output.read_text(encoding="utf-8")
     assert compat_result["previous_tag"] == "compat-rust-v1.2.3-native-join-p2"
-    assert "`compat-rust-v1.2.3-native-join-p2...compat-rust-v1.2.3-native-join-p3`" in compat
+    assert (
+        "[compat-rust-v1.2.3-native-join-p2...compat-rust-v1.2.3-native-join-p3]"
+        "(https://github.com/DSLZL/CSA/compare/"
+        "compat-rust-v1.2.3-native-join-p2...compat-rust-v1.2.3-native-join-p3)"
+        in compat
+    )
+    assert not compat.startswith("# CSA")
+    assert "## Release Information" not in compat
     assert "## Patch Changes" in compat and "## Bug Fixes" in compat
     assert "## Build & Release" in compat
     assert "## Documentation" not in compat and "## Improvements" not in compat
