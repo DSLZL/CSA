@@ -4,6 +4,7 @@ pub mod compat;
 pub mod detect;
 pub mod error;
 pub mod hash;
+pub mod i18n;
 pub mod isolation;
 pub mod manager;
 pub mod online;

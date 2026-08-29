@@ -1,4 +1,5 @@
 use crate::error::{ManagerError, Result};
+use crate::i18n::Language;
 use crate::isolation::IsolationRequest;
 use crate::manager::{
     DoctorOptions, ExecOptions, InstallOptions, OnlineInstallOptions, PrepareOptions,
@@ -21,6 +22,25 @@ csa purge [--manager-root PATH]
 csa exec --isolated [--manager-root PATH] --codex-home PATH --cwd PATH --logs-dir PATH --state-dir PATH --record PATH [--npm-prefix PATH] -- [CODEX_ARGS...]
 
 Global option: --json writes machine-readable output and may appear before or after the command.";
+
+pub const USAGE_ZH: &str = "\
+csa [--json] <命令>
+
+csa doctor [--manager-root PATH] [--official PATH] [--official-native PATH] [--manifest PATH]
+csa install [--yes] [--manager-root PATH] [--official PATH] [--official-native PATH] [--compat ID | --manifest PATH (--artifact PATH | --source PATH)]
+csa uninstall [--manager-root PATH]
+csa prepare [--manager-root PATH] [--official PATH] [--official-native PATH] --manifest PATH (--artifact PATH | --source PATH)
+csa plug [--manager-root PATH]
+csa unplug [--manager-root PATH]
+csa status [--manager-root PATH]
+csa purge [--manager-root PATH]
+csa exec --isolated [--manager-root PATH] --codex-home PATH --cwd PATH --logs-dir PATH --state-dir PATH --record PATH [--npm-prefix PATH] -- [CODEX_ARGS...]
+
+全局选项：--json 输出机器可读内容，可放在命令前或命令后。";
+
+pub fn usage(language: Language) -> &'static str {
+    language.text(USAGE, USAGE_ZH)
+}
 
 #[derive(Clone, Debug)]
 pub enum Cli {
@@ -459,11 +479,19 @@ fn set_json(explicit_json: &mut bool) -> Result<()> {
 
 #[cfg(test)]
 mod tests {
-    use super::{Cli, InstallOptions, Invocation, json_requested};
+    use super::{Cli, InstallOptions, Invocation, json_requested, usage};
+    use crate::i18n::Language;
     use std::ffi::OsString;
 
     fn parse(args: &[&str]) -> crate::error::Result<Cli> {
         Cli::parse(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn help_uses_the_selected_language_without_changing_commands() {
+        assert!(usage(Language::English).contains("Global option:"));
+        assert!(usage(Language::Chinese).contains("全局选项："));
+        assert!(usage(Language::Chinese).contains("csa install [--yes]"));
     }
 
     fn invocation(args: &[&str]) -> crate::error::Result<Invocation> {

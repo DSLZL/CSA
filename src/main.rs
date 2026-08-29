@@ -5,8 +5,9 @@ use crate::ui::{
     pick_install_candidate, streams_are_interactive, write_doctor_error, write_doctor_report,
     write_error, write_install_cancelled, write_report,
 };
-use csa::cli::{Cli, Invocation, USAGE, json_requested};
+use csa::cli::{Cli, Invocation, json_requested, usage};
 use csa::error::ManagerError;
+use csa::i18n::Language;
 use csa::manager::{
     InstallEvent, InstallOptions, OfflineArtifactProvider, doctor, exec, install_with_progress,
     install_with_progress_and_selector, prepare, status, uninstall,
@@ -136,7 +137,7 @@ fn run() -> i32 {
             };
         }
         Cli::Help => {
-            println!("{USAGE}");
+            println!("{}", usage(Language::detected()));
             return 0;
         }
         Cli::Version => {

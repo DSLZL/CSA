@@ -4,6 +4,7 @@ use crossterm::terminal::{Clear, ClearType, disable_raw_mode, enable_raw_mode, s
 use crossterm::{SynchronizedUpdate, execute, queue};
 use csa::activation::{CommandResolution, PlugReport, PurgeReport, UnplugReport};
 use csa::error::{ManagerError, Result};
+use csa::i18n::Language;
 use csa::manager::{
     DoctorReport, InstallEvent, InstallReport, PrepareReport, StatusReport, UninstallReport,
 };
@@ -75,6 +76,7 @@ pub(crate) fn streams_are_interactive() -> bool {
 
 pub(crate) struct InstallProgress {
     mode: OutputMode,
+    language: Language,
     download_started: Option<Instant>,
     last_draw: Option<Instant>,
     line_active: bool,
@@ -85,6 +87,7 @@ impl InstallProgress {
     pub(crate) fn new(mode: OutputMode, picker: bool) -> Self {
         Self {
             mode,
+            language: Language::detected(),
             download_started: None,
             last_draw: None,
             line_active: false,
@@ -146,7 +149,9 @@ impl InstallProgress {
                     .max(0.001);
             write!(
                 writer,
-                "\rDownloading patched Codex: {percent:>3}% ({:.1}/{:.1} MiB, {rate:.1} MiB/s)    ",
+                "\r{}: {percent:>3}% ({:.1}/{:.1} MiB, {rate:.1} MiB/s)    ",
+                self.language
+                    .text("Downloading patched Codex", "正在下载补丁版 Codex"),
                 downloaded_bytes as f64 / mib,
                 total_bytes as f64 / mib,
             )?;
@@ -155,23 +160,68 @@ impl InstallProgress {
 
         self.finish_to(writer)?;
         match event {
-            InstallEvent::DetectingOfficial => writeln!(writer, "Detecting official Codex..."),
+            InstallEvent::DetectingOfficial => writeln!(
+                writer,
+                "{}",
+                self.language
+                    .text("Detecting official Codex...", "正在检测官方 Codex……")
+            ),
             InstallEvent::DiscoveringCompatibility => {
-                writeln!(writer, "Discovering compatible releases...")
+                writeln!(
+                    writer,
+                    "{}",
+                    self.language
+                        .text("Discovering compatible releases...", "正在查找兼容版本……")
+                )
             }
             InstallEvent::SelectingCompatibility => Ok(()),
-            InstallEvent::SelectedCompatibility { compat_id } => {
-                writeln!(writer, "Selected compatibility: {compat_id}")
-            }
-            InstallEvent::VerifyingArtifact => {
-                writeln!(writer, "Verifying downloaded artifact...")
-            }
-            InstallEvent::Preparing => writeln!(writer, "Preparing patched Codex..."),
-            InstallEvent::Activating => writeln!(writer, "Activating patched Codex..."),
-            InstallEvent::Activated => writeln!(writer, "Patched Codex shim activated."),
-            InstallEvent::RollingBack => writeln!(writer, "Rolling back activation..."),
+            InstallEvent::SelectedCompatibility { compat_id } => writeln!(
+                writer,
+                "{}: {compat_id}",
+                self.language
+                    .text("Selected compatibility", "已选择兼容版本")
+            ),
+            InstallEvent::VerifyingArtifact => writeln!(
+                writer,
+                "{}",
+                self.language
+                    .text("Verifying downloaded artifact...", "正在验证下载的产物……")
+            ),
+            InstallEvent::Preparing => writeln!(
+                writer,
+                "{}",
+                self.language
+                    .text("Preparing patched Codex...", "正在准备补丁版 Codex……")
+            ),
+            InstallEvent::Activating => writeln!(
+                writer,
+                "{}",
+                self.language
+                    .text("Activating patched Codex...", "正在激活补丁版 Codex……")
+            ),
+            InstallEvent::Activated => writeln!(
+                writer,
+                "{}",
+                self.language.text(
+                    "Patched Codex shim activated.",
+                    "补丁版 Codex 启动器已激活。"
+                )
+            ),
+            InstallEvent::RollingBack => writeln!(
+                writer,
+                "{}",
+                self.language
+                    .text("Rolling back activation...", "正在回滚激活操作……")
+            ),
             InstallEvent::PrioritizingCommand => {
-                writeln!(writer, "Prioritizing and verifying the codex command...")
+                writeln!(
+                    writer,
+                    "{}",
+                    self.language.text(
+                        "Prioritizing and verifying the codex command...",
+                        "正在提高 codex 命令优先级并进行验证……"
+                    )
+                )
             }
             InstallEvent::Completed => Ok(()),
             InstallEvent::ArtifactProgress { .. } => unreachable!(),
@@ -336,11 +386,20 @@ impl<'a> PickerState<'a> {
         }
     }
 
-    fn render(&self, width: u16) -> Vec<String> {
+    fn render(&self, width: u16, language: Language) -> Vec<String> {
         let end = min(self.viewport + PICKER_ROWS, self.visible.len());
         let mut lines = vec![
-            "Select a patched Codex CLI version".to_owned(),
-            format!("  {} newer hidden", self.viewport),
+            language
+                .text(
+                    "Select a patched Codex CLI version",
+                    "选择补丁版 Codex CLI 版本",
+                )
+                .to_owned(),
+            format!(
+                "  {} {}",
+                self.viewport,
+                language.text("newer hidden", "个较新版本已隐藏")
+            ),
         ];
         for row in 0..PICKER_ROWS {
             let position = self.viewport + row;
@@ -352,10 +411,10 @@ impl<'a> PickerState<'a> {
                     let selected = if position == self.selected { '>' } else { ' ' };
                     let mut markers = Vec::new();
                     if candidate.recommended {
-                        markers.push("Recommended");
+                        markers.push(language.text("Recommended", "推荐"));
                     }
                     if self.installed == Some(candidate.compat_id.as_str()) {
-                        markers.push("Installed");
+                        markers.push(language.text("Installed", "已安装"));
                     }
                     let suffix = if markers.is_empty() {
                         String::new()
@@ -370,21 +429,35 @@ impl<'a> PickerState<'a> {
             lines.push(line);
         }
         lines.push(format!(
-            "  {} older hidden",
-            self.visible.len().saturating_sub(end)
+            "  {} {}",
+            self.visible.len().saturating_sub(end),
+            language.text("older hidden", "个较旧版本已隐藏")
         ));
         lines.push(if self.search_active {
-            format!("Search: {}_", self.query)
+            format!("{}: {}_", language.text("Search", "搜索"), self.query)
         } else {
-            "Search: / to filter".to_owned()
+            language
+                .text("Search: / to filter", "搜索：按 / 筛选")
+                .to_owned()
         });
         lines.push(
             self.visible
                 .get(self.selected)
                 .map(|index| format!("ID: {}", self.candidates[*index].compat_id))
-                .unwrap_or_else(|| "No matching versions".to_owned()),
+                .unwrap_or_else(|| {
+                    language
+                        .text("No matching versions", "没有匹配的版本")
+                        .to_owned()
+                }),
         );
-        lines.push("Up/Down move  PgUp/PgDn page  Enter install  Esc cancel".to_owned());
+        lines.push(
+            language
+                .text(
+                    "Up/Down move  PgUp/PgDn page  Enter install  Esc cancel",
+                    "上/下移动  PgUp/PgDn 翻页  Enter 安装  Esc 取消",
+                )
+                .to_owned(),
+        );
         lines
             .into_iter()
             .map(|line| line.chars().take(width as usize).collect())
@@ -529,11 +602,12 @@ pub(crate) fn pick_install_candidate(
     candidates: &[InstallCandidate],
     installed: Option<&str>,
 ) -> Result<String> {
+    let language = Language::detected();
     let mut state = PickerState::new(candidates, installed);
     let mut terminal = PickerTerminal::enter()?;
     loop {
         let width = size().map(|(width, _)| width).unwrap_or(100).max(1);
-        terminal.draw(&state.render(width))?;
+        terminal.draw(&state.render(width, language))?;
         let Event::Key(key) =
             event::read().map_err(|error| ManagerError::io("read install picker input", error))?
         else {
@@ -606,7 +680,7 @@ pub(crate) fn pick_install_candidate(
                 let _ = terminal.leave();
                 return Err(ManagerError::new(
                     INSTALLATION_CANCELLED,
-                    "Installation cancelled.",
+                    language.text("Installation cancelled.", "安装已取消。"),
                 ));
             }
         }
@@ -614,7 +688,11 @@ pub(crate) fn pick_install_candidate(
 }
 
 pub(crate) fn write_install_cancelled() -> i32 {
-    let _ = writeln!(io::stderr().lock(), "Installation cancelled.");
+    let _ = writeln!(
+        io::stderr().lock(),
+        "{}",
+        Language::detected().text("Installation cancelled.", "安装已取消。")
+    );
     130
 }
 
@@ -627,12 +705,12 @@ fn resolve_output_mode(explicit_json: bool, stdout_is_terminal: bool) -> OutputM
 }
 
 pub(crate) trait HumanReport {
-    fn write_human(&self, writer: &mut dyn Write) -> io::Result<()>;
+    fn write_human(&self, writer: &mut dyn Write, language: Language) -> io::Result<()>;
 }
 
 pub(crate) fn write_report<T: HumanReport + Serialize>(mode: OutputMode, report: &T) -> Result<()> {
     let stdout = io::stdout();
-    write_report_to(&mut stdout.lock(), mode, report)
+    write_report_to(&mut stdout.lock(), mode, Language::detected(), report)
 }
 
 pub(crate) fn write_doctor_report(
@@ -641,23 +719,30 @@ pub(crate) fn write_doctor_report(
     status: Option<&StatusReport>,
 ) -> Result<i32> {
     let stdout = io::stdout();
-    write_doctor_report_to(&mut stdout.lock(), mode, report, status)
+    write_doctor_report_to(
+        &mut stdout.lock(),
+        mode,
+        Language::detected(),
+        report,
+        status,
+    )
 }
 
 pub(crate) fn write_doctor_error(mode: OutputMode, error: &ManagerError) -> i32 {
     let stderr = io::stderr();
-    write_doctor_error_to(&mut stderr.lock(), mode, error).unwrap_or(2)
+    write_doctor_error_to(&mut stderr.lock(), mode, Language::detected(), error).unwrap_or(2)
 }
 
 fn write_report_to<T: HumanReport + Serialize>(
     writer: &mut dyn Write,
     mode: OutputMode,
+    language: Language,
     report: &T,
 ) -> Result<()> {
     match mode {
         OutputMode::Json => write_json(writer, report),
         OutputMode::Human => report
-            .write_human(writer)
+            .write_human(writer, language)
             .map_err(|error| ManagerError::io("write human output", error)),
     }
 }
@@ -665,6 +750,7 @@ fn write_report_to<T: HumanReport + Serialize>(
 fn write_doctor_report_to(
     writer: &mut dyn Write,
     mode: OutputMode,
+    language: Language,
     report: &DoctorReport,
     status: Option<&StatusReport>,
 ) -> Result<i32> {
@@ -678,8 +764,8 @@ fn write_doctor_report_to(
             "status data is required for Human doctor output",
         )
     })?;
-    let assessment = doctor_assessment(report, status);
-    write_doctor_assessment(writer, &assessment)
+    let assessment = doctor_assessment(report, status, language);
+    write_doctor_assessment(writer, &assessment, language)
         .map_err(|error| ManagerError::io("write human doctor output", error))?;
     Ok(assessment.exit_code())
 }
@@ -687,35 +773,56 @@ fn write_doctor_report_to(
 fn write_doctor_error_to(
     writer: &mut dyn Write,
     mode: OutputMode,
+    language: Language,
     error: &ManagerError,
 ) -> Result<i32> {
     let diagnosed = is_diagnosed_doctor_error(error.code);
     if mode == OutputMode::Json || !diagnosed {
-        write_error_to(writer, mode, Operation::Doctor, error)?;
+        write_error_to(writer, mode, language, Operation::Doctor, error)?;
     } else {
-        writeln!(writer, "CSA doctor")
-            .and_then(|()| writeln!(writer, "FAIL Official Codex: {}", error.message))
-            .and_then(|()| {
-                writeln!(
-                    writer,
-                    "     Impact: CSA cannot safely verify the official Codex installation."
+        (|| -> io::Result<()> {
+            writeln!(writer, "CSA doctor")?;
+            writeln!(
+                writer,
+                "{} {}: {}",
+                language.text("FAIL", "失败"),
+                language.text("Official Codex", "官方 Codex"),
+                error.message
+            )?;
+            writeln!(
+                writer,
+                "     {}: {}",
+                language.text("Impact", "影响"),
+                language.text(
+                    "CSA cannot safely verify the official Codex installation.",
+                    "CSA 无法安全验证官方 Codex 安装。"
                 )
-            })
-            .and_then(|()| {
-                writeln!(
-                    writer,
-                    "     Safety: the official Codex installation was not modified."
+            )?;
+            writeln!(
+                writer,
+                "     {}: {}",
+                language.text("Safety", "安全性"),
+                language.text(
+                    "the official Codex installation was not modified.",
+                    "官方 Codex 安装未被修改。"
                 )
-            })
-            .and_then(|()| {
-                writeln!(
-                    writer,
-                    "     Next: {}",
-                    recovery_hint(Operation::Doctor, error.code)
+            )?;
+            writeln!(
+                writer,
+                "     {}: {}",
+                language.text("Next", "下一步"),
+                recovery_hint(language, Operation::Doctor, error.code)
+            )?;
+            writeln!(
+                writer,
+                "{}",
+                language.text(
+                    "Summary: 0 passed, 0 warnings, 1 failed",
+                    "汇总：0 项通过，0 项警告，1 项失败"
                 )
-            })
-            .and_then(|()| writeln!(writer, "Summary: 0 passed, 0 warnings, 1 failed"))
-            .map_err(|error| ManagerError::io("write human doctor error", error))?;
+            )
+        })()
+        .map_err(|error| ManagerError::io("write human doctor error", error))?;
     }
     Ok(if diagnosed { 1 } else { 2 })
 }
@@ -723,13 +830,14 @@ fn write_doctor_error_to(
 pub(crate) fn write_error(mode: OutputMode, operation: Operation, error: &ManagerError) -> i32 {
     let stderr = io::stderr();
     let mut lock = stderr.lock();
-    let _ = write_error_to(&mut lock, mode, operation, error);
+    let _ = write_error_to(&mut lock, mode, Language::detected(), operation, error);
     2
 }
 
 fn write_error_to(
     writer: &mut dyn Write,
     mode: OutputMode,
+    language: Language,
     operation: Operation,
     error: &ManagerError,
 ) -> Result<()> {
@@ -744,35 +852,61 @@ fn write_error_to(
             });
             write_json(writer, &envelope)
         }
-        OutputMode::Human => write_human_error(writer, operation, error)
+        OutputMode::Human => write_human_error(writer, language, operation, error)
             .map_err(|error| ManagerError::io("write human error", error)),
     }
 }
 
 fn write_human_error(
     writer: &mut dyn Write,
+    language: Language,
     operation: Operation,
     error: &ManagerError,
 ) -> io::Result<()> {
-    writeln!(writer, "ERROR [{}] {}", error.code, error.message)?;
     writeln!(
         writer,
-        "Safety: the official Codex installation was not modified."
+        "{} [{}] {}",
+        language.text("ERROR", "错误"),
+        error.code,
+        error.message
+    )?;
+    writeln!(
+        writer,
+        "{}: {}",
+        language.text("Safety", "安全性"),
+        language.text(
+            "the official Codex installation was not modified.",
+            "官方 Codex 安装未被修改。"
+        )
     )?;
     if operation == Operation::Install {
         let state = if error.code == "output_error" {
-            "Installation may have completed; run `csa status --json` to confirm the active state."
+            language.text(
+                "Installation may have completed; run `csa status --json` to confirm the active state.",
+                "安装可能已经完成；请运行 `csa status --json` 确认激活状态。",
+            )
         } else if matches!(
             error.code,
             "install_rollback_failed" | "path_activation_rollback_failed"
         ) {
-            "Activation rollback did not complete; inspect CSA state before retrying."
+            language.text(
+                "Activation rollback did not complete; inspect CSA state before retrying.",
+                "激活回滚未完成；重试前请检查 CSA 状态。",
+            )
         } else {
-            "The failed install did not keep a new CSA activation."
+            language.text(
+                "The failed install did not keep a new CSA activation.",
+                "失败的安装没有保留新的 CSA 激活状态。",
+            )
         };
-        writeln!(writer, "State: {state}")?;
+        writeln!(writer, "{}: {state}", language.text("State", "状态"))?;
     }
-    writeln!(writer, "Recovery: {}", recovery_hint(operation, error.code))
+    writeln!(
+        writer,
+        "{}: {}",
+        language.text("Recovery", "恢复建议"),
+        recovery_hint(language, operation, error.code)
+    )
 }
 
 fn write_json(writer: &mut dyn Write, value: &impl Serialize) -> Result<()> {
@@ -782,41 +916,61 @@ fn write_json(writer: &mut dyn Write, value: &impl Serialize) -> Result<()> {
     writeln!(writer).map_err(|error| ManagerError::io("write JSON output", error))
 }
 
-fn recovery_hint(operation: Operation, code: &str) -> &'static str {
+fn recovery_hint(language: Language, operation: Operation, code: &str) -> &'static str {
     match code {
-        "invalid_cli" => "Run `csa --help` and retry with valid options.",
-        "official_not_found" => {
-            "Install official `@openai/codex` or put its launcher on PATH, then retry."
-        }
+        "invalid_cli" => language.text(
+            "Run `csa --help` and retry with valid options.",
+            "请运行 `csa --help`，然后使用有效选项重试。",
+        ),
+        "official_not_found" => language.text(
+            "Install official `@openai/codex` or put its launcher on PATH, then retry.",
+            "请安装官方 `@openai/codex`，或将其启动器加入 PATH，然后重试。",
+        ),
         "official_runtime_incomplete"
         | "official_runtime_ambiguous"
-        | "official_version_mismatch" => {
-            "Reinstall the official `@openai/codex` package, then retry."
+        | "official_version_mismatch" => language.text(
+            "Reinstall the official `@openai/codex` package, then retry.",
+            "请重新安装官方 `@openai/codex` 包，然后重试。",
+        ),
+        "official_in_manager_root" => language.text(
+            "Use an official Codex installation outside the CSA manager root.",
+            "请使用位于 CSA 管理目录之外的官方 Codex 安装。",
+        ),
+        "ambiguous_compatibility_revision" => language.text(
+            "Retry with `csa install --compat <compat-id>` to select an exact release.",
+            "请使用 `csa install --compat <compat-id>` 选择精确版本后重试。",
+        ),
+        "no_installable_compatibility_releases" => language.text(
+            "Install an official Codex version with an exact CSA compatibility release, then retry.",
+            "请安装存在精确 CSA 兼容版本的官方 Codex，然后重试。",
+        ),
+        "not_prepared" | "state_upgrade_required" => {
+            language.text("Run `csa install` again.", "请重新运行 `csa install`。")
         }
-        "official_in_manager_root" => {
-            "Use an official Codex installation outside the CSA manager root."
-        }
-        "ambiguous_compatibility_revision" => {
-            "Retry with `csa install --compat <compat-id>` to select an exact release."
-        }
-        "no_installable_compatibility_releases" => {
-            "Install an official Codex version with an exact CSA compatibility release, then retry."
-        }
-        "not_prepared" | "state_upgrade_required" => "Run `csa install` again.",
-        "unsupported_official_version" | "unsupported_build_target" => {
-            "Choose a release that exactly matches the installed official Codex and target."
-        }
-        "github_api_forbidden" | "network_error" => {
-            "Check the network or proxy, then retry the command."
-        }
-        "path_activation_failed" | "path_activation_rollback_failed" => {
-            "Open a new terminal and run `csa doctor --json` before retrying."
-        }
-        "install_rollback_failed" => "Run `csa doctor --json` before retrying installation.",
-        _ if matches!(operation, Operation::Doctor | Operation::Status) => {
-            "Retry with `--json` for machine-readable diagnostics."
-        }
-        _ => "Run `csa doctor --json` for diagnostics, then retry.",
+        "unsupported_official_version" | "unsupported_build_target" => language.text(
+            "Choose a release that exactly matches the installed official Codex and target.",
+            "请选择与已安装官方 Codex 及目标平台精确匹配的版本。",
+        ),
+        "github_api_forbidden" | "network_error" => language.text(
+            "Check the network or proxy, then retry the command.",
+            "请检查网络或代理，然后重试该命令。",
+        ),
+        "path_activation_failed" | "path_activation_rollback_failed" => language.text(
+            "Open a new terminal and run `csa doctor --json` before retrying.",
+            "请打开新终端并运行 `csa doctor --json`，然后重试。",
+        ),
+        "install_rollback_failed" => language.text(
+            "Run `csa doctor --json` before retrying installation.",
+            "请先运行 `csa doctor --json`，再重试安装。",
+        ),
+        _ if matches!(operation, Operation::Doctor | Operation::Status) => language.text(
+            "Retry with `--json` for machine-readable diagnostics.",
+            "请使用 `--json` 重试以获取机器可读的诊断信息。",
+        ),
+        _ => language.text(
+            "Run `csa doctor --json` for diagnostics, then retry.",
+            "请运行 `csa doctor --json` 进行诊断，然后重试。",
+        ),
     }
 }
 
@@ -831,21 +985,38 @@ fn is_diagnosed_doctor_error(code: &str) -> bool {
     )
 }
 
-fn status_view(report: &StatusReport) -> StatusView {
+fn status_view(report: &StatusReport, language: Language) -> StatusView {
     let active = report.activation.status == "plugged" && report.activation.effective;
     let (conclusion, healthy) = match (
         report.status,
         report.activation.status,
         report.activation.effective,
     ) {
-        ("unprepared", "fallback", _) => ("not installed, activation fallback", false),
-        ("unprepared", _, _) => ("not installed", true),
-        ("prepared", "unplugged", _) => ("installed, inactive", true),
-        ("prepared", "plugged", true) => ("active and healthy", true),
-        ("prepared", "plugged", false) => ("installed, activation ineffective", false),
-        ("prepared", "fallback", _) => ("installed, activation fallback", false),
-        ("invalidated", _, _) => ("installed state invalidated", false),
-        _ => ("unknown state", false),
+        ("unprepared", "fallback", _) => (
+            language.text("not installed, activation fallback", "未安装，激活已回退"),
+            false,
+        ),
+        ("unprepared", _, _) => (language.text("not installed", "未安装"), true),
+        ("prepared", "unplugged", _) => {
+            (language.text("installed, inactive", "已安装，未激活"), true)
+        }
+        ("prepared", "plugged", true) => (
+            language.text("active and healthy", "已激活且状态正常"),
+            true,
+        ),
+        ("prepared", "plugged", false) => (
+            language.text("installed, activation ineffective", "已安装，激活未生效"),
+            false,
+        ),
+        ("prepared", "fallback", _) => (
+            language.text("installed, activation fallback", "已安装，激活已回退"),
+            false,
+        ),
+        ("invalidated", _, _) => (
+            language.text("installed state invalidated", "已安装状态已失效"),
+            false,
+        ),
+        _ => (language.text("unknown state", "未知状态"), false),
     };
     StatusView {
         conclusion,
@@ -855,22 +1026,34 @@ fn status_view(report: &StatusReport) -> StatusView {
     }
 }
 
-fn doctor_assessment(report: &DoctorReport, status: &StatusReport) -> DoctorAssessment {
+fn doctor_assessment(
+    report: &DoctorReport,
+    status: &StatusReport,
+    language: Language,
+) -> DoctorAssessment {
     let mut checks = vec![
         check(
             CheckSeverity::Pass,
-            "Official Codex",
-            format!(
-                "{} at {}",
-                report.official.version,
-                report.official.executable.path.display()
-            ),
+            language.text("Official Codex", "官方 Codex"),
+            if language == Language::Chinese {
+                format!(
+                    "版本 {}，位置 {}",
+                    report.official.version,
+                    report.official.executable.path.display()
+                )
+            } else {
+                format!(
+                    "{} at {}",
+                    report.official.version,
+                    report.official.executable.path.display()
+                )
+            },
             None,
             None,
         ),
         check(
             CheckSeverity::Pass,
-            "Manager target",
+            language.text("Manager target", "管理器目标平台"),
             report.manager_build_target.to_owned(),
             None,
             None,
@@ -881,27 +1064,44 @@ fn doctor_assessment(report: &DoctorReport, status: &StatusReport) -> DoctorAsse
         checks.push(if compatibility.exact_official_version {
             check(
                 CheckSeverity::Pass,
-                "Compatibility version",
-                format!("{} matches official Codex", compatibility.codex_version),
+                language.text("Compatibility version", "兼容版本"),
+                if language == Language::Chinese {
+                    format!("{} 与官方 Codex 匹配", compatibility.codex_version)
+                } else {
+                    format!("{} matches official Codex", compatibility.codex_version)
+                },
                 None,
                 None,
             )
         } else {
             check(
                 CheckSeverity::Fail,
-                "Compatibility version",
-                format!(
-                    "manifest requires {}, official Codex is {}",
-                    compatibility.codex_version, report.official.version
-                ),
-                Some("This payload cannot safely patch the installed official Codex."),
-                Some("Choose a compatibility release matching the official Codex version."),
+                language.text("Compatibility version", "兼容版本"),
+                if language == Language::Chinese {
+                    format!(
+                        "清单要求 {}，官方 Codex 为 {}",
+                        compatibility.codex_version, report.official.version
+                    )
+                } else {
+                    format!(
+                        "manifest requires {}, official Codex is {}",
+                        compatibility.codex_version, report.official.version
+                    )
+                },
+                Some(language.text(
+                    "This payload cannot safely patch the installed official Codex.",
+                    "此载荷无法安全修补已安装的官方 Codex。",
+                )),
+                Some(language.text(
+                    "Choose a compatibility release matching the official Codex version.",
+                    "请选择与官方 Codex 版本匹配的兼容版本。",
+                )),
             )
         });
         checks.push(if compatibility.supported_build_target {
             check(
                 CheckSeverity::Pass,
-                "Compatibility target",
+                language.text("Compatibility target", "兼容目标平台"),
                 compatibility.build_target.clone(),
                 None,
                 None,
@@ -909,13 +1109,26 @@ fn doctor_assessment(report: &DoctorReport, status: &StatusReport) -> DoctorAsse
         } else {
             check(
                 CheckSeverity::Fail,
-                "Compatibility target",
-                format!(
-                    "manifest targets {}, manager targets {}",
-                    compatibility.build_target, report.manager_build_target
-                ),
-                Some("This payload cannot run on the current CSA build target."),
-                Some("Choose a compatibility release matching the manager target."),
+                language.text("Compatibility target", "兼容目标平台"),
+                if language == Language::Chinese {
+                    format!(
+                        "清单目标为 {}，管理器目标为 {}",
+                        compatibility.build_target, report.manager_build_target
+                    )
+                } else {
+                    format!(
+                        "manifest targets {}, manager targets {}",
+                        compatibility.build_target, report.manager_build_target
+                    )
+                },
+                Some(language.text(
+                    "This payload cannot run on the current CSA build target.",
+                    "此载荷无法在当前 CSA 构建目标上运行。",
+                )),
+                Some(language.text(
+                    "Choose a compatibility release matching the manager target.",
+                    "请选择与管理器目标平台匹配的兼容版本。",
+                )),
             )
         });
     }
@@ -924,36 +1137,62 @@ fn doctor_assessment(report: &DoctorReport, status: &StatusReport) -> DoctorAsse
     match (status.status, status.state.as_ref()) {
         ("unprepared", None) => checks.push(check(
             CheckSeverity::Warn,
-            "Prepared state",
-            "no patched Codex is installed".to_owned(),
-            Some("The official Codex remains available, but CSA is not managing it."),
-            Some("Run `csa install`."),
+            language.text("Prepared state", "准备状态"),
+            language
+                .text("no patched Codex is installed", "尚未安装补丁版 Codex")
+                .to_owned(),
+            Some(language.text(
+                "The official Codex remains available, but CSA is not managing it.",
+                "官方 Codex 仍可使用，但 CSA 尚未管理它。",
+            )),
+            Some(language.text("Run `csa install`.", "请运行 `csa install`。")),
         )),
         ("prepared", Some(state)) => checks.push(check(
             CheckSeverity::Pass,
-            "Prepared state",
-            format!("{} is verified", state.compat_id),
+            language.text("Prepared state", "准备状态"),
+            if language == Language::Chinese {
+                format!("{} 已验证", state.compat_id)
+            } else {
+                format!("{} is verified", state.compat_id)
+            },
             None,
             None,
         )),
         ("invalidated", Some(_)) => checks.push(check(
             CheckSeverity::Fail,
-            "Prepared state",
-            status
-                .reason
-                .clone()
-                .unwrap_or_else(|| "prepared state failed verification".to_owned()),
-            Some("CSA will not trust or execute the prepared patched binary."),
-            Some("Run `csa install` to replace the invalid state."),
+            language.text("Prepared state", "准备状态"),
+            status.reason.clone().unwrap_or_else(|| {
+                language
+                    .text("prepared state failed verification", "准备状态验证失败")
+                    .to_owned()
+            }),
+            Some(language.text(
+                "CSA will not trust or execute the prepared patched binary.",
+                "CSA 不会信任或执行已准备的补丁版二进制文件。",
+            )),
+            Some(language.text(
+                "Run `csa install` to replace the invalid state.",
+                "请运行 `csa install` 替换失效状态。",
+            )),
         )),
         _ => {
             incomplete = true;
             checks.push(check(
                 CheckSeverity::Fail,
-                "Prepared state",
-                format!("unrecognized status: {}", status.status),
-                Some("CSA could not complete a reliable state assessment."),
-                Some("Retry with `csa doctor --json` and inspect the raw report."),
+                language.text("Prepared state", "准备状态"),
+                if language == Language::Chinese {
+                    format!("无法识别的状态：{}", status.status)
+                } else {
+                    format!("unrecognized status: {}", status.status)
+                },
+                Some(language.text(
+                    "CSA could not complete a reliable state assessment.",
+                    "CSA 无法完成可靠的状态评估。",
+                )),
+                Some(language.text(
+                    "Retry with `csa doctor --json` and inspect the raw report.",
+                    "请使用 `csa doctor --json` 重试并检查原始报告。",
+                )),
             ));
         }
     }
@@ -961,48 +1200,85 @@ fn doctor_assessment(report: &DoctorReport, status: &StatusReport) -> DoctorAsse
     match (status.activation.status, status.activation.effective) {
         ("unplugged", _) => checks.push(check(
             CheckSeverity::Warn,
-            "Activation",
-            "patched Codex is inactive".to_owned(),
-            Some("Running `codex` will not use the prepared patched binary."),
+            language.text("Activation", "激活"),
+            language
+                .text("patched Codex is inactive", "补丁版 Codex 未激活")
+                .to_owned(),
+            Some(language.text(
+                "Running `codex` will not use the prepared patched binary.",
+                "运行 `codex` 时不会使用已准备的补丁版二进制文件。",
+            )),
             Some(if status.state.is_some() {
-                "Run `csa plug`, then open a new terminal."
+                language.text(
+                    "Run `csa plug`, then open a new terminal.",
+                    "请运行 `csa plug`，然后打开新终端。",
+                )
             } else {
-                "Run `csa install`."
+                language.text("Run `csa install`.", "请运行 `csa install`。")
             }),
         )),
         ("plugged", true) => checks.push(check(
             CheckSeverity::Pass,
-            "Activation",
-            "patched Codex is active".to_owned(),
+            language.text("Activation", "激活"),
+            language
+                .text("patched Codex is active", "补丁版 Codex 已激活")
+                .to_owned(),
             None,
             None,
         )),
         ("plugged", false) => checks.push(check(
             CheckSeverity::Fail,
-            "Activation",
-            "the CSA shim exists but is not command-effective".to_owned(),
-            Some("Running `codex` selects another installation."),
-            Some("Run `csa plug`, open a new terminal, then rerun `csa doctor`."),
+            language.text("Activation", "激活"),
+            language
+                .text(
+                    "the CSA shim exists but is not command-effective",
+                    "CSA 启动器存在，但未对命令生效",
+                )
+                .to_owned(),
+            Some(language.text(
+                "Running `codex` selects another installation.",
+                "运行 `codex` 时选择了其他安装。",
+            )),
+            Some(language.text(
+                "Run `csa plug`, open a new terminal, then rerun `csa doctor`.",
+                "请运行 `csa plug`，打开新终端，然后重新运行 `csa doctor`。",
+            )),
         )),
         ("fallback", _) => checks.push(check(
             CheckSeverity::Fail,
-            "Activation",
-            status
-                .activation
-                .reason
-                .clone()
-                .unwrap_or_else(|| "activation entered fallback mode".to_owned()),
-            Some("CSA will fall back instead of trusting the patched activation."),
-            Some("Run `csa install` to rebuild and reactivate the patched Codex."),
+            language.text("Activation", "激活"),
+            status.activation.reason.clone().unwrap_or_else(|| {
+                language
+                    .text("activation entered fallback mode", "激活已进入回退模式")
+                    .to_owned()
+            }),
+            Some(language.text(
+                "CSA will fall back instead of trusting the patched activation.",
+                "CSA 将执行回退，而不会信任补丁版激活状态。",
+            )),
+            Some(language.text(
+                "Run `csa install` to rebuild and reactivate the patched Codex.",
+                "请运行 `csa install`，重新构建并激活补丁版 Codex。",
+            )),
         )),
         _ => {
             incomplete = true;
             checks.push(check(
                 CheckSeverity::Fail,
-                "Activation",
-                format!("unrecognized activation: {}", status.activation.status),
-                Some("CSA could not determine whether patched Codex is active."),
-                Some("Retry with `csa doctor --json` and inspect the raw report."),
+                language.text("Activation", "激活"),
+                if language == Language::Chinese {
+                    format!("无法识别的激活状态：{}", status.activation.status)
+                } else {
+                    format!("unrecognized activation: {}", status.activation.status)
+                },
+                Some(language.text(
+                    "CSA could not determine whether patched Codex is active.",
+                    "CSA 无法确定补丁版 Codex 是否已激活。",
+                )),
+                Some(language.text(
+                    "Retry with `csa doctor --json` and inspect the raw report.",
+                    "请使用 `csa doctor --json` 重试并检查原始报告。",
+                )),
             ));
         }
     }
@@ -1011,45 +1287,82 @@ fn doctor_assessment(report: &DoctorReport, status: &StatusReport) -> DoctorAsse
         .command_resolution
         .resolved_codex
         .as_ref()
-        .map_or_else(|| "not found".to_owned(), |path| path.display().to_string());
+        .map_or_else(
+            || language.text("not found", "未找到").to_owned(),
+            |path| path.display().to_string(),
+        );
     if matches!(status.activation.status, "plugged" | "fallback")
         && report.command_resolution.resolves_to_managed_shim
     {
         checks.push(check(
             CheckSeverity::Pass,
-            "Command precedence",
-            format!("codex resolves to {resolved}"),
+            language.text("Command precedence", "命令优先级"),
+            if language == Language::Chinese {
+                format!("codex 解析到 {resolved}")
+            } else {
+                format!("codex resolves to {resolved}")
+            },
             None,
             None,
         ));
     } else if status.activation.status == "unplugged" {
         checks.push(check(
             CheckSeverity::Warn,
-            "Command precedence",
-            format!("codex resolves to {resolved}"),
-            Some("The current command does not use CSA's patched Codex."),
-            Some(if status.state.is_some() {
-                "Run `csa plug`, then open a new terminal."
+            language.text("Command precedence", "命令优先级"),
+            if language == Language::Chinese {
+                format!("codex 解析到 {resolved}")
             } else {
-                "Run `csa install`."
+                format!("codex resolves to {resolved}")
+            },
+            Some(language.text(
+                "The current command does not use CSA's patched Codex.",
+                "当前命令没有使用 CSA 的补丁版 Codex。",
+            )),
+            Some(if status.state.is_some() {
+                language.text(
+                    "Run `csa plug`, then open a new terminal.",
+                    "请运行 `csa plug`，然后打开新终端。",
+                )
+            } else {
+                language.text("Run `csa install`.", "请运行 `csa install`。")
             }),
         ));
     } else if matches!(status.activation.status, "plugged" | "fallback") {
         checks.push(check(
             CheckSeverity::Fail,
-            "Command precedence",
-            format!("codex resolves to {resolved}, not the managed shim"),
-            Some("The patched Codex is not selected by the current command."),
-            Some("Run `csa plug`, open a new terminal, then rerun `csa doctor`."),
+            language.text("Command precedence", "命令优先级"),
+            if language == Language::Chinese {
+                format!("codex 解析到 {resolved}，而不是受管启动器")
+            } else {
+                format!("codex resolves to {resolved}, not the managed shim")
+            },
+            Some(language.text(
+                "The patched Codex is not selected by the current command.",
+                "当前命令没有选择补丁版 Codex。",
+            )),
+            Some(language.text(
+                "Run `csa plug`, open a new terminal, then rerun `csa doctor`.",
+                "请运行 `csa plug`，打开新终端，然后重新运行 `csa doctor`。",
+            )),
         ));
     } else {
         incomplete = true;
         checks.push(check(
             CheckSeverity::Fail,
-            "Command precedence",
-            format!("cannot assess command resolution for {resolved}"),
-            Some("CSA could not complete a reliable PATH assessment."),
-            Some("Retry with `csa doctor --json` and inspect the raw report."),
+            language.text("Command precedence", "命令优先级"),
+            if language == Language::Chinese {
+                format!("无法评估 {resolved} 的命令解析")
+            } else {
+                format!("cannot assess command resolution for {resolved}")
+            },
+            Some(language.text(
+                "CSA could not complete a reliable PATH assessment.",
+                "CSA 无法完成可靠的 PATH 评估。",
+            )),
+            Some(language.text(
+                "Retry with `csa doctor --json` and inspect the raw report.",
+                "请使用 `csa doctor --json` 重试并检查原始报告。",
+            )),
         ));
     }
 
@@ -1091,146 +1404,301 @@ impl DoctorAssessment {
 fn write_doctor_assessment(
     writer: &mut dyn Write,
     assessment: &DoctorAssessment,
+    language: Language,
 ) -> io::Result<()> {
     writeln!(writer, "CSA doctor")?;
     let mut totals = [0_u32; 3];
     for check in &assessment.checks {
         let (label, index) = match check.severity {
-            CheckSeverity::Pass => ("PASS", 0),
-            CheckSeverity::Warn => ("WARN", 1),
-            CheckSeverity::Fail => ("FAIL", 2),
+            CheckSeverity::Pass => (language.text("PASS", "通过"), 0),
+            CheckSeverity::Warn => (language.text("WARN", "警告"), 1),
+            CheckSeverity::Fail => (language.text("FAIL", "失败"), 2),
         };
         totals[index] += 1;
         writeln!(writer, "{label} {}: {}", check.name, check.detail)?;
         if let Some(impact) = check.impact {
-            writeln!(writer, "     Impact: {impact}")?;
+            writeln!(writer, "     {}: {impact}", language.text("Impact", "影响"))?;
         }
         if let Some(action) = check.action {
-            writeln!(writer, "     Next: {action}")?;
+            writeln!(writer, "     {}: {action}", language.text("Next", "下一步"))?;
         }
     }
-    writeln!(
-        writer,
-        "Summary: {} passed, {} warnings, {} failed",
-        totals[0], totals[1], totals[2]
-    )
+    if language == Language::Chinese {
+        writeln!(
+            writer,
+            "汇总：{} 项通过，{} 项警告，{} 项失败",
+            totals[0], totals[1], totals[2]
+        )
+    } else {
+        writeln!(
+            writer,
+            "Summary: {} passed, {} warnings, {} failed",
+            totals[0], totals[1], totals[2]
+        )
+    }
 }
 
-fn yes_no(value: bool) -> &'static str {
-    if value { "yes" } else { "no" }
+fn yes_no(value: bool, language: Language) -> &'static str {
+    if value {
+        language.text("yes", "是")
+    } else {
+        language.text("no", "否")
+    }
 }
 
 impl HumanReport for PrepareReport {
-    fn write_human(&self, writer: &mut dyn Write) -> io::Result<()> {
-        writeln!(writer, "OK Patched Codex prepared")?;
-        writeln!(writer, "Compatibility: {}", self.state.compat_id)?;
-        writeln!(writer, "Artifact: {}", self.state.artifact_path.display())?;
-        writeln!(writer, "Official Codex unchanged: yes")
+    fn write_human(&self, writer: &mut dyn Write, language: Language) -> io::Result<()> {
+        writeln!(
+            writer,
+            "{}",
+            language.text("OK Patched Codex prepared", "成功：补丁版 Codex 已准备完成")
+        )?;
+        writeln!(
+            writer,
+            "{}: {}",
+            language.text("Compatibility", "兼容版本"),
+            self.state.compat_id
+        )?;
+        writeln!(
+            writer,
+            "{}: {}",
+            language.text("Artifact", "产物"),
+            self.state.artifact_path.display()
+        )?;
+        writeln!(
+            writer,
+            "{}: {}",
+            language.text("Official Codex unchanged", "官方 Codex 未被修改"),
+            yes_no(true, language)
+        )
     }
 }
 
 impl HumanReport for InstallReport {
-    fn write_human(&self, writer: &mut dyn Write) -> io::Result<()> {
-        writeln!(writer, "OK Patched Codex installed and activated")?;
-        writeln!(writer, "Compatibility: {}", self.prepare.state.compat_id)?;
+    fn write_human(&self, writer: &mut dyn Write, language: Language) -> io::Result<()> {
         writeln!(
             writer,
-            "Managed command: {}",
+            "{}",
+            language.text(
+                "OK Patched Codex installed and activated",
+                "成功：补丁版 Codex 已安装并激活",
+            )
+        )?;
+        writeln!(
+            writer,
+            "{}: {}",
+            language.text("Compatibility", "兼容版本"),
+            self.prepare.state.compat_id
+        )?;
+        writeln!(
+            writer,
+            "{}: {}",
+            language.text("Managed command", "受管命令"),
             self.activation.activation.shim_path.display()
         )?;
         if let Some(user_path) = &self.activation.user_path {
-            writeln!(writer, "User PATH: {}", user_path.status)?;
+            writeln!(
+                writer,
+                "{}: {}",
+                language.text("User PATH", "用户 PATH"),
+                user_path.status
+            )?;
         }
-        writeln!(writer, "Next: open a new terminal, then run `codex`.")
+        writeln!(
+            writer,
+            "{}: {}",
+            language.text("Next", "下一步"),
+            language.text(
+                "open a new terminal, then run `codex`.",
+                "请打开新终端，然后运行 `codex`。",
+            )
+        )
     }
 }
 
 impl HumanReport for UninstallReport {
-    fn write_human(&self, writer: &mut dyn Write) -> io::Result<()> {
+    fn write_human(&self, writer: &mut dyn Write, language: Language) -> io::Result<()> {
         let message = if self.changed {
-            "OK CSA uninstalled"
+            language.text("OK CSA uninstalled", "成功：CSA 已卸载")
         } else {
-            "OK CSA was already uninstalled"
-        };
-        writeln!(writer, "{message}")?;
-        writeln!(writer, "Manager root: {}", self.manager_root.display())
-    }
-}
-
-impl HumanReport for PlugReport {
-    fn write_human(&self, writer: &mut dyn Write) -> io::Result<()> {
-        let message = if self.changed {
-            "OK Patched Codex activated"
-        } else {
-            "OK Patched Codex was already active"
+            language.text("OK CSA was already uninstalled", "成功：CSA 已处于卸载状态")
         };
         writeln!(writer, "{message}")?;
         writeln!(
             writer,
-            "Managed command: {}",
+            "{}: {}",
+            language.text("Manager root", "管理器目录"),
+            self.manager_root.display()
+        )
+    }
+}
+
+impl HumanReport for PlugReport {
+    fn write_human(&self, writer: &mut dyn Write, language: Language) -> io::Result<()> {
+        let message = if self.changed {
+            language.text("OK Patched Codex activated", "成功：补丁版 Codex 已激活")
+        } else {
+            language.text(
+                "OK Patched Codex was already active",
+                "成功：补丁版 Codex 已处于激活状态",
+            )
+        };
+        writeln!(writer, "{message}")?;
+        writeln!(
+            writer,
+            "{}: {}",
+            language.text("Managed command", "受管命令"),
             self.activation.shim_path.display()
         )?;
         if let Some(user_path) = &self.user_path {
-            writeln!(writer, "User PATH: {}", user_path.status)?;
+            writeln!(
+                writer,
+                "{}: {}",
+                language.text("User PATH", "用户 PATH"),
+                user_path.status
+            )?;
         }
-        writeln!(writer, "Next: open a new terminal, then run `codex`.")
+        writeln!(
+            writer,
+            "{}: {}",
+            language.text("Next", "下一步"),
+            language.text(
+                "open a new terminal, then run `codex`.",
+                "请打开新终端，然后运行 `codex`。",
+            )
+        )
     }
 }
 
 impl HumanReport for UnplugReport {
-    fn write_human(&self, writer: &mut dyn Write) -> io::Result<()> {
+    fn write_human(&self, writer: &mut dyn Write, language: Language) -> io::Result<()> {
         let message = if self.changed {
-            "OK Patched Codex deactivated"
+            language.text("OK Patched Codex deactivated", "成功：补丁版 Codex 已停用")
         } else {
-            "OK Patched Codex was already inactive"
+            language.text(
+                "OK Patched Codex was already inactive",
+                "成功：补丁版 Codex 已处于停用状态",
+            )
         };
         writeln!(writer, "{message}")?;
-        writeln!(writer, "Managed bin: {}", self.managed_bin.display())
+        writeln!(
+            writer,
+            "{}: {}",
+            language.text("Managed bin", "受管二进制目录"),
+            self.managed_bin.display()
+        )
     }
 }
 
 impl HumanReport for PurgeReport {
-    fn write_human(&self, writer: &mut dyn Write) -> io::Result<()> {
+    fn write_human(&self, writer: &mut dyn Write, language: Language) -> io::Result<()> {
         let message = if self.changed {
-            "OK CSA managed data removed"
+            language.text("OK CSA managed data removed", "成功：CSA 受管数据已删除")
         } else {
-            "OK CSA had no managed data to remove"
+            language.text(
+                "OK CSA had no managed data to remove",
+                "成功：CSA 没有需要删除的受管数据",
+            )
         };
         writeln!(writer, "{message}")?;
-        writeln!(writer, "Manager root: {}", self.manager_root.display())
+        writeln!(
+            writer,
+            "{}: {}",
+            language.text("Manager root", "管理器目录"),
+            self.manager_root.display()
+        )
     }
 }
 
 impl HumanReport for StatusReport {
-    fn write_human(&self, writer: &mut dyn Write) -> io::Result<()> {
-        let view = status_view(self);
-        writeln!(writer, "CSA status: {}", view.conclusion)?;
-        writeln!(writer, "Installed: {}", yes_no(view.installed))?;
-        writeln!(writer, "Active: {}", yes_no(view.active))?;
-        writeln!(writer, "Healthy: {}", yes_no(view.healthy))?;
+    fn write_human(&self, writer: &mut dyn Write, language: Language) -> io::Result<()> {
+        let view = status_view(self, language);
+        writeln!(
+            writer,
+            "{}: {}",
+            language.text("CSA status", "CSA 状态"),
+            view.conclusion
+        )?;
+        writeln!(
+            writer,
+            "{}: {}",
+            language.text("Installed", "已安装"),
+            yes_no(view.installed, language)
+        )?;
+        writeln!(
+            writer,
+            "{}: {}",
+            language.text("Active", "已激活"),
+            yes_no(view.active, language)
+        )?;
+        writeln!(
+            writer,
+            "{}: {}",
+            language.text("Healthy", "状态正常"),
+            yes_no(view.healthy, language)
+        )?;
         match &self.state {
             Some(state) => {
-                writeln!(writer, "Official Codex: {}", state.official.version)?;
-                writeln!(writer, "Patched Codex: {}", state.compat_id)?;
+                writeln!(
+                    writer,
+                    "{}: {}",
+                    language.text("Official Codex", "官方 Codex"),
+                    state.official.version
+                )?;
+                writeln!(
+                    writer,
+                    "{}: {}",
+                    language.text("Patched Codex", "补丁版 Codex"),
+                    state.compat_id
+                )?;
             }
             None => {
-                writeln!(writer, "Official Codex: not recorded")?;
-                writeln!(writer, "Patched Codex: not installed")?;
+                writeln!(
+                    writer,
+                    "{}: {}",
+                    language.text("Official Codex", "官方 Codex"),
+                    language.text("not recorded", "未记录")
+                )?;
+                writeln!(
+                    writer,
+                    "{}: {}",
+                    language.text("Patched Codex", "补丁版 Codex"),
+                    language.text("not installed", "未安装")
+                )?;
             }
         }
-        write_resolution(writer, &self.activation.command_resolution)?;
-        writeln!(writer, "Activation detail: {}", self.activation.status)?;
+        write_resolution(writer, language, &self.activation.command_resolution)?;
+        writeln!(
+            writer,
+            "{}: {}",
+            language.text("Activation detail", "激活详情"),
+            self.activation.status
+        )?;
         if let Some(reason) = &self.reason {
-            writeln!(writer, "Reason: {reason}")?;
+            writeln!(writer, "{}: {reason}", language.text("Reason", "原因"))?;
         }
         Ok(())
     }
 }
 
-fn write_resolution(writer: &mut dyn Write, resolution: &CommandResolution) -> io::Result<()> {
+fn write_resolution(
+    writer: &mut dyn Write,
+    language: Language,
+    resolution: &CommandResolution,
+) -> io::Result<()> {
     match &resolution.resolved_codex {
-        Some(path) => writeln!(writer, "Codex command: {}", path.display()),
-        None => writeln!(writer, "Codex command: not found"),
+        Some(path) => writeln!(
+            writer,
+            "{}: {}",
+            language.text("Codex command", "Codex 命令"),
+            path.display()
+        ),
+        None => writeln!(
+            writer,
+            "{}: {}",
+            language.text("Codex command", "Codex 命令"),
+            language.text("not found", "未找到")
+        ),
     }
 }
 
@@ -1243,6 +1711,7 @@ mod tests {
     };
     use csa::activation::{ActivationReport, CommandResolution};
     use csa::detect::{FileFingerprint, OfficialCodex};
+    use csa::i18n::Language;
     use csa::manager::{CompatibilityReport, DoctorReport, InstallEvent, StatusReport};
     use csa::online::InstallCandidate;
     use csa::state::PreparedState;
@@ -1258,8 +1727,8 @@ mod tests {
     }
 
     impl HumanReport for Report {
-        fn write_human(&self, writer: &mut dyn Write) -> io::Result<()> {
-            writeln!(writer, "OK {}", self.status)
+        fn write_human(&self, writer: &mut dyn Write, language: Language) -> io::Result<()> {
+            writeln!(writer, "{} {}", language.text("OK", "成功"), self.status)
         }
     }
 
@@ -1344,15 +1813,33 @@ mod tests {
     }
 
     fn render_status(report: &StatusReport) -> String {
+        render_status_in(report, Language::English)
+    }
+
+    fn render_status_in(report: &StatusReport, language: Language) -> String {
         let mut output = Vec::new();
-        report.write_human(&mut output).unwrap();
+        report.write_human(&mut output, language).unwrap();
         String::from_utf8(output).unwrap()
     }
 
     fn render_doctor(report: &DoctorReport, status: &StatusReport) -> (i32, String) {
+        render_doctor_in(report, status, Language::English)
+    }
+
+    fn render_doctor_in(
+        report: &DoctorReport,
+        status: &StatusReport,
+        language: Language,
+    ) -> (i32, String) {
         let mut output = Vec::new();
-        let exit_code =
-            write_doctor_report_to(&mut output, OutputMode::Human, report, Some(status)).unwrap();
+        let exit_code = write_doctor_report_to(
+            &mut output,
+            OutputMode::Human,
+            language,
+            report,
+            Some(status),
+        )
+        .unwrap();
         (exit_code, String::from_utf8(output).unwrap())
     }
 
@@ -1393,7 +1880,7 @@ mod tests {
 
         let report = status_fixture("prepared", "plugged", true, true);
         let mut output = Vec::new();
-        write_report_to(&mut output, OutputMode::Json, &report).unwrap();
+        write_report_to(&mut output, OutputMode::Json, Language::Chinese, &report).unwrap();
         let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
         let mut keys: Vec<_> = value
             .as_object()
@@ -1474,8 +1961,14 @@ mod tests {
 
         let mut output = Vec::new();
         assert_eq!(
-            write_doctor_report_to(&mut output, OutputMode::Json, &doctor_fixture(true), None,)
-                .unwrap(),
+            write_doctor_report_to(
+                &mut output,
+                OutputMode::Json,
+                Language::Chinese,
+                &doctor_fixture(true),
+                None,
+            )
+            .unwrap(),
             0
         );
         let value: serde_json::Value = serde_json::from_slice(&output).unwrap();
@@ -1501,7 +1994,13 @@ mod tests {
         let diagnosed = csa::error::ManagerError::new("official_not_found", "missing");
         let mut output = Vec::new();
         assert_eq!(
-            write_doctor_error_to(&mut output, OutputMode::Human, &diagnosed).unwrap(),
+            write_doctor_error_to(
+                &mut output,
+                OutputMode::Human,
+                Language::English,
+                &diagnosed,
+            )
+            .unwrap(),
             1
         );
         let output = String::from_utf8(output).unwrap();
@@ -1511,7 +2010,8 @@ mod tests {
 
         let mut output = Vec::new();
         assert_eq!(
-            write_doctor_error_to(&mut output, OutputMode::Json, &diagnosed).unwrap(),
+            write_doctor_error_to(&mut output, OutputMode::Json, Language::Chinese, &diagnosed,)
+                .unwrap(),
             1
         );
         assert_eq!(
@@ -1522,7 +2022,8 @@ mod tests {
         let unknown = csa::error::ManagerError::new("io_error", "unreadable");
         let mut output = Vec::new();
         assert_eq!(
-            write_doctor_error_to(&mut output, OutputMode::Human, &unknown).unwrap(),
+            write_doctor_error_to(&mut output, OutputMode::Human, Language::English, &unknown,)
+                .unwrap(),
             2
         );
         assert!(
@@ -1559,14 +2060,19 @@ mod tests {
         state.move_one(1);
         assert_eq!(state.selected, 0);
         assert_eq!(state.viewport, 0);
-        let rendered = state.render(200);
+        let rendered = state.render(200, Language::English);
         assert_eq!(rendered.len(), 11);
         assert_eq!(rendered[2..7].len(), 5);
         assert!(rendered.iter().any(|line| line.contains("Recommended")));
+        let chinese = state.render(200, Language::Chinese);
+        assert_eq!(chinese[0], "选择补丁版 Codex CLI 版本");
+        assert!(chinese.iter().any(|line| line.contains("推荐")));
+        assert!(chinese.iter().any(|line| line.contains("已安装")));
+        assert!(chinese.last().unwrap().contains("Enter 安装"));
         state.move_by(2);
         assert!(
             state
-                .render(200)
+                .render(200, Language::English)
                 .iter()
                 .any(|line| line.contains("Installed"))
         );
@@ -1580,7 +2086,7 @@ mod tests {
         assert_eq!(state.viewport, 1);
         assert!(
             state
-                .render(20)
+                .render(20, Language::English)
                 .iter()
                 .all(|line| line.chars().count() <= 20)
         );
@@ -1629,6 +2135,7 @@ mod tests {
         write_report_to(
             &mut output,
             OutputMode::Json,
+            Language::Chinese,
             &Report {
                 schema: 1,
                 status: "prepared",
@@ -1644,6 +2151,7 @@ mod tests {
         write_report_to(
             &mut output,
             OutputMode::Human,
+            Language::English,
             &Report {
                 schema: 1,
                 status: "prepared",
@@ -1654,14 +2162,28 @@ mod tests {
 
         let error = csa::error::ManagerError::new("invalid_cli", "bad option");
         let mut output = Vec::new();
-        write_error_to(&mut output, OutputMode::Json, Operation::Parse, &error).unwrap();
+        write_error_to(
+            &mut output,
+            OutputMode::Json,
+            Language::Chinese,
+            Operation::Parse,
+            &error,
+        )
+        .unwrap();
         assert_eq!(
             String::from_utf8(output).unwrap(),
             "{\n  \"error\": {\n    \"code\": \"invalid_cli\",\n    \"message\": \"bad option\"\n  },\n  \"schema\": 1\n}\n"
         );
 
         let mut output = Vec::new();
-        write_error_to(&mut output, OutputMode::Human, Operation::Parse, &error).unwrap();
+        write_error_to(
+            &mut output,
+            OutputMode::Human,
+            Language::English,
+            Operation::Parse,
+            &error,
+        )
+        .unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("ERROR [invalid_cli] bad option"));
         assert!(output.contains("Safety:"));
@@ -1669,6 +2191,7 @@ mod tests {
 
         let start = Instant::now();
         let mut progress = InstallProgress::new(OutputMode::Human, false);
+        progress.language = Language::English;
         let mut output = Vec::new();
         progress
             .write_event_to(&mut output, InstallEvent::DetectingOfficial, start)
@@ -1722,5 +2245,58 @@ mod tests {
             .write_event_to(&mut output, InstallEvent::DetectingOfficial, start)
             .unwrap();
         assert!(output.is_empty());
+    }
+
+    #[test]
+    fn chinese_human_reports_errors_and_progress_use_simplified_chinese() {
+        let status = status_fixture("prepared", "plugged", true, true);
+        let output = render_status_in(&status, Language::Chinese);
+        assert!(
+            output
+                .starts_with("CSA 状态: 已激活且状态正常\n已安装: 是\n已激活: 是\n状态正常: 是\n")
+        );
+        assert!(output.contains("Codex 命令: C:/csa/bin/codex.exe"));
+
+        let (exit_code, output) =
+            render_doctor_in(&doctor_fixture(true), &status, Language::Chinese);
+        assert_eq!(exit_code, 0);
+        assert!(output.contains("通过 官方 Codex:"));
+        assert!(output.contains("汇总：5 项通过，0 项警告，0 项失败"));
+
+        let error = csa::error::ManagerError::new("invalid_cli", "bad option");
+        let mut output = Vec::new();
+        write_error_to(
+            &mut output,
+            OutputMode::Human,
+            Language::Chinese,
+            Operation::Parse,
+            &error,
+        )
+        .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("错误 [invalid_cli] bad option"));
+        assert!(output.contains("安全性:"));
+        assert!(output.contains("恢复建议:"));
+
+        let start = Instant::now();
+        let mut progress = InstallProgress::new(OutputMode::Human, false);
+        progress.language = Language::Chinese;
+        let mut output = Vec::new();
+        progress
+            .write_event_to(&mut output, InstallEvent::DetectingOfficial, start)
+            .unwrap();
+        progress
+            .write_event_to(
+                &mut output,
+                InstallEvent::ArtifactProgress {
+                    downloaded_bytes: 1,
+                    total_bytes: 2,
+                },
+                start + Duration::from_secs(1),
+            )
+            .unwrap();
+        let output = String::from_utf8(output).unwrap();
+        assert!(output.contains("正在检测官方 Codex……"));
+        assert!(output.contains("正在下载补丁版 Codex"));
     }
 }
