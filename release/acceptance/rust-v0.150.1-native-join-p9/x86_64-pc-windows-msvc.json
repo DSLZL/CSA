@@ -1,0 +1,38 @@
+{
+  "schema": 1,
+  "status": "accepted",
+  "compat_id": "rust-v0.150.1-native-join-p9",
+  "target": "x86_64-pc-windows-msvc",
+  "artifact_filename": "codex.exe",
+  "artifact_sha256": "ce3cfe861f974c37b2217c0625c2e41574a5cfb48373b499f76c1108e1a86e76",
+  "artifact_size": 311046656,
+  "manifest_sha256": "576eecd664ec84a84b00fea0e669c6641999ffe83e97a8f1bb69c8fcf1ebe848",
+  "build_profile_sha256": "be3194ff9dab2c69914ef0751f700d8d4114a0bd53528bd5b566c61fdf05df13",
+  "runtime_lock_sha256": "a14604c5fcb73b8ea5fda6b8647bc27282c24714538c73a1c1c2f45a840536f2",
+  "recorded_at": "2026-08-29",
+  "accepted_by": "DSLZL",
+  "evidence": {
+    "schema": 1,
+    "environment": "disposable-windows-local",
+    "compat_id": "rust-v0.150.1-native-join-p9",
+    "target": "x86_64-pc-windows-msvc",
+    "candidate_run_id": 33238015308,
+    "validation_run_id": 33236190927,
+    "lanes": {
+      "candidate_identity_and_sha256": "passed",
+      "legacy_p8_database_repaired_to_official_checksums": "passed",
+      "legacy_sentinel_preserved": "passed",
+      "official_after_legacy_repair": "passed",
+      "official_database_unchanged_by_p9": "passed",
+      "official_after_p9": "passed",
+      "single_child_native_join": "passed",
+      "official_runtime_unchanged": "passed",
+      "real_config_and_auth_unchanged": "passed"
+    },
+    "unverified": [
+      "interactive TUI rendering",
+      "multi-child native join",
+      "formal release publication"
+    ]
+  }
+}
