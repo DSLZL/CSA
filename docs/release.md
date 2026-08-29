@@ -11,24 +11,24 @@ GitHub Actions is the release authority for both domains. npm publication is a s
 
 ## Current release snapshot
 
-The current published Manager release is [`v0.1.3`](https://github.com/DSLZL/CSA/releases/tag/v0.1.3). The npm meta package is [`@dslzl/csa@0.1.3`](https://www.npmjs.com/package/@dslzl/csa).
+The current published Manager release is [`v0.1.4`](https://github.com/DSLZL/CSA/releases/tag/v0.1.4). The npm meta package is [`@dslzl/csa@0.1.4`](https://www.npmjs.com/package/@dslzl/csa).
 
-The current formal patched release is [`compat-rust-v0.150.1-native-join-p8`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.150.1-native-join-p8):
+The current formal patched release is [`compat-rust-v0.150.1-native-join-p9`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.150.1-native-join-p9):
 
 | Field | Value |
 | --- | --- |
-| Compatibility ID | `rust-v0.150.1-native-join-p8` |
+| Compatibility ID | `rust-v0.150.1-native-join-p9` |
 | Codex version | `0.150.1` |
 | Upstream tag | `rust-v0.150.1` |
 | Upstream commit | `90854393966b21e9ebfd21b122334eb09a20c93d` |
-| Patch-set version | `8` |
-| Patch count | `16` |
+| Patch-set version | `9` |
+| Patch count | `17` |
 | Rust toolchain | `1.95.0` |
 | Target | `x86_64-pc-windows-msvc` |
-| Production executable SHA-256 | `b9ce5046cf52c6e5d2ae7a73f69497143c3c98160608b643a08f76734ca9dc93` |
-| Production executable size | `310791168` bytes |
+| Production executable SHA-256 | `ce3cfe861f974c37b2217c0625c2e41574a5cfb48373b499f76c1108e1a86e76` |
+| Production executable size | `311046656` bytes |
 
-The accepted record is [`release/acceptance/rust-v0.150.1-native-join-p8/x86_64-pc-windows-msvc.json`](../release/acceptance/rust-v0.150.1-native-join-p8/x86_64-pc-windows-msvc.json). It references Patch Validation run [`33155290376`](https://github.com/DSLZL/CSA/actions/runs/33155290376) and candidate build run [`33156817477`](https://github.com/DSLZL/CSA/actions/runs/33156817477).
+The accepted record is [`release/acceptance/rust-v0.150.1-native-join-p9/x86_64-pc-windows-msvc.json`](../release/acceptance/rust-v0.150.1-native-join-p9/x86_64-pc-windows-msvc.json). It references Patch Validation run [`33236190927`](https://github.com/DSLZL/CSA/actions/runs/33236190927) and candidate build run [`33238015308`](https://github.com/DSLZL/CSA/actions/runs/33238015308).
 
 The committed candidate manifest intentionally contains placeholder artifact size and hash fields. The formal workflow finalizes a temporary manifest copy from its own production executable. The published manifest and Release descriptor, not the committed placeholder, describe the production asset.
 
@@ -120,7 +120,7 @@ Commit and push the reviewed version change to the default branch before dispatc
 Run `Release CSA` from the default branch with:
 
 ```text
-version=0.1.3
+version=0.1.4
 ```
 
 The workflow:
@@ -134,20 +134,20 @@ The workflow:
 7. creates `SHA256SUMS`;
 8. creates an annotated `vX.Y.Z` tag and immutable GitHub Release.
 
-The `v0.1.3` asset pattern is:
+The `v0.1.4` asset pattern is:
 
 ```text
-csa-v0.1.3-windows-x86_64.zip
-csa-v0.1.3-linux-x86_64.tar.gz
-csa-v0.1.3-linux-aarch64.tar.gz
-csa-v0.1.3-macos-x86_64.tar.gz
-csa-v0.1.3-macos-aarch64.tar.gz
-dslzl-csa-0.1.3.tgz
-dslzl-csa-win32-x64-0.1.3.tgz
-dslzl-csa-linux-x64-0.1.3.tgz
-dslzl-csa-linux-arm64-0.1.3.tgz
-dslzl-csa-darwin-x64-0.1.3.tgz
-dslzl-csa-darwin-arm64-0.1.3.tgz
+csa-v0.1.4-windows-x86_64.zip
+csa-v0.1.4-linux-x86_64.tar.gz
+csa-v0.1.4-linux-aarch64.tar.gz
+csa-v0.1.4-macos-x86_64.tar.gz
+csa-v0.1.4-macos-aarch64.tar.gz
+dslzl-csa-0.1.4.tgz
+dslzl-csa-win32-x64-0.1.4.tgz
+dslzl-csa-linux-x64-0.1.4.tgz
+dslzl-csa-linux-arm64-0.1.4.tgz
+dslzl-csa-darwin-x64-0.1.4.tgz
+dslzl-csa-darwin-arm64-0.1.4.tgz
 SHA256SUMS
 ```
 
@@ -156,12 +156,12 @@ SHA256SUMS
 Download the six npm tarballs from the Manager Release and verify them with `SHA256SUMS`. Publish all platform packages before the meta package:
 
 ```powershell
-npm publish .\dslzl-csa-win32-x64-0.1.3.tgz --access public
-npm publish .\dslzl-csa-linux-x64-0.1.3.tgz --access public
-npm publish .\dslzl-csa-linux-arm64-0.1.3.tgz --access public
-npm publish .\dslzl-csa-darwin-x64-0.1.3.tgz --access public
-npm publish .\dslzl-csa-darwin-arm64-0.1.3.tgz --access public
-npm publish .\dslzl-csa-0.1.3.tgz --access public
+npm publish .\dslzl-csa-win32-x64-0.1.4.tgz --access public
+npm publish .\dslzl-csa-linux-x64-0.1.4.tgz --access public
+npm publish .\dslzl-csa-linux-arm64-0.1.4.tgz --access public
+npm publish .\dslzl-csa-darwin-x64-0.1.4.tgz --access public
+npm publish .\dslzl-csa-darwin-arm64-0.1.4.tgz --access public
+npm publish .\dslzl-csa-0.1.4.tgz --access public
 ```
 
 Use the npm CLI authentication method configured for the maintainer account. Do not put one-time codes, tokens, or browser authentication data in logs or repository files.
@@ -172,7 +172,7 @@ Verify the registry and launcher:
 
 ```powershell
 npm view @dslzl/csa version dist-tags.latest --registry=https://registry.npmjs.org
-npx --yes @dslzl/csa@0.1.3 --version
+npx --yes @dslzl/csa@0.1.4 --version
 ```
 
 ## Validate a patched compatibility
@@ -255,7 +255,7 @@ Commit and push the accepted state before requesting formal publication.
 Dispatch `Release patched Codex CLI` from the default branch:
 
 ```text
-compat_selector=rust-v0.150.1-native-join-p8
+compat_selector=rust-v0.150.1-native-join-p9
 target=x86_64-pc-windows-msvc
 publish=true
 validation_run_id=<optional exact successful run>

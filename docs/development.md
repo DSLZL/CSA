@@ -33,7 +33,7 @@ Compatibility facts belong in the catalog, manifest, build profile, runtime lock
 
 ## Toolchains and prerequisites
 
-The Manager crate declares Rust `1.89` as its minimum supported toolchain. Current CI, Manager release builds, and patched Codex `0.150.1` p8 are pinned to Rust `1.95.0`.
+The Manager crate declares Rust `1.89` as its minimum supported toolchain. Current CI, Manager release builds, and patched Codex `0.150.1` p9 are pinned to Rust `1.95.0`.
 
 Local work also uses:
 
@@ -84,7 +84,7 @@ A compatibility directory is named exactly after its `compat_id`. Its manifest p
 
 Keep the upstream checkout outside the CSA repository. Check out the exact manifest commit in detached mode, verify the clean source, and apply patches only through the repository tooling. Never use fuzzy or three-way application to make a version-bound patch fit.
 
-The current p8 test contract covers workspace formatting, schema generation and reverse checks, parent fork and transport inheritance, completion and terminal-outcome mapping, single and batch Join schemas, Native Join integration, TUI live state, Orbit rendering, complete TUI library tests, TUI Clippy, and official runtime overlay behavior.
+The current p9 test contract covers workspace formatting, schema generation and reverse checks, parent fork and transport inheritance, completion and terminal-outcome mapping, single and batch Join schemas, Native Join integration, TUI live state, Orbit rendering, complete TUI library tests, TUI Clippy, official runtime overlay behavior, and state-database migration interoperability.
 
 Committed candidate manifests are immutable build inputs. A formal workflow finalizes a temporary manifest copy from the independently built production executable. Do not write a production hash back into the committed candidate manifest by hand.
 
@@ -146,7 +146,7 @@ cargo test --manifest-path tests/ui/Cargo.toml
 
 If Windows reports that it cannot remove `tests\ui\target\debug\csa-ui-harness.exe`, an earlier harness process still owns the executable. Quit that window with `q` or `Esc`, or stop only that harness process, then rerun Cargo.
 
-The harness is visual feedback, not Codex integration, terminal-protocol, ConPTY, patched-binary, or release acceptance evidence. Its rendering implementation must remain synchronized with the p8 TUI patch when either copy changes.
+The harness is visual feedback, not Codex integration, terminal-protocol, ConPTY, patched-binary, or release acceptance evidence. Its rendering implementation must remain synchronized with the current p9 TUI patch when either copy changes.
 
 ## Test the packaged Windows distribution
 
@@ -156,8 +156,8 @@ The Windows distribution harness runs in disposable directories. It installs loc
 $TempRoot = Join-Path $env:TEMP ("csa-e2e-" + [Guid]::NewGuid().ToString('N'))
 
 powershell -NoProfile -File .\scripts\test_npm_distribution_windows.ps1 `
-  -MetaTarball C:\absolute\dslzl-csa-0.1.3.tgz `
-  -PlatformTarball C:\absolute\dslzl-csa-win32-x64-0.1.3.tgz `
+  -MetaTarball C:\absolute\dslzl-csa-0.1.4.tgz `
+  -PlatformTarball C:\absolute\dslzl-csa-win32-x64-0.1.4.tgz `
   -TempRoot $TempRoot `
   -OutputPath C:\absolute\trellis-e2e.json `
   -Official C:\absolute\official\codex.exe `
@@ -171,15 +171,15 @@ The parent process `PATH`, default `CODEX_HOME`, npm state, profile, and officia
 
 ## Current runtime evidence
 
-The accepted Windows x64 record for `rust-v0.150.1-native-join-p8` binds:
+The accepted Windows x64 record for `rust-v0.150.1-native-join-p9` binds:
 
 | Field | Accepted value |
 | --- | --- |
 | Codex version | `0.150.1` |
-| Artifact SHA-256 | `b9ce5046cf52c6e5d2ae7a73f69497143c3c98160608b643a08f76734ca9dc93` |
-| Artifact size | `310791168` bytes |
-| Patch Validation run | `33155290376` |
-| Candidate build run | `33156817477` |
+| Artifact SHA-256 | `ce3cfe861f974c37b2217c0625c2e41574a5cfb48373b499f76c1108e1a86e76` |
+| Artifact size | `311046656` bytes |
+| Patch Validation run | `33236190927` |
+| Candidate build run | `33238015308` |
 
 Recorded acceptance passed:
 
@@ -187,6 +187,8 @@ Recorded acceptance passed:
 - binding to the complete official Bun runtime with six verified files;
 - an authenticated single-child Native Join with one Join call and the expected terminal sentinel;
 - unchanged official runtime fingerprints.
+- repair of legacy p8 database migration checksums without losing existing state;
+- unchanged database and successful official startup after running p9.
 
 The record does not verify:
 

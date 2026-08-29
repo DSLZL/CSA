@@ -360,8 +360,8 @@ try {
         schema = 1
         result = 'pass'
         packages = [ordered]@{
-            meta = '@dslzl/csa@0.1.3'
-            platform = '@dslzl/csa-win32-x64@0.1.3'
+            meta = '@dslzl/csa@0.1.4'
+            platform = '@dslzl/csa-win32-x64@0.1.4'
             lifecycle_scripts = $false
         }
         install = [ordered]@{
@@ -372,7 +372,7 @@ try {
             manager_state_created = $false
         }
         manager = [ordered]@{
-            version = 'csa 0.1.3'
+            version = 'csa 0.1.4'
             doctor = 'pass'
             cold_install = 'pass'
             status = 'prepared_and_plugged'

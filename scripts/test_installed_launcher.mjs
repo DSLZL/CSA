@@ -4,7 +4,7 @@ import assert from 'node:assert/strict';
 import path from 'node:path';
 import { spawnSync } from 'node:child_process';
 
-const [prefixValue, expected = 'csa 0.1.3'] = process.argv.slice(2);
+const [prefixValue, expected = 'csa 0.1.4'] = process.argv.slice(2);
 if (!prefixValue || !path.isAbsolute(prefixValue)) {
   process.stderr.write('usage: node scripts/test_installed_launcher.mjs <absolute-prefix> [expected]\n');
   process.exit(2);
