@@ -51,6 +51,7 @@ MANAGER_FILES = {
     "release/release-inputs.schema.json",
     ".github/release.yml",
     ".github/workflows/ci.yml",
+    ".github/workflows/publish-npm.yml",
     ".github/workflows/release-csa.yml",
     "scripts/assemble_release_candidate.py",
     "scripts/ci_release.py",

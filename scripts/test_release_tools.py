@@ -1074,10 +1074,48 @@ def test_release_stream_contracts() -> None:
     assert "node scripts/test_installed_launcher.mjs" in manager_workflow
     assert "dslzl-csa-darwin-arm64-${VERSION}.tgz" in manager_workflow
     assert "Validate exact manager and npm asset set" in manager_workflow
+    assert "actions: write" in manager_workflow
+    assert "gh workflow run publish-npm.yml" in manager_workflow
+    assert manager_workflow.index('gh release create "$TAG"') < manager_workflow.index(
+        "gh workflow run publish-npm.yml"
+    )
+
+    npm_workflow = (
+        REPOSITORY / ".github" / "workflows" / "publish-npm.yml"
+    ).read_text(encoding="utf-8")
+    assert "release:\n    types: [published]" in npm_workflow
+    assert "workflow_dispatch:" in npm_workflow
+    assert "push:" not in npm_workflow and "pull_request:" not in npm_workflow
+    assert "contents: read" in npm_workflow and "id-token: write" in npm_workflow
+    assert "runs-on: ubuntu-24.04" in npm_workflow
+    assert 'node-version: "26"' in npm_workflow
+    assert "gh release download" in npm_workflow
+    assert "isDraft,isPrerelease" in npm_workflow
+    assert "sha256sum -c SHA256SUMS" in npm_workflow
+    assert "SHA256SUMS does not cover the exact formal payload set" in npm_workflow
+    assert "tarball identity mismatch" in npm_workflow
+    assert "dist.integrity" in npm_workflow and "sha512-" in npm_workflow
+    assert 'grep -Fq "E404"' in npm_workflow
+    assert npm_workflow.count('npm publish "$tarball"') == 1
+    assert "--provenance" in npm_workflow and "--access public" in npm_workflow
+    assert "NODE_AUTH_TOKEN" not in npm_workflow and "secrets." not in npm_workflow
+    publish_order = (
+        'publish_one "@dslzl/csa-win32-x64"',
+        'publish_one "@dslzl/csa-linux-x64"',
+        'publish_one "@dslzl/csa-linux-arm64"',
+        'publish_one "@dslzl/csa-darwin-x64"',
+        'publish_one "@dslzl/csa-darwin-arm64"',
+        'publish_one "@dslzl/csa"',
+    )
+    assert list(map(npm_workflow.index, publish_order)) == sorted(
+        map(npm_workflow.index, publish_order)
+    )
+    assert ".github/workflows/publish-npm.yml" in ci_workflow
 
     generator = (REPOSITORY / "scripts" / "generate_release_notes.py").read_text(
         encoding="utf-8"
     )
+    assert '".github/workflows/publish-npm.yml"' in generator
     release_policy = (REPOSITORY / ".github" / "release.yml").read_text(encoding="utf-8")
     assert manager_workflow.count("python scripts/generate_release_notes.py") == 1
     assert "--stream manager" in manager_workflow

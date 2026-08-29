@@ -1,0 +1,160 @@
+name: Publish npm from CSA Release
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing formal CSA Manager Release tag (vX.Y.Z)
+        required: true
+        type: string
+
+concurrency:
+  group: csa-npm-${{ github.event.release.tag_name || inputs.tag }}
+  cancel-in-progress: false
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  publish:
+    name: Publish npm packages
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        with:
+          node-version: "26"
+          registry-url: https://registry.npmjs.org
+          package-manager-cache: false
+
+      - name: Download and verify formal Manager Release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ github.event.release.tag_name || inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ ! "$TAG" =~ ^v(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)\.(0|[1-9][0-9]*)$ ]]; then
+            echo "Expected a stable CSA Manager tag in vX.Y.Z form; got '$TAG'." >&2
+            exit 2
+          fi
+          VERSION="${TAG#v}"
+
+          read -r release_tag draft prerelease < <(
+            gh release view "$TAG" \
+              --repo "$GITHUB_REPOSITORY" \
+              --json tagName,isDraft,isPrerelease \
+              --jq '[.tagName, .isDraft, .isPrerelease] | @tsv'
+          )
+          if [[ "$release_tag" != "$TAG" || "$draft" != "false" || "$prerelease" != "false" ]]; then
+            echo "Refusing npm publication from a draft, prerelease, or mismatched Release." >&2
+            exit 2
+          fi
+
+          assets="$RUNNER_TEMP/csa-npm-release"
+          mkdir -p "$assets"
+          gh release download "$TAG" --repo "$GITHUB_REPOSITORY" --dir "$assets"
+
+          payloads=(
+            "csa-v${VERSION}-windows-x86_64.zip"
+            "csa-v${VERSION}-linux-x86_64.tar.gz"
+            "csa-v${VERSION}-linux-aarch64.tar.gz"
+            "csa-v${VERSION}-macos-x86_64.tar.gz"
+            "csa-v${VERSION}-macos-aarch64.tar.gz"
+            "dslzl-csa-${VERSION}.tgz"
+            "dslzl-csa-win32-x64-${VERSION}.tgz"
+            "dslzl-csa-linux-x64-${VERSION}.tgz"
+            "dslzl-csa-linux-arm64-${VERSION}.tgz"
+            "dslzl-csa-darwin-x64-${VERSION}.tgz"
+            "dslzl-csa-darwin-arm64-${VERSION}.tgz"
+          )
+          expected=("${payloads[@]}" "SHA256SUMS")
+          mapfile -t actual < <(find "$assets" -maxdepth 1 -type f -printf '%f\n' | sort)
+          mapfile -t wanted < <(printf '%s\n' "${expected[@]}" | sort)
+          if [[ "${actual[*]}" != "${wanted[*]}" ]]; then
+            echo "Unexpected formal Manager Release asset set." >&2
+            printf 'Expected:\n%s\n' "${wanted[*]}" >&2
+            printf 'Actual:\n%s\n' "${actual[*]}" >&2
+            exit 2
+          fi
+
+          cd "$assets"
+          mapfile -t checksummed < <(awk '{print $2}' SHA256SUMS | sed 's/^\*//' | sort)
+          mapfile -t wanted_checksums < <(printf '%s\n' "${payloads[@]}" | sort)
+          if [[ "${checksummed[*]}" != "${wanted_checksums[*]}" ]]; then
+            echo "SHA256SUMS does not cover the exact formal payload set." >&2
+            exit 2
+          fi
+          sha256sum -c SHA256SUMS
+
+          {
+            echo "VERSION=$VERSION"
+            echo "ASSET_DIR=$assets"
+          } >> "$GITHUB_ENV"
+
+      - name: Publish exact npm tarballs with provenance
+        run: |
+          set -euo pipefail
+
+          local_integrity() {
+            node -e 'const fs=require("node:fs"),crypto=require("node:crypto"); process.stdout.write("sha512-"+crypto.createHash("sha512").update(fs.readFileSync(process.argv[1])).digest("base64"))' "$1"
+          }
+
+          validate_tarball() {
+            local package="$1" tarball="$2" manifest
+            manifest="$(tar -xOzf "$tarball" package/package.json)"
+            PACKAGE="$package" VERSION="$VERSION" node -e '
+              const fs = require("node:fs");
+              const manifest = JSON.parse(fs.readFileSync(0, "utf8"));
+              if (manifest.name !== process.env.PACKAGE || manifest.version !== process.env.VERSION) {
+                throw new Error(`tarball identity mismatch: ${manifest.name}@${manifest.version}`);
+              }
+            ' <<<"$manifest"
+          }
+
+          publish_one() {
+            local package="$1" tarball="$2" expected actual error_file
+            validate_tarball "$package" "$tarball"
+            expected="$(local_integrity "$tarball")"
+            error_file="$RUNNER_TEMP/npm-view-error"
+            : > "$error_file"
+
+            if actual="$(npm view "$package@$VERSION" dist.integrity --registry=https://registry.npmjs.org 2>"$error_file")"; then
+              if [[ "$actual" != "$expected" ]]; then
+                echo "$package@$VERSION already exists with different integrity." >&2
+                exit 2
+              fi
+              echo "$package@$VERSION already exists with exact integrity; skipping."
+              return
+            fi
+            if ! grep -Fq "E404" "$error_file"; then
+              cat "$error_file" >&2
+              exit 2
+            fi
+
+            npm publish "$tarball" \
+              --provenance \
+              --access public \
+              --registry=https://registry.npmjs.org
+
+            for attempt in 1 2 3 4 5; do
+              if actual="$(npm view "$package@$VERSION" dist.integrity --registry=https://registry.npmjs.org 2>"$error_file")" \
+                && [[ "$actual" == "$expected" ]]; then
+                echo "Verified $package@$VERSION at the registry."
+                return
+              fi
+              sleep 2
+            done
+            cat "$error_file" >&2
+            echo "Published $package@$VERSION but could not verify its exact integrity." >&2
+            exit 2
+          }
+
+          publish_one "@dslzl/csa-win32-x64" "$ASSET_DIR/dslzl-csa-win32-x64-${VERSION}.tgz"
+          publish_one "@dslzl/csa-linux-x64" "$ASSET_DIR/dslzl-csa-linux-x64-${VERSION}.tgz"
+          publish_one "@dslzl/csa-linux-arm64" "$ASSET_DIR/dslzl-csa-linux-arm64-${VERSION}.tgz"
+          publish_one "@dslzl/csa-darwin-x64" "$ASSET_DIR/dslzl-csa-darwin-x64-${VERSION}.tgz"
+          publish_one "@dslzl/csa-darwin-arm64" "$ASSET_DIR/dslzl-csa-darwin-arm64-${VERSION}.tgz"
+          publish_one "@dslzl/csa" "$ASSET_DIR/dslzl-csa-${VERSION}.tgz"

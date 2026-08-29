@@ -4,10 +4,10 @@ CSA has two independent release domains. The Manager and patched Codex must neve
 
 | Domain | Tag | Workflow | Published product |
 | --- | --- | --- | --- |
-| CSA Manager | `vX.Y.Z` | `.github/workflows/release-csa.yml` | Five Manager archives and six npm tarballs |
+| CSA Manager | `vX.Y.Z` | `.github/workflows/release-csa.yml`, then `.github/workflows/publish-npm.yml` | Five Manager archives and six npm packages |
 | Patched Codex | `compat-<compat_id>` | `.github/workflows/release-patched-codex.yml` | One reviewed target-specific Codex CLI plus verification payload |
 
-GitHub Actions is the release authority for both domains. npm publication is a separate, explicit maintainer step after the Manager GitHub Release exists.
+GitHub Actions is the release authority for both domains. Publishing a formal Manager GitHub Release authorizes the independent npm Trusted Publishing workflow; no maintainer token or local npm login is used by that workflow.
 
 ## Current release snapshot
 
@@ -132,7 +132,8 @@ The workflow:
 5. stages, packs, installs, tests, and uninstalls npm candidates in temporary prefixes;
 6. requires the exact archive and npm tarball inventory;
 7. creates `SHA256SUMS`;
-8. creates an annotated `vX.Y.Z` tag and immutable GitHub Release.
+8. creates an annotated `vX.Y.Z` tag and immutable GitHub Release;
+9. dispatches npm Trusted Publishing for that exact tag.
 
 The `v0.1.4` asset pattern is:
 
@@ -153,20 +154,26 @@ SHA256SUMS
 
 ### 4. Publish npm packages
 
-Download the six npm tarballs from the Manager Release and verify them with `SHA256SUMS`. Publish all platform packages before the meta package:
+Each npm package must be bound once to this repository and the exact case-sensitive workflow filename:
 
 ```powershell
-npm publish .\dslzl-csa-win32-x64-0.1.4.tgz --access public
-npm publish .\dslzl-csa-linux-x64-0.1.4.tgz --access public
-npm publish .\dslzl-csa-linux-arm64-0.1.4.tgz --access public
-npm publish .\dslzl-csa-darwin-x64-0.1.4.tgz --access public
-npm publish .\dslzl-csa-darwin-arm64-0.1.4.tgz --access public
-npm publish .\dslzl-csa-0.1.4.tgz --access public
+npm trust github @dslzl/csa-win32-x64 --repo DSLZL/CSA --file publish-npm.yml --allow-publish --yes
+npm trust github @dslzl/csa-linux-x64 --repo DSLZL/CSA --file publish-npm.yml --allow-publish --yes
+npm trust github @dslzl/csa-linux-arm64 --repo DSLZL/CSA --file publish-npm.yml --allow-publish --yes
+npm trust github @dslzl/csa-darwin-x64 --repo DSLZL/CSA --file publish-npm.yml --allow-publish --yes
+npm trust github @dslzl/csa-darwin-arm64 --repo DSLZL/CSA --file publish-npm.yml --allow-publish --yes
+npm trust github @dslzl/csa --repo DSLZL/CSA --file publish-npm.yml --allow-publish --yes
 ```
 
-Use the npm CLI authentication method configured for the maintainer account. Do not put one-time codes, tokens, or browser authentication data in logs or repository files.
+That bootstrap requires a maintainer npm login once. After publishing a formal `vX.Y.Z` Release, `release-csa.yml` explicitly dispatches `.github/workflows/publish-npm.yml`; the workflow's `release: published` trigger also covers formal Releases created outside the Manager workflow. Publication uses GitHub OIDC, so no npm token, OTP, or local login is needed for each release.
 
-Publishing the meta package last prevents a new `@dslzl/csa` version from pointing at platform versions that are not yet available. npm versions are immutable, so a partially published version must be completed rather than overwritten.
+The workflow downloads only the selected formal, non-prerelease Manager Release; requires its exact 12-asset inventory; validates `SHA256SUMS` coverage and contents; verifies every npm tarball name and version; and publishes with provenance. It publishes the five platform packages before the meta package. A rerun skips an existing version only when the registry integrity exactly matches the Release tarball, so a partial publication can be resumed without overwriting immutable npm versions.
+
+To publish an existing formal Release that predates the workflow, or to resume a partial run:
+
+```powershell
+gh workflow run publish-npm.yml --ref main -f tag=v0.1.4
+```
 
 Verify the registry and launcher:
 
@@ -340,4 +347,4 @@ cargo test --all-targets
 node scripts\test_npm_launcher.mjs
 ```
 
-Local checks do not replace hosted Patch Validation, candidate build, disposable runtime acceptance, independent formal rebuild, exact draft verification, or explicit npm publication.
+Local checks do not replace hosted Patch Validation, candidate build, disposable runtime acceptance, independent formal rebuild, exact draft verification, or the GitHub OIDC npm publication gate.

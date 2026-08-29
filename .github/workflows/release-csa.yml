@@ -300,6 +300,7 @@ jobs:
     needs: [validate, quality, build]
     runs-on: ubuntu-24.04
     permissions:
+      actions: write
       contents: write
 
     steps:
@@ -401,3 +402,14 @@ jobs:
             --verify-tag \
             --title "CSA v${VERSION}" \
             --notes-file "$RUNNER_TEMP/release-notes.md"
+
+      - name: Dispatch npm Trusted Publishing
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ needs.validate.outputs.tag }}
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+        run: |
+          gh workflow run publish-npm.yml \
+            --repo "$GITHUB_REPOSITORY" \
+            --ref "$DEFAULT_BRANCH" \
+            -f tag="$TAG"
