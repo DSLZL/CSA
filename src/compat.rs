@@ -499,10 +499,11 @@ fn validate_manifest(manifest: &CompatibilityManifest) -> Result<()> {
         6 => 14,
         7 => 15,
         8 => 16,
+        9 => 17,
         _ => {
             return Err(ManagerError::new(
                 "unsupported_manifest",
-                "only patch sets 1 through 8 are supported",
+                "only patch sets 1 through 9 are supported",
             ));
         }
     };
@@ -732,11 +733,11 @@ pub struct BuildContract {
 impl TestContract {
     fn validate(&self, manifest: &CompatibilityManifest) -> Result<()> {
         let p2 = manifest.patch_set_version == 2;
-        let p3 = matches!(manifest.patch_set_version, 3..=8);
-        let p3_isolates_background_exit = matches!(manifest.patch_set_version, 6..=8);
+        let p3 = matches!(manifest.patch_set_version, 3..=9);
+        let p3_isolates_background_exit = matches!(manifest.patch_set_version, 6..=9);
         let p3_tui_offset = usize::from(p3_isolates_background_exit);
         let p3_offset = usize::from(p3);
-        let transport_fallback = matches!(manifest.patch_set_version, 6..=8)
+        let transport_fallback = matches!(manifest.patch_set_version, 6..=9)
             && manifest.patches.iter().any(|patch| {
                 patch.path == "patches/0013-subagent-live-polish.patch"
                     && matches!(
@@ -746,12 +747,17 @@ impl TestContract {
                     )
             });
         let transport_fallback_offset = usize::from(transport_fallback);
-        let csa_orbit = matches!(manifest.patch_set_version, 7..=8)
+        let csa_orbit = matches!(manifest.patch_set_version, 7..=9)
             && manifest
                 .patches
                 .iter()
                 .any(|patch| patch.path == "patches/0015-csa-1x1-lossless-orbit.patch");
         let csa_orbit_offset = usize::from(csa_orbit);
+        let state_db_compat = manifest.patch_set_version == 9
+            && manifest
+                .patches
+                .iter()
+                .any(|patch| patch.path == "patches/0017-codex-state-db-line-endings.patch");
         let batch_join = (p2 || p3)
             && manifest
                 .patches
@@ -766,6 +772,9 @@ impl TestContract {
             5 if batch_join => 16,
             6 if batch_join => 17 + transport_fallback_offset,
             7..=8 if batch_join && csa_orbit => 17 + transport_fallback_offset + csa_orbit_offset,
+            9 if batch_join && csa_orbit && state_db_compat => {
+                18 + transport_fallback_offset + csa_orbit_offset
+            }
             _ => {
                 return Err(ManagerError::new(
                     "invalid_test_contract",
@@ -1164,7 +1173,7 @@ impl TestContract {
                     ],
                     &[],
                 ));
-        let overlay_test_matches = !matches!(manifest.patch_set_version, 4..=8)
+        let overlay_test_matches = !matches!(manifest.patch_set_version, 4..=9)
             || step_matches(
                 &self.tests[15 + p3_tui_offset + transport_fallback_offset + csa_orbit_offset],
                 "CSA official runtime overlay",
@@ -1174,6 +1183,21 @@ impl TestContract {
                     "-p",
                     "codex-install-context",
                     "csa_overlay_prefers_owned_files_and_falls_back_to_the_official_package",
+                    "--",
+                    "--nocapture",
+                ],
+                &[],
+            );
+        let state_db_compat_test_matches = !state_db_compat
+            || step_matches(
+                &self.tests[16 + p3_tui_offset + transport_fallback_offset + csa_orbit_offset],
+                "Codex state DB line-ending compatibility",
+                &[
+                    "cargo",
+                    "test",
+                    "-p",
+                    "codex-state",
+                    "migration_line_endings",
                     "--",
                     "--nocapture",
                 ],
@@ -1205,7 +1229,7 @@ impl TestContract {
                     ("SOURCE_DATE_EPOCH", "1786063808"),
                 ],
             ),
-            6..=8 => map_matches(
+            6..=9 => map_matches(
                 &self.build.env,
                 &[
                     ("CARGO_BUILD_JOBS", "4"),
@@ -1238,6 +1262,7 @@ impl TestContract {
             || !tests_match
             || !p3_tests_match
             || !overlay_test_matches
+            || !state_db_compat_test_matches
             || !build_matches
         {
             return Err(ManagerError::new(

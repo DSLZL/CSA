@@ -1345,6 +1345,24 @@ fn bundled_current_p8_contract_keeps_lossless_orbit_gate() {
 }
 
 #[test]
+fn bundled_p9_candidate_adds_state_db_compatibility_gate() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("payload/codex/rust-v0.150.1-native-join-p9/manifest.toml")
+        .canonicalize()
+        .unwrap();
+    let loaded = LoadedCompatibility::load(&manifest).unwrap();
+    let contract = loaded.test_contract().unwrap();
+
+    assert_eq!(loaded.manifest.patch_set_version, 9);
+    assert_eq!(loaded.patch_paths.len(), 17);
+    assert_eq!(contract.tests.len(), 20);
+    assert_eq!(
+        contract.tests[19].name,
+        "Codex state DB line-ending compatibility"
+    );
+}
+
+#[test]
 fn family_bindings_resolve_to_the_exact_legacy_p2_payloads() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
     for version in ["0.147.0", "0.148.0"] {

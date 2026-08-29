@@ -1,0 +1,337 @@
+{
+  "build": {
+    "argv": [
+      "cargo",
+      "build",
+      "-p",
+      "codex-cli",
+      "--bin",
+      "codex",
+      "--release",
+      "--target",
+      "x86_64-pc-windows-msvc"
+    ],
+    "artifact": "{cargo_target}/x86_64-pc-windows-msvc/release/codex.exe",
+    "env": {
+      "CARGO_BUILD_JOBS": "4",
+      "CARGO_PROFILE_RELEASE_DEBUG": "0",
+      "SOURCE_DATE_EPOCH": "1786063808"
+    }
+  },
+  "common_env": {
+    "CARGO_BUILD_JOBS": "2",
+    "CARGO_INCREMENTAL": "0",
+    "CARGO_TARGET_DIR": "{cargo_target}",
+    "INSTA_OUTPUT": "none",
+    "INSTA_UPDATE": "no",
+    "INSTA_WORKSPACE_ROOT": "{source}/codex-rs",
+    "RUST_MIN_STACK": "8388608"
+  },
+  "compat_id": "rust-v0.150.1-native-join-p9",
+  "cwd": "{source}/codex-rs",
+  "generation": [
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-app-server-protocol",
+        "write_schema_fixtures_from_env",
+        "--",
+        "--ignored",
+        "--nocapture"
+      ],
+      "env": {
+        "CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL": "0",
+        "CODEX_APP_SERVER_SCHEMA_ROOT": "{source}/codex-rs/app-server-protocol/schema"
+      },
+      "name": "stable schema and embedded exports"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-app-server-protocol",
+        "write_schema_fixtures_from_env",
+        "--",
+        "--ignored",
+        "--nocapture"
+      ],
+      "env": {
+        "CODEX_APP_SERVER_SCHEMA_EXPERIMENTAL": "1",
+        "CODEX_APP_SERVER_SCHEMA_ROOT": "{source}/codex-rs/app-server-protocol/schema"
+      },
+      "name": "experimental embedded exports"
+    }
+  ],
+  "known_upstream_errata": [
+    "The rust-v0.150.1 Cargo.lock records workspace packages as 0.0.0; Cargo 1.95.0 mechanically normalizes those entries to 0.150.1 before the build.",
+    "The upstream codex-tui app::tests::background_exit_tests::exit_interrupts_before_requesting_shutdown test can observe an unrelated asynchronous event first under parallel load; the contract runs it separately with one test thread and skips only its duplicate parallel execution."
+  ],
+  "parameters": {
+    "cargo_target": "absolute disposable Cargo target path",
+    "source": "absolute clean checkout path"
+  },
+  "schema": 1,
+  "tests": [
+    {
+      "argv": [
+        "cargo",
+        "fmt",
+        "--all",
+        "--",
+        "--check"
+      ],
+      "name": "workspace formatting"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-tui",
+        "session_header_appends_csa_to_display_and_raw_versions",
+        "--",
+        "--nocapture"
+      ],
+      "name": "CSA startup version display",
+      "output": "failure-only"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-core",
+        "multi_agent_v2_ephemeral_full_history_fork_uses_live_context_and_accepts_service_tier",
+        "--",
+        "--nocapture"
+      ],
+      "name": "ephemeral parent full-history fork"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-core",
+        "spawned_child_inherits_parent_http_fallback_for_the_same_provider",
+        "--",
+        "--nocapture"
+      ],
+      "name": "subagent transport fallback inheritance"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-app-server-protocol",
+        "schema_fixtures_tests",
+        "--",
+        "--nocapture"
+      ],
+      "env": {
+        "CODEX_APP_SERVER_SCHEMA_ROOT": "{source}/codex-rs/app-server-protocol/schema"
+      },
+      "name": "schema reverse-check"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-core",
+        "agent::completion::tests",
+        "--",
+        "--nocapture"
+      ],
+      "name": "completion registry"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-core",
+        "agent_run_terminal_mapper_preserves_exact_outcomes",
+        "--",
+        "--nocapture"
+      ],
+      "name": "terminal outcome mapping"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-core",
+        "spawned_v2_terminal_events_publish_replayable_exact_run_outcomes",
+        "--",
+        "--nocapture"
+      ],
+      "name": "replayable terminal publication"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-core",
+        "join_agent_tool_requires_exact_run_without_timeout",
+        "--",
+        "--nocapture"
+      ],
+      "name": "Join tool schema"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-core",
+        "join_agents_tool_requires_all_exact_runs_in_one_call",
+        "--",
+        "--nocapture"
+      ],
+      "name": "batch Join tool schema"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-core",
+        "join_agents_waits_for_every_exact_run_and_preserves_order",
+        "--",
+        "--nocapture"
+      ],
+      "name": "batch Join waits for every exact run"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-core",
+        "multi_agent_v2_join_rejects_invalid_arguments_targets_and_runs",
+        "--",
+        "--nocapture"
+      ],
+      "name": "invalid Join inputs"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-core",
+        "--test",
+        "all",
+        "multi_agent_join",
+        "--",
+        "--nocapture"
+      ],
+      "name": "Native Join integration"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-tui",
+        "--lib",
+        "subagent_live",
+        "--",
+        "--test-threads=1",
+        "--format=terse"
+      ],
+      "name": "TUI live state and panel",
+      "output": "failure-only"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-tui",
+        "--lib",
+        "csa_",
+        "--",
+        "--test-threads=1",
+        "--format=terse"
+      ],
+      "name": "CSA lossless Orbit",
+      "output": "failure-only"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-tui",
+        "--lib",
+        "app::tests::background_exit_tests::exit_interrupts_before_requesting_shutdown",
+        "--",
+        "--test-threads=1",
+        "--format=terse"
+      ],
+      "name": "TUI background exit isolation",
+      "output": "failure-only"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-tui",
+        "--lib",
+        "--",
+        "--skip",
+        "app::tests::background_exit_tests::exit_interrupts_before_requesting_shutdown",
+        "--format=terse"
+      ],
+      "name": "complete TUI library",
+      "output": "failure-only"
+    },
+    {
+      "argv": [
+        "cargo",
+        "clippy",
+        "-p",
+        "codex-tui",
+        "--lib",
+        "--tests",
+        "--",
+        "-D",
+        "warnings"
+      ],
+      "name": "TUI clippy"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-install-context",
+        "csa_overlay_prefers_owned_files_and_falls_back_to_the_official_package",
+        "--",
+        "--nocapture"
+      ],
+      "name": "CSA official runtime overlay"
+    },
+    {
+      "argv": [
+        "cargo",
+        "test",
+        "-p",
+        "codex-state",
+        "migration_line_endings",
+        "--",
+        "--nocapture"
+      ],
+      "name": "Codex state DB line-ending compatibility"
+    }
+  ]
+}

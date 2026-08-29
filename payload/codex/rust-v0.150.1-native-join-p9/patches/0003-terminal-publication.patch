@@ -1,0 +1,104 @@
+diff --git a/codex-rs/core/src/session/mod.rs b/codex-rs/core/src/session/mod.rs
+index d14cadcad..e72eb47d8 100644
+--- a/codex-rs/core/src/session/mod.rs
++++ b/codex-rs/core/src/session/mod.rs
+@@ -12,6 +12,9 @@ use std::time::UNIX_EPOCH;
+ use crate::agent::AgentControl;
+ use crate::agent::AgentStatus;
+ use crate::agent::agent_status_from_event;
++use crate::agent::completion::AgentRunOutcome;
++use crate::agent::completion::AgentRunRef;
++use crate::agent::completion::AgentRunTerminal;
+ use crate::agent::status::is_final;
+ use crate::agent_communication::AgentCommunicationContext;
+ use crate::agent_communication::AgentCommunicationKind;
+@@ -334,6 +337,7 @@ use codex_protocol::protocol::ApplyPatchApprovalRequestEvent;
+ use codex_protocol::protocol::AskForApproval;
+ use codex_protocol::protocol::CodexErrorInfo;
+ use codex_protocol::protocol::DeprecationNoticeEvent;
++use codex_protocol::protocol::ErrorEvent;
+ use codex_protocol::protocol::Event;
+ use codex_protocol::protocol::EventMsg;
+ use codex_protocol::protocol::ExecApprovalRequestEvent;
+@@ -470,6 +474,45 @@ pub(crate) const SUBMISSION_CHANNEL_CAPACITY: usize = 512;
+ const CYBER_VERIFY_URL: &str = "https://chatgpt.com/cyber";
+ const CYBER_SAFETY_URL: &str = "https://developers.openai.com/codex/concepts/cyber-safety";
+ 
++fn agent_run_terminal_from_event(
++    msg: &EventMsg,
++    terminal_error: Option<&ErrorEvent>,
++) -> Option<AgentRunTerminal> {
++    if let Some(error) = terminal_error {
++        return Some(AgentRunTerminal {
++            outcome: AgentRunOutcome::Failed {
++                message: error.message.clone(),
++                reason: None,
++            },
++        });
++    }
++
++    let outcome = match msg {
++        EventMsg::TurnComplete(event) => AgentRunOutcome::Completed {
++            output: event.last_agent_message.clone(),
++        },
++        EventMsg::TurnAborted(event) => match event.reason {
++            TurnAbortReason::Interrupted => AgentRunOutcome::Cancelled {
++                reason: "interrupted".to_string(),
++            },
++            TurnAbortReason::BudgetLimited => AgentRunOutcome::Failed {
++                message: "child run exceeded its token budget".to_string(),
++                reason: Some("budget_limited".to_string()),
++            },
++            TurnAbortReason::Replaced => AgentRunOutcome::Failed {
++                message: "child run was replaced".to_string(),
++                reason: Some("replaced".to_string()),
++            },
++            TurnAbortReason::ReviewEnded => AgentRunOutcome::Failed {
++                message: "child review ended".to_string(),
++                reason: Some("review_ended".to_string()),
++            },
++        },
++        _ => return None,
++    };
++    Some(AgentRunTerminal { outcome })
++}
++
+ impl Session {
+     /// Spawn and initialize a new session.
+     pub(crate) async fn spawn(args: SessionSpawnArgs) -> CodexResult<(Arc<Self>, SessionIo)> {
+@@ -1991,14 +2034,23 @@ impl Session {
+ 
+         let SessionSource::SubAgent(SubAgentSource::ThreadSpawn {
+             parent_thread_id,
+-            agent_path: Some(child_agent_path),
++            agent_path,
+             ..
+         }) = &turn_context.session_source
+         else {
+             return;
+         };
+ 
+-        let status = match turn_context.terminal_error.lock().await.take() {
++        let terminal_error = turn_context.terminal_error.lock().await.take();
++        let Some(terminal) = agent_run_terminal_from_event(msg, terminal_error.as_ref()) else {
++            return;
++        };
++        self.services.agent_control.complete_run(
++            AgentRunRef::new(self.thread_id, turn_context.sub_id.clone()),
++            Arc::new(terminal),
++        );
++
++        let status = match terminal_error {
+             Some(error) => {
+                 let status = AgentStatus::Errored(error.message);
+                 self.agent_status.send_replace(status.clone());
+@@ -2014,6 +2066,9 @@ impl Session {
+         if !is_final(&status) {
+             return;
+         }
++        let Some(child_agent_path) = agent_path else {
++            return;
++        };
+ 
+         self.forward_child_completion_to_parent(
+             turn_context,

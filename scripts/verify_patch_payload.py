@@ -309,8 +309,8 @@ def _validate_manifest(manifest: dict[str, object]) -> None:
         or manifest["patch_api"] != 1
     ):
         raise VerificationError("unsupported manifest schema or patch_api")
-    if type(manifest["patch_set_version"]) is not int or manifest["patch_set_version"] not in {1, 2, 3, 4, 5, 6, 7, 8}:
-        raise VerificationError("patch_set_version must be an integer from 1 through 8")
+    if type(manifest["patch_set_version"]) is not int or manifest["patch_set_version"] not in {1, 2, 3, 4, 5, 6, 7, 8, 9}:
+        raise VerificationError("patch_set_version must be an integer from 1 through 9")
     for key, pattern in (
         ("compat_id", COMPAT_ID),
         ("codex_version", VERSION),
@@ -329,7 +329,7 @@ def _validate_manifest(manifest: dict[str, object]) -> None:
     _relative(manifest["source_hashes"], "source_hashes")
 
     patches = manifest["patches"]
-    expected_patch_count = {1: 5, 2: 6, 3: 11, 4: 12, 5: 13, 6: 14, 7: 15, 8: 16}[
+    expected_patch_count = {1: 5, 2: 6, 3: 11, 4: 12, 5: 13, 6: 14, 7: 15, 8: 16, 9: 17}[
         manifest["patch_set_version"]
     ]
     if not isinstance(patches, list) or len(patches) != expected_patch_count:

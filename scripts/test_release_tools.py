@@ -526,6 +526,36 @@ def test_contract_shape() -> None:
     assert "CSA_KITTY_OUTER_SPREAD" in p8_patch
     assert "CSA_SIXEL_Y_OFFSET" in p8_patch
     assert "invalidate_positions" in p8_patch
+    p9 = REPOSITORY / "payload" / "codex" / "rust-v0.150.1-native-join-p9"
+    p9_manifest = tomllib.loads((p9 / "manifest.toml").read_text(encoding="utf-8"))
+    p9_contract = load_contract(p9 / "test-contract.json", p9.name)
+    assert p9_manifest["patch_set_version"] == 9
+    assert len(p9_manifest["patches"]) == 17
+    assert p9_manifest["patches"][-1]["path"] == (
+        "patches/0017-codex-state-db-line-endings.patch"
+    )
+    assert len(p9_contract["tests"]) == 20
+    assert p9_contract["tests"][-1] == {
+        "argv": [
+            "cargo",
+            "test",
+            "-p",
+            "codex-state",
+            "migration_line_endings",
+            "--",
+            "--nocapture",
+        ],
+        "name": "Codex state DB line-ending compatibility",
+    }
+    p9_patch = (p9 / "patches" / "0017-codex-state-db-line-endings.patch").read_text(
+        encoding="utf-8"
+    )
+    assert "repair_migration_line_endings" in p9_patch
+    assert "migration_line_endings_unrelated_checksum_is_not_rewritten" in p9_patch
+    p9_hashes = json.loads((p9 / "expected" / "source-hashes.json").read_bytes())
+    assert "codex-rs/state/src/migrations.rs" in p9_hashes["present"]
+    assert "codex-rs/state/src/migrations_tests.rs" in p9_hashes["present"]
+    assert "codex-rs/state/src/sqlite.rs" in p9_hashes["present"]
     for attributes in (
         REPOSITORY / "payload" / "codex" / ".gitattributes",
         REPOSITORY / "release" / ".gitattributes",
@@ -1407,7 +1437,7 @@ def test_compatibility_release_tools(root: Path) -> None:
             if repository == "openai/codex":
                 assert tag == "rust-v9.8.7"
                 return "f" * 40
-            assert repository == "dslzl/CSA" and tag == "compat-rust-v9.8.7-native-join-p8"
+            assert repository == "dslzl/CSA" and tag == "compat-rust-v9.8.7-native-join-p9"
             return "d" * 40
 
     fake = FakeApi()
@@ -1420,13 +1450,13 @@ def test_compatibility_release_tools(root: Path) -> None:
     detection = detect(REPOSITORY.resolve(), fake)
     assert detection["action"] == "blocked" and detection["issue_needs_update"] is False
     fake.issue_body = ""
-    fake.pulls = [{"head": {"ref": "automation/compat-rust-v9.8.7-native-join-p8"}}]
+    fake.pulls = [{"head": {"ref": "automation/compat-rust-v9.8.7-native-join-p9"}}]
     assert detect(REPOSITORY.resolve(), fake)["action"] == "candidate_open"
     fake.pulls = []
     with patch("compat_release.exact_local_entry", return_value=True):
         assert detect(REPOSITORY.resolve(), fake)["action"] == "publish"
     fake.release = {
-        "tag_name": "compat-rust-v9.8.7-native-join-p8",
+        "tag_name": "compat-rust-v9.8.7-native-join-p9",
         "draft": False,
         "prerelease": False,
     }
@@ -1435,18 +1465,18 @@ def test_compatibility_release_tools(root: Path) -> None:
     class MatchingApi(FakeApi):
         def get(self, path: str, *, optional: bool = False):
             if path.endswith("/releases/latest"):
-                return {"tag_name": "rust-v0.149.1", "draft": False, "prerelease": False}
+                return {"tag_name": "rust-v0.150.1", "draft": False, "prerelease": False}
             return super().get(path, optional=optional)
 
         def peel_tag(self, repository: str, tag: str) -> str:
             if repository == "openai/codex":
-                assert tag == "rust-v0.149.1"
-                return "ff29a44391deccde0aba0f8390337d7f3c319ea4"
+                assert tag == "rust-v0.150.1"
+                return "90854393966b21e9ebfd21b122334eb09a20c93d"
             return super().peel_tag(repository, tag)
 
     matching = MatchingApi()
     current = detect(REPOSITORY.resolve(), matching)
-    assert current["compat_id"] == "rust-v0.149.1-native-join-p8"
+    assert current["compat_id"] == "rust-v0.150.1-native-join-p9"
     assert current["action"] == "publish"
 
 
