@@ -49,7 +49,7 @@ sha256 = "c2036da2ab928fb4cb29a954f06cfbb5bd1e4bba917e89cdbb66a74b5935d4d9"
 
 [[patches]]
 path = "patches/0007-live-agent-status-feed.patch"
-sha256 = "ad8bc8b3f701935195028b2b7d753d81e0bf2bcb492aeb9f829760dbcafd1884"
+sha256 = "9046f17add7b63d592aad2b7a0c8226e501bc0ec65901f6fe887987959c77918"
 
 [[patches]]
 path = "patches/0008-live-reducer-routing.patch"
