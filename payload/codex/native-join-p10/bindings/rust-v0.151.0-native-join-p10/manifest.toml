@@ -38,7 +38,7 @@ sha256 = "5aa3ff9002effe90fe90e396139d57f3f26f08ecc39b51fc0d4ebe0ef16f59d6"
 
 [[patches]]
 path = "patches/1100-tui-adapter.patch"
-sha256 = "5bd02aa1c9453791a72efd2f527ce2c016f6a7832d164db49c2a07d4fe053ed0"
+sha256 = "adfd7cfa663082349524bc924a38a183219e7a8a044f1031c0f828babe3f0e78"
 
 [[patches]]
 path = "patches/1200-runtime-state-adapter.patch"

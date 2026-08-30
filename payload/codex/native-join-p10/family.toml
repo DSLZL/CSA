@@ -6,4 +6,4 @@ patch_set_version = 10
 [[bindings]]
 compat_id = "rust-v0.151.0-native-join-p10"
 manifest = "bindings/rust-v0.151.0-native-join-p10/manifest.toml"
-sha256 = "6bdd6321de87055398f913699047fe502c23dd76e046c8d9980bc87b50d36e40"
+sha256 = "7f6ae4e107db13fdee82d9a9c66beeada6cf840b419bb7e7a40d58d629c5f2b3"
