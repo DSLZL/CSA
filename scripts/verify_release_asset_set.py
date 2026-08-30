@@ -28,7 +28,7 @@ def digest(path: Path) -> str:
 
 def local_inventory(
     root: Path,
-    expected_executable: str,
+    expected_executable: str | list[str] | None,
     require_install_catalog: bool = False,
 ) -> dict[str, dict[str, Any]]:
     root = root.resolve(strict=True)
@@ -36,17 +36,39 @@ def local_inventory(
     if not descriptor_path.is_file():
         raise ValueError("compatibility-release.json is missing")
     descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
-    artifact = descriptor.get("artifact")
-    if not isinstance(artifact, dict) or artifact.get("asset") != expected_executable:
-        raise ValueError("descriptor artifact does not match the expected CLI executable asset")
-    if any(token in expected_executable.lower() for token in FORBIDDEN_PRODUCT_TOKENS):
-        raise ValueError(f"forbidden non-CLI product asset: {expected_executable}")
+    if descriptor.get("schema", 1) == 2:
+        artifacts = descriptor.get("artifacts")
+        if not isinstance(artifacts, dict) or not artifacts:
+            raise ValueError("multi-target descriptor has no CLI artifacts")
+        declared = [item.get("asset") for item in artifacts.values() if isinstance(item, dict)]
+        if len(declared) != len(artifacts):
+            raise ValueError("multi-target descriptor contains an invalid CLI artifact")
+    else:
+        artifact = descriptor.get("artifact")
+        if not isinstance(artifact, dict):
+            raise ValueError("descriptor has no CLI artifact")
+        declared = [artifact.get("asset")]
+    if not all(isinstance(name, str) and name for name in declared) or len(set(declared)) != len(declared):
+        raise ValueError("descriptor CLI artifact names are invalid or duplicated")
+    expected = (
+        [expected_executable]
+        if isinstance(expected_executable, str)
+        else expected_executable
+    )
+    if expected is not None and set(declared) != set(expected):
+        raise ValueError("descriptor artifacts do not match the expected CLI executable assets")
+    if any(token in name.lower() for name in declared for token in FORBIDDEN_PRODUCT_TOKENS):
+        raise ValueError("descriptor contains a forbidden non-CLI product asset")
 
     files = sorted(path for path in root.iterdir() if path.is_file())
-    executables = [path.name for path in files if path.suffix.lower() in EXECUTABLE_SUFFIXES]
-    if executables != [expected_executable]:
+    executables = [
+        path.name
+        for path in files
+        if path.name in declared or path.suffix.lower() in EXECUTABLE_SUFFIXES
+    ]
+    if set(executables) != set(declared):
         raise ValueError(
-            f"CLI-only Release must contain exactly {expected_executable!r} as executable; got {executables!r}"
+            f"CLI-only Release executable set differs from its descriptor; expected={sorted(declared)!r}, got={executables!r}"
         )
     inventory = {
         path.name: {"size": path.stat().st_size, "sha256": digest(path)}
@@ -128,12 +150,12 @@ def parser() -> argparse.ArgumentParser:
     sub = result.add_subparsers(dest="command", required=True)
     local = sub.add_parser("local")
     local.add_argument("--root", required=True)
-    local.add_argument("--expected-executable", required=True)
+    local.add_argument("--expected-executable", action="append")
     local.add_argument("--require-install-catalog", action="store_true")
     local.set_defaults(handler=command_local)
     remote = sub.add_parser("remote")
     remote.add_argument("--root", required=True)
-    remote.add_argument("--expected-executable", required=True)
+    remote.add_argument("--expected-executable", action="append")
     remote.add_argument("--release-json", required=True)
     remote.add_argument("--require-install-catalog", action="store_true")
     remote.set_defaults(handler=command_remote)

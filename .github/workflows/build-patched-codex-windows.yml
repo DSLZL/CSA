@@ -1,0 +1,125 @@
+name: Build patched Codex CLI for Windows testing
+
+on:
+  workflow_dispatch:
+    inputs:
+      compat_selector:
+        description: "current or one exact compatibility ID from release/compatibility-index.json"
+        required: true
+        default: current
+        type: string
+
+concurrency:
+  group: csa-patched-codex-windows-test-${{ github.ref }}-${{ inputs.compat_selector }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  plan:
+    name: Resolve Windows test build
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    outputs:
+      artifact_filename: ${{ steps.resolve.outputs.artifact_filename }}
+      build_target: ${{ steps.resolve.outputs.build_target }}
+      compat_id: ${{ steps.resolve.outputs.compat_id }}
+      manifest_path: ${{ steps.resolve.outputs.manifest_path }}
+      rust_toolchain: ${{ steps.resolve.outputs.rust_toolchain }}
+      upstream_commit: ${{ steps.resolve.outputs.upstream_commit }}
+      upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - id: resolve
+        name: Resolve committed compatibility authority
+        shell: bash
+        env:
+          REQUESTED_COMPAT_SELECTOR: ${{ inputs.compat_selector }}
+        run: |
+          set -euo pipefail
+          python scripts/compat_catalog.py resolve \
+            --repository . \
+            --selector "$REQUESTED_COMPAT_SELECTOR" \
+            --target x86_64-pc-windows-msvc \
+            --output "$RUNNER_TEMP/resolution.json" \
+            --github-output "$GITHUB_OUTPUT"
+          python scripts/compat_catalog.py validate --repository .
+
+  build:
+    name: Build Windows x64 test candidate
+    needs: plan
+    permissions:
+      actions: write
+      contents: read
+    uses: ./.github/workflows/build-patched-codex-target.yml
+    with:
+      artifact_filename: ${{ needs.plan.outputs.artifact_filename }}
+      compat_id: ${{ needs.plan.outputs.compat_id }}
+      manifest_path: ${{ needs.plan.outputs.manifest_path }}
+      runner: windows-2025
+      rust_toolchain: ${{ needs.plan.outputs.rust_toolchain }}
+      source_commit: ${{ github.sha }}
+      target: ${{ needs.plan.outputs.build_target }}
+      upstream_commit: ${{ needs.plan.outputs.upstream_commit }}
+      upstream_tag: ${{ needs.plan.outputs.upstream_tag }}
+
+  package:
+    name: Package Windows test candidate
+    needs: [plan, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Download Windows target
+        uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+        with:
+          name: patched-codex-target-${{ needs.plan.outputs.compat_id }}-${{ needs.plan.outputs.build_target }}
+          path: ${{ runner.temp }}/patched-windows-target
+
+      - name: Assemble local acceptance inputs
+        shell: bash
+        env:
+          REQUESTED_COMPAT_SELECTOR: ${{ inputs.compat_selector }}
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/windows-test-candidate"
+          mkdir -p "$root/bundle"
+          cp -a "$RUNNER_TEMP/patched-windows-target/." "$root/bundle/"
+          python scripts/compat_catalog.py resolve \
+            --repository . \
+            --selector "$REQUESTED_COMPAT_SELECTOR" \
+            --target '${{ needs.plan.outputs.build_target }}' \
+            --output "$root/resolution.json"
+          python scripts/compat_catalog.py candidate \
+            --repository . \
+            --resolution "$root/resolution.json" \
+            --artifact "$root/bundle/bin/${{ needs.plan.outputs.artifact_filename }}" \
+            --output "$root/candidate-record.json" \
+            --provider github-actions \
+            --pipeline "$GITHUB_RUN_ID" \
+            --job 'build/${{ needs.plan.outputs.build_target }}' \
+            --source-commit "$GITHUB_SHA"
+
+      - name: Upload Windows test candidate
+        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        with:
+          name: patched-codex-windows-test-${{ needs.plan.outputs.compat_id }}
+          path: ${{ runner.temp }}/windows-test-candidate
+          if-no-files-found: error
+          compression-level: 0
+          retention-days: 14

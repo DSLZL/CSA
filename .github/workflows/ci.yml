@@ -318,6 +318,8 @@ jobs:
           python scripts/compat_catalog.py validate --repository .
           python scripts/compat_catalog.py guard-workflows \
             .github/workflows/ci.yml \
+            .github/workflows/build-patched-codex-target.yml \
+            .github/workflows/build-patched-codex-windows.yml \
             .github/workflows/publish-npm.yml \
             .github/workflows/release-csa.yml \
             .github/workflows/release-patched-codex.yml \

@@ -64,6 +64,8 @@ MANAGER_FILES = {
 COMPAT_FILES = {
     "release/compatibility-index.json",
     ".github/release.yml",
+    ".github/workflows/build-patched-codex-target.yml",
+    ".github/workflows/build-patched-codex-windows.yml",
     ".github/workflows/release-patched-codex.yml",
     ".github/workflows/validate-patched-codex.yml",
     ".github/workflows/watch-codex-release.yml",

@@ -5,7 +5,7 @@ CSA has two independent release domains. The Manager and patched Codex must neve
 | Domain | Tag | Workflow | Published product |
 | --- | --- | --- | --- |
 | CSA Manager | `vX.Y.Z` | `.github/workflows/release-csa.yml`, then `.github/workflows/publish-npm.yml` | Five Manager archives and six npm packages |
-| Patched Codex | `compat-<compat_id>` | `.github/workflows/release-patched-codex.yml` | One reviewed target-specific Codex CLI plus verification payload |
+| Patched Codex | `compat-<compat_id>` | `.github/workflows/release-patched-codex.yml` | Every manifest-declared native Codex CLI plus one exact verification payload |
 
 GitHub Actions is the release authority for both domains. Publishing a formal Manager GitHub Release authorizes the independent npm Trusted Publishing workflow; no maintainer token or local npm login is used by that workflow.
 
@@ -48,9 +48,6 @@ build profile         runtime lock
         |                  |
         +---------+--------+
                   v
-       exact Patch Validation
-                  |
-                  v
        disposable candidate build
                   |
                   v
@@ -58,6 +55,12 @@ build profile         runtime lock
                   |
                   v
        committed acceptance record
+                  |
+                  v
+       annotated compatibility tag
+                  |
+                  v
+       exact Patch Validation
                   |
                   v
        independent formal rebuild
@@ -72,7 +75,7 @@ build profile         runtime lock
        immutable formal Release
 ```
 
-The catalog routes a selector to a manifest and target-specific locks. It does not replace the manifest as the source of upstream, patch, preimage, target, or artifact truth.
+The catalog routes a selector to a manifest and the canonical acceptance locks. The manifest owns the complete platform artifact set; it remains the source of upstream, patch, preimage, target, and artifact truth.
 
 Workflow YAML must not own Codex versions, upstream commits, patch generations, npm integrity values, accepted hashes, or runtime package identities.
 
@@ -191,6 +194,8 @@ Validate catalog structure locally:
 ```powershell
 py -3 scripts\compat_catalog.py validate `
   --repository . `
+  --workflow .github\workflows\build-patched-codex-target.yml `
+  --workflow .github\workflows\build-patched-codex-windows.yml `
   --workflow .github\workflows\validate-patched-codex.yml `
   --workflow .github\workflows\release-patched-codex.yml
 ```
@@ -207,9 +212,51 @@ py -3 scripts\compat_catalog.py resolve `
 
 Unknown selectors, unknown targets, source or lock drift, disabled flags, and missing acceptance records fail closed.
 
-The `Validate patched Codex CLI` workflow runs on relevant pull requests and default-branch pushes, and can also be dispatched manually. It clones the exact reviewed upstream commit into an ephemeral root, prepares pinned tools and runtime inputs, applies the payload, runs the complete generation and test contract, and uploads exact validation evidence for 14 days.
+`Validate patched Codex CLI` is a formal-release gate. It is never triggered by an ordinary branch push, pull request, or development build. Pushing the exact annotated `compat-<compat_id>` tag makes the Release workflow call this gate for the tagged commit and wait for it before starting native builds.
 
-## Build an acceptance candidate
+The standalone dispatch remains available for diagnosis or recovery:
+
+```powershell
+gh workflow run validate-patched-codex.yml `
+  --ref main `
+  -f compat_selector=<exact-accepted-id> `
+  -f target=x86_64-pc-windows-msvc
+```
+
+It clones the exact reviewed upstream commit into an ephemeral root, prepares pinned tools and runtime inputs, applies the payload, runs the complete generation and test contract, and uploads exact validation evidence for 14 days. A standalone run does not publish anything.
+
+## Build a fast Windows test candidate
+
+For routine local testing, dispatch `Build patched Codex CLI for Windows testing` from the pushed ref that contains the change:
+
+```powershell
+gh workflow run build-patched-codex-windows.yml `
+  --ref <branch-or-tag> `
+  -f compat_selector=<exact-candidate-id>
+```
+
+This path resolves the exact committed compatibility, calls the same single-target builder used by the formal six-platform matrix, and builds only `x86_64-pc-windows-msvc` on `windows-2025`. It uses the repository-wide patched-Codex sccache namespace and uploads `patched-codex-windows-test-<compat_id>` for 14 days.
+
+Download one run directly into a disposable directory:
+
+```powershell
+gh run download <run-id> `
+  -n patched-codex-windows-test-<compat_id> `
+  -D .dev\windows-test-candidate
+```
+
+The artifact contains the canonical local acceptance inputs:
+
+```text
+bundle/bin/codex.exe
+bundle/target-record.json
+candidate-record.json
+resolution.json
+```
+
+This workflow deliberately does not run Patch Validation, build the other five targets, finalize a manifest, or create a Release. Run the downloaded executable only by absolute path with an isolated `CODEX_HOME` and working directory. Ordinary pushes do not start Validation or Release. After local acceptance is committed and pushed to `main`, create and push the annotated compatibility tag described below.
+
+## Run an optional formal multi-platform preflight
 
 Dispatch `Release patched Codex CLI` from the default branch with:
 
@@ -217,17 +264,29 @@ Dispatch `Release patched Codex CLI` from the default branch with:
 compat_selector=<exact-candidate-id>
 target=x86_64-pc-windows-msvc
 publish=false
-validation_run_id=<optional exact successful run>
 ```
 
-The workflow requires successful Patch Validation evidence from the same default-branch commit. Automatic selection chooses the newest matching run; `validation_run_id` pins one exact successful run when needed.
+The workflow runs Patch Validation for the same default-branch commit before starting the native matrix. This explicit preflight is optional; routine development should use the Windows-only workflow.
 
-The resulting 14-day artifact is `patched-codex-acceptance-<compat_id>`:
+The workflow concurrently builds the six targets declared by the manifest:
+
+```text
+aarch64-apple-darwin
+x86_64-apple-darwin
+aarch64-unknown-linux-musl
+x86_64-unknown-linux-musl
+aarch64-pc-windows-msvc
+x86_64-pc-windows-msvc
+```
+
+The resulting 14-day artifact is `patched-codex-acceptance-<compat_id>`. It preserves the canonical Windows acceptance inputs and adds every native target for manual inspection:
 
 ```text
 bundle/
 candidate-record.json
 resolution.json
+targets/
+matrix.json
 ```
 
 The candidate record binds the executable to the manifest, build profile, runtime lock, workflow run, job, and CSA source commit. It is build evidence, not acceptance by itself.
@@ -261,36 +320,38 @@ Commit and push the accepted state before requesting formal publication.
 
 ## Publish a patched Codex Release
 
-Dispatch `Release patched Codex CLI` from the default branch:
+After the accepted state is merged into `main`, create the exact annotated tag declared by the compatibility entry and push it:
 
-```text
-compat_selector=rust-v0.150.1-native-join-p9
-target=x86_64-pc-windows-msvc
-publish=true
-validation_run_id=<optional exact successful run>
+```powershell
+$CompatId = 'rust-v0.151.0-native-join-p10'
+$Tag = "compat-$CompatId"
+git tag -a $Tag -m $Tag
+git push origin $Tag
 ```
 
-The selected entry must be accepted and release-enabled. The workflow does not reuse the candidate executable or copy its accepted hash into the production build. It independently rebuilds only:
+The tag must match the resolved `release_tag`, be annotated, and point to a commit contained in `main`. The tag push starts one ordered run: resolve authority, run Patch Validation, build every native target, aggregate and verify the exact inventory, then publish the Release. A validation or target failure stops every later stage.
+
+The selected entry must be accepted and release-enabled. The workflow does not reuse candidate executables or copy their accepted hashes into the production build. It independently builds each manifest target on its matching native hosted runner:
 
 ```text
-cargo xwin build --locked --release -p codex-cli --bin codex
+cargo build --target <manifest-target> --release --bin codex
 ```
 
 It does not publish Codex App, Desktop, app-server, exec-server, MCP server, or unrelated binaries.
 
-The workflow finalizes a temporary manifest copy, reverifies clean source and the production artifact, packs the flat compatibility payload, enforces one executable product, and uploads the exact local set to a draft.
+The workflow fails if any matrix job fails or if the collected target set differs from the manifest. It then finalizes a temporary manifest copy, reverifies every production artifact, packs the flat compatibility payload, enforces the exact CLI-only executable set, and uploads the local set to a draft.
 
 Each patched Codex Release contains:
 
 - `compatibility-release.json`;
-- one `<compat_id>--codex.exe`;
+- six target-qualified CLIs, for example `<compat_id>--x86_64-pc-windows-msvc--codex.exe` and `<compat_id>--aarch64-apple-darwin--codex`;
 - the finalized manifest and expected source hashes;
 - the ordered patch files;
 - the exact test contract;
 - `SHA256SUMS`;
 - `install-catalog-v1.json`.
 
-The install catalog is generated from committed, release-enabled compatibility records and formal non-draft, non-prerelease Releases. It is display metadata for version selection and is intentionally excluded from `SHA256SUMS` and `compatibility-release.json`; older Managers therefore keep accepting the existing payload contract.
+The schema-2 install catalog is generated from committed, release-enabled compatibility records, each manifest's complete target set, and formal non-draft, non-prerelease Releases. It is display metadata for version selection and is intentionally excluded from `SHA256SUMS` and `compatibility-release.json`. The Manager still accepts legacy schema-1 single-target Releases.
 
 ## Recover a draft safely
 
@@ -307,24 +368,22 @@ A published compatibility Release is immutable. If it already exists, the workfl
 
 ## Cache policy
 
-Caches reduce hosted build time but are never release authority. Validation and formal release use the same cache classes:
+Caches reduce hosted build time but are never release authority. Patch Validation and every native Release matrix job use `mozilla-actions/sccache-action` with:
 
-- Cargo registry, package cache, and Git database;
-- exact Rustup toolchain;
-- exact xwin SDK and LLVM inputs;
-- pinned build tools;
-- official runtime archive for validation;
-- separate test and release sccache objects.
+```text
+SCCACHE_GHA_ENABLED=on
+SCCACHE_GHA_VERSION=csa-patched-codex-v1
+```
 
-Both patched workflows use the shared xwin path `$RUNNER_TEMP/csa-patched-codex-cache/xwin` and keys bound to the reviewed build-profile hash. The preparation step still verifies and completes the exact SDK and LLVM toolchain after a restore. A miss or partial cache therefore costs time but must not change the result.
+This is one repository-wide GitHub Actions object-cache namespace. Compiler identity, target, flags, and source content remain part of each sccache object key, so incompatible platform objects do not collide. The workflows do not create per-platform `actions/cache` archives, cache `target/`, or reserve separate multi-gigabyte cache entries that compete with the repository's 10 GiB cache quota.
 
-Rustup, xwin, build-tool, runtime, Cargo, and sccache saves are best-effort. Correctness requires a cold build to pass. Do not add an uncontrolled `target/` cache without measured restore and save data plus a compatibility-safety design.
+A miss or cache-service failure only costs compile time. Correctness requires a cold build to pass, and the workflow still verifies every artifact hash and complete target inventory after compilation.
 
 ## Manager discovery and trust boundary
 
 The Manager discovers formal `compat-*` tags through unauthenticated Git smart-HTTP refs, then probes a bounded number of newest tags for `install-catalog-v1.json`. Direct GitHub and the existing China mirror route are supported without requiring `GITHUB_TOKEN` or `GH_TOKEN`; the reviewed embedded catalog covers immutable Releases that predate the catalog asset.
 
-The catalog is not installation authority. Its source tag, source commit, and candidate refs are cross-checked only to build the picker; after selection, the Manager independently proves the exact tag, source commit, descriptor, manifest, asset set, sizes, and hashes. Unexpected redirects, duplicate metadata, malformed tags, missing or extra assets, and checksum drift fail closed.
+The catalog is not installation authority. Its source tag, source commit, candidate refs, and target list are cross-checked only to build the picker; after selection, the Manager independently proves the exact tag, source commit, schema-1 or schema-2 descriptor, target-specific manifest artifact, asset set, sizes, and hashes. Unexpected redirects, duplicate metadata, malformed tags, missing or extra assets, and checksum drift fail closed.
 
 Adding a compatibility does not require hard-coding its ID in the Manager, but it does require a formal compatible Release and a Manager build whose target and runtime detection support that entry.
 

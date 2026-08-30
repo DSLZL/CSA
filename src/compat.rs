@@ -70,12 +70,21 @@ pub struct LoadedCompatibility {
     pub manifest_path: PathBuf,
     pub payload_root: PathBuf,
     pub patch_paths: Vec<PathBuf>,
+    selected_target: String,
     family_id: Option<String>,
     file_sources: BTreeMap<String, PathBuf>,
 }
 
 impl LoadedCompatibility {
     pub fn load(manifest_path: &Path) -> Result<Self> {
+        Self::load_inner(manifest_path, None)
+    }
+
+    pub fn load_for_target(manifest_path: &Path, target: &str) -> Result<Self> {
+        Self::load_inner(manifest_path, Some(target))
+    }
+
+    fn load_inner(manifest_path: &Path, target: Option<&str>) -> Result<Self> {
         if !manifest_path.is_absolute() {
             return Err(ManagerError::new(
                 "invalid_manifest_path",
@@ -155,6 +164,13 @@ impl LoadedCompatibility {
             }
         };
         validate_manifest(&manifest)?;
+        let selected_target = target.unwrap_or(&manifest.build_target).to_owned();
+        if !valid_target(&selected_target) || !manifest.artifacts.contains_key(&selected_target) {
+            return Err(ManagerError::new(
+                "unsupported_build_target",
+                format!("payload does not define an artifact for {selected_target}"),
+            ));
+        }
 
         let source_hashes_path = file_sources[&manifest.source_hashes].clone();
         let source_hashes_bytes = fs::read(&source_hashes_path).map_err(|error| {
@@ -210,13 +226,18 @@ impl LoadedCompatibility {
             manifest_path,
             payload_root,
             patch_paths,
+            selected_target,
             family_id,
             file_sources,
         })
     }
 
     pub fn artifact(&self) -> &ArtifactEntry {
-        &self.manifest.artifacts[&self.manifest.build_target]
+        &self.manifest.artifacts[&self.selected_target]
+    }
+
+    pub fn selected_target(&self) -> &str {
+        &self.selected_target
     }
 
     pub fn test_contract(&self) -> Result<TestContract> {
@@ -573,24 +594,26 @@ fn validate_manifest(manifest: &CompatibilityManifest) -> Result<()> {
         }
     }
 
-    if manifest.artifacts.len() != 1 || !manifest.artifacts.contains_key(&manifest.build_target) {
+    if manifest.artifacts.is_empty() || !manifest.artifacts.contains_key(&manifest.build_target) {
         return Err(ManagerError::new(
             "invalid_artifact",
-            "artifacts must contain only the exact build target",
+            "artifacts must contain the canonical build target",
         ));
     }
-    let artifact = &manifest.artifacts[&manifest.build_target];
-    if !["https://", "artifact://", "unpublished://"]
-        .iter()
-        .any(|prefix| artifact.url.starts_with(prefix))
-        || !valid_filename(&artifact.filename)
-        || !valid_sha(&artifact.sha256, 64)
-        || artifact.size == 0
-    {
-        return Err(ManagerError::new(
-            "invalid_artifact",
-            "artifact URL, filename, digest, or size is invalid",
-        ));
+    for (target, artifact) in &manifest.artifacts {
+        if !valid_target(target)
+            || !["https://", "artifact://", "unpublished://"]
+                .iter()
+                .any(|prefix| artifact.url.starts_with(prefix))
+            || !valid_filename(&artifact.filename)
+            || !valid_sha(&artifact.sha256, 64)
+            || artifact.size == 0
+        {
+            return Err(ManagerError::new(
+                "invalid_artifact",
+                format!("artifact URL, filename, digest, size, or target is invalid: {target}"),
+            ));
+        }
     }
     Ok(())
 }

@@ -1,6 +1,9 @@
 name: Release patched Codex CLI
 
 on:
+  push:
+    tags:
+      - "compat-rust-v*-native-join-p*"
   workflow_dispatch:
     inputs:
       compat_selector:
@@ -9,81 +12,49 @@ on:
         default: current
         type: string
       target:
-        description: Reviewed patched Codex target
+        description: Canonical validation target
         required: true
         default: x86_64-pc-windows-msvc
         type: string
       publish:
-        description: Publish the formal GitHub Release after a successful build
+        description: Publish the formal GitHub Release after all target builds succeed
         required: true
         default: true
         type: boolean
-      validation_run_id:
-        description: "Optional exact validation run ID; otherwise use the newest matching default-branch run"
-        required: false
-        type: string
 
 concurrency:
-  group: csa-patched-codex-release-${{ inputs.target }}
+  group: csa-patched-codex-release-${{ inputs.compat_selector || github.ref_name }}
   cancel-in-progress: false
 
 permissions:
   contents: read
 
 env:
-  CARGO_TERM_COLOR: always
   GIT_CONFIG_COUNT: 1
   GIT_CONFIG_KEY_0: core.autocrlf
   GIT_CONFIG_VALUE_0: "false"
 
 jobs:
-  build:
-    name: Build patched Codex CLI
+  plan:
+    name: Resolve release authority
     runs-on: ubuntu-24.04
-    timeout-minutes: 120
-    permissions:
-      actions: write
-      contents: read
+    timeout-minutes: 20
     outputs:
-      compat_id: ${{ steps.resolve.outputs.compat_id }}
-      release_tag: ${{ steps.resolve.outputs.release_tag }}
-      codex_version: ${{ steps.resolve.outputs.codex_version }}
-      upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
-      upstream_commit: ${{ steps.resolve.outputs.upstream_commit }}
+      artifact_count: ${{ steps.matrix.outputs.artifact_count }}
+      artifact_filename: ${{ steps.resolve.outputs.artifact_filename }}
       build_target: ${{ steps.resolve.outputs.build_target }}
+      codex_version: ${{ steps.resolve.outputs.codex_version }}
+      compat_id: ${{ steps.resolve.outputs.compat_id }}
+      manifest_path: ${{ steps.resolve.outputs.manifest_path }}
+      matrix: ${{ steps.matrix.outputs.matrix }}
+      publish_requested: ${{ steps.mode.outputs.publish_requested }}
       release_enabled: ${{ steps.resolve.outputs.release_enabled }}
-      artifact_asset: ${{ steps.guard.outputs.artifact_asset }}
-      artifact_sha256: ${{ steps.finalize.outputs.artifact_sha256 }}
+      release_tag: ${{ steps.resolve.outputs.release_tag }}
+      rust_toolchain: ${{ steps.resolve.outputs.rust_toolchain }}
+      source_commit: ${{ steps.mode.outputs.source_commit }}
+      upstream_commit: ${{ steps.resolve.outputs.upstream_commit }}
+      upstream_tag: ${{ steps.resolve.outputs.upstream_tag }}
     steps:
-      - name: Configure isolated build roots
-        shell: bash
-        run: |
-          set -euo pipefail
-          root="$RUNNER_TEMP/csa-patched-codex"
-          {
-            echo "PATCHED_CODEX_ROOT=$root"
-            echo "SOURCE_ROOT=$root/source"
-            echo "CARGO_TARGET_DIR=$root/cargo-target"
-            echo "CARGO_HOME=$root/cache/cargo-home"
-            echo "CSA_TOOL_BIN=$root/tools/bin"
-            echo "CSA_TOOL_CACHE=$root/cache/tools"
-            echo "CSA_RUNTIME_CACHE=$root/cache/unused-official-runtime"
-            echo "RUSTUP_HOME=$root/cache/rustup"
-            echo "SCCACHE_DIR=$RUNNER_TEMP/csa-patched-codex-cache/sccache"
-            echo "TMPDIR=$root/tmp"
-            echo "XWIN_CACHE_DIR=$RUNNER_TEMP/csa-patched-codex-cache/xwin"
-            echo "HOME=$root/home"
-            echo "CODEX_HOME=$root/codex-home"
-            echo "RESOLUTION_JSON=$root/resolution.json"
-            echo "BUNDLE_ROOT=$root/bundle"
-            echo "SCCACHE_STATS=$root/sccache-stats.json"
-            echo "ARTIFACT_PATH=$root/bundle/bin/codex.exe"
-            echo "VALIDATION_EVIDENCE_ROOT=$root/validation-evidence"
-            echo "VALIDATION_RUNS_JSON=$root/validation-runs.json"
-          } >> "$GITHUB_ENV"
-          mkdir -p "$root/home" "$root/codex-home" "$root/tmp" "$root/validation-evidence"
-          chmod 0700 "$root/tmp"
-
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
           fetch-depth: 0
@@ -93,20 +64,61 @@ jobs:
         with:
           python-version: "3.13"
 
-      - id: resolve
-        name: Resolve committed compatibility, runtime, and build authority
+      - id: mode
+        name: Bind trigger to one source commit
         shell: bash
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          PUBLISH_REQUESTED: ${{ inputs.publish }}
           REQUESTED_COMPAT_SELECTOR: ${{ inputs.compat_selector }}
+          REQUESTED_PUBLISH: ${{ inputs.publish }}
           REQUESTED_TARGET: ${{ inputs.target }}
         run: |
           set -euo pipefail
-          if [[ "$GITHUB_REF_NAME" != "$DEFAULT_BRANCH" ]]; then
-            echo "Patched Codex Releases must be dispatched from default branch '$DEFAULT_BRANCH'; selected '$GITHUB_REF_NAME'." >&2
-            exit 2
-          fi
+          source_commit="$(git rev-parse HEAD)"
+          case "$GITHUB_EVENT_NAME" in
+            push)
+              [[ "$GITHUB_REF_TYPE" == "tag" && "$GITHUB_REF_NAME" == compat-* ]] || exit 2
+              [[ "$(git cat-file -t "$GITHUB_REF")" == tag ]] || {
+                echo "Formal compatibility tags must be annotated." >&2
+                exit 2
+              }
+              test "$(git rev-parse "$GITHUB_REF^{commit}")" = "$source_commit"
+              git fetch --no-tags origin "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+              git merge-base --is-ancestor "$source_commit" "origin/$DEFAULT_BRANCH" || {
+                echo "Formal compatibility tags must point to a commit on '$DEFAULT_BRANCH'." >&2
+                exit 2
+              }
+              selector="${GITHUB_REF_NAME#compat-}"
+              target=x86_64-pc-windows-msvc
+              publish=true
+              ;;
+            workflow_dispatch)
+              [[ "$GITHUB_REF_NAME" == "$DEFAULT_BRANCH" ]] || {
+                echo "Patched Codex releases must be dispatched from '$DEFAULT_BRANCH'." >&2
+                exit 2
+              }
+              selector="$REQUESTED_COMPAT_SELECTOR"
+              target="$REQUESTED_TARGET"
+              publish="$REQUESTED_PUBLISH"
+              ;;
+            *) exit 2 ;;
+          esac
+          {
+            echo "compat_selector=$selector"
+            echo "publish_requested=$publish"
+            echo "source_commit=$source_commit"
+            echo "target=$target"
+          } >> "$GITHUB_OUTPUT"
+
+      - id: resolve
+        name: Resolve committed compatibility authority
+        shell: bash
+        env:
+          PUBLISH_REQUESTED: ${{ steps.mode.outputs.publish_requested }}
+          REQUESTED_COMPAT_SELECTOR: ${{ steps.mode.outputs.compat_selector }}
+          REQUESTED_TARGET: ${{ steps.mode.outputs.target }}
+        run: |
+          set -euo pipefail
           release_args=()
           if [[ "$PUBLISH_REQUESTED" == "true" ]]; then
             release_args+=(--require-release)
@@ -116,344 +128,218 @@ jobs:
             --selector "$REQUESTED_COMPAT_SELECTOR" \
             --target "$REQUESTED_TARGET" \
             "${release_args[@]}" \
-            --output "$RESOLUTION_JSON" \
+            --output "$RUNNER_TEMP/resolution.json" \
             --github-output "$GITHUB_OUTPUT"
           python scripts/compat_catalog.py validate --repository .
 
-      - id: validation
-        name: Select successful exact-commit validation
+      - name: Verify formal tag identity
+        if: github.event_name == 'push'
         shell: bash
         env:
-          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
-          GH_TOKEN: ${{ github.token }}
-          REQUESTED_VALIDATION_RUN_ID: ${{ inputs.validation_run_id }}
+          EXPECTED_TAG: ${{ steps.resolve.outputs.release_tag }}
+        run: test "$GITHUB_REF_NAME" = "$EXPECTED_TAG"
+
+      - id: matrix
+        name: Resolve native target matrix
+        shell: bash
         run: |
           set -euo pipefail
-          gh api \
-            "repos/$GITHUB_REPOSITORY/actions/workflows/validate-patched-codex.yml/runs?branch=$DEFAULT_BRANCH&head_sha=$GITHUB_SHA&status=success&per_page=100" \
-            > "$VALIDATION_RUNS_JSON"
-          selection_args=()
-          if [[ -n "$REQUESTED_VALIDATION_RUN_ID" ]]; then
-            [[ "$REQUESTED_VALIDATION_RUN_ID" =~ ^[1-9][0-9]*$ ]] || {
-              echo "validation_run_id must be a positive integer" >&2
-              exit 2
-            }
-            selection_args+=(--requested-run-id "$REQUESTED_VALIDATION_RUN_ID")
-          fi
-          python scripts/validation_evidence.py select-run \
-            --runs "$VALIDATION_RUNS_JSON" \
-            --csa-commit "$GITHUB_SHA" \
-            --default-branch "$DEFAULT_BRANCH" \
-            "${selection_args[@]}" \
+          python scripts/compat_release.py matrix \
+            --manifest "$GITHUB_WORKSPACE/${{ steps.resolve.outputs.manifest_path }}" \
             --github-output "$GITHUB_OUTPUT"
 
-      - name: Download exact validation evidence
+  validate:
+    name: Validate exact patched Codex contract
+    needs: plan
+    permissions:
+      actions: write
+      contents: read
+    uses: ./.github/workflows/validate-patched-codex.yml
+    with:
+      compat_selector: ${{ needs.plan.outputs.compat_id }}
+      source_commit: ${{ needs.plan.outputs.source_commit }}
+      target: ${{ needs.plan.outputs.build_target }}
+
+  build:
+    name: Build ${{ matrix.target }}
+    needs: [plan, validate]
+    permissions:
+      actions: write
+      contents: read
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}
+    uses: ./.github/workflows/build-patched-codex-target.yml
+    with:
+      artifact_filename: ${{ matrix.artifact_filename }}
+      compat_id: ${{ needs.plan.outputs.compat_id }}
+      manifest_path: ${{ needs.plan.outputs.manifest_path }}
+      runner: ${{ matrix.runner }}
+      rust_toolchain: ${{ needs.plan.outputs.rust_toolchain }}
+      source_commit: ${{ needs.plan.outputs.source_commit }}
+      target: ${{ matrix.target }}
+      upstream_commit: ${{ needs.plan.outputs.upstream_commit }}
+      upstream_tag: ${{ needs.plan.outputs.upstream_tag }}
+
+  bundle:
+    name: Aggregate ${{ needs.plan.outputs.artifact_count }} native targets
+    needs: [plan, validate, build]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    outputs:
+      artifact_sha256: ${{ steps.collect.outputs.artifact_sha256 }}
+      build_target: ${{ needs.plan.outputs.build_target }}
+      codex_version: ${{ needs.plan.outputs.codex_version }}
+      compat_id: ${{ needs.plan.outputs.compat_id }}
+      publish_requested: ${{ needs.plan.outputs.publish_requested }}
+      release_enabled: ${{ needs.plan.outputs.release_enabled }}
+      release_tag: ${{ needs.plan.outputs.release_tag }}
+      source_commit: ${{ needs.plan.outputs.source_commit }}
+      upstream_commit: ${{ needs.plan.outputs.upstream_commit }}
+      upstream_tag: ${{ needs.plan.outputs.upstream_tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+
+      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        with:
+          python-version: "3.13"
+
+      - name: Download every native target
         uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: patched-codex-validation-${{ steps.resolve.outputs.compat_id }}
-          path: ${{ env.VALIDATION_EVIDENCE_ROOT }}
-          github-token: ${{ github.token }}
-          repository: ${{ github.repository }}
-          run-id: ${{ steps.validation.outputs.validation_run_id }}
+          pattern: patched-codex-target-${{ needs.plan.outputs.compat_id }}-*
+          path: ${{ runner.temp }}/patched-targets
 
-      - name: Verify exact validation evidence
+      - id: collect
+        name: Verify complete target inventory
         shell: bash
+        env:
+          CANONICAL_TARGET: ${{ needs.plan.outputs.build_target }}
+          EXPECTED_COUNT: ${{ needs.plan.outputs.artifact_count }}
         run: |
           set -euo pipefail
-          python scripts/validation_evidence.py verify \
+          python - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+
+          root = Path(os.environ["RUNNER_TEMP"]) / "patched-targets"
+          records = [json.loads(path.read_text(encoding="utf-8")) for path in root.rglob("target-record.json")]
+          targets = [record["target"] for record in records]
+          if len(records) != int(os.environ["EXPECTED_COUNT"]) or len(set(targets)) != len(targets):
+              raise SystemExit(f"target inventory mismatch: {targets}")
+          canonical = next(record for record in records if record["target"] == os.environ["CANONICAL_TARGET"])
+          with Path(os.environ["GITHUB_OUTPUT"]).open("a", encoding="utf-8") as stream:
+              stream.write(f"artifact_sha256={canonical['sha256']}\n")
+          PY
+
+      - name: Assemble manual acceptance bundle
+        if: needs.plan.outputs.publish_requested != 'true'
+        shell: bash
+        env:
+          CANONICAL_TARGET: ${{ needs.plan.outputs.build_target }}
+          REQUESTED_COMPAT_SELECTOR: ${{ needs.plan.outputs.compat_id }}
+        run: |
+          set -euo pipefail
+          root="$RUNNER_TEMP/acceptance-candidate"
+          mkdir -p "$root"
+          python scripts/compat_catalog.py resolve \
             --repository . \
-            --resolution "$RESOLUTION_JSON" \
-            --test-report "$VALIDATION_EVIDENCE_ROOT/test-report.json" \
-            --evidence "$VALIDATION_EVIDENCE_ROOT/validation-result.json" \
-            --csa-commit "$GITHUB_SHA" \
-            --workflow-run-id '${{ steps.validation.outputs.validation_run_id }}' \
-            --workflow-run-attempt '${{ steps.validation.outputs.validation_run_attempt }}'
+            --selector "$REQUESTED_COMPAT_SELECTOR" \
+            --target "$CANONICAL_TARGET" \
+            --output "$root/resolution.json"
+          python - "$RUNNER_TEMP/patched-targets" "$root" <<'PY'
+          import json
+          import os
+          import shutil
+          import sys
+          from pathlib import Path
 
-      - name: Restore rolling Cargo downloads
-        id: cargo-cache
-        continue-on-error: true
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: |
-            ${{ env.CARGO_HOME }}/registry/index
-            ${{ env.CARGO_HOME }}/registry/cache
-            ${{ env.CARGO_HOME }}/git/db
-          key: csa-patched-codex-cargo-v8-linux-X64
-
-      - name: Restore exact Rust toolchain
-        id: rustup-cache
-        continue-on-error: true
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.RUSTUP_HOME }}
-          key: csa-rustup-v3-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}
-          restore-keys: csa-rustup-v2-linux-X64-rustup-1.29.0-rustc-59807616e1fa2540724bfbac14d7976d7e4a3860-host-x86_64-unknown-linux-gnu-target-x86_64-pc-windows-msvc
-
-      - name: Restore exact xwin SDK
-        id: xwin-cache
-        continue-on-error: true
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.XWIN_CACHE_DIR }}
-          key: csa-xwin-v3-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}
-          restore-keys: csa-xwin-v2-linux-X64-cargo-xwin-0.23.0-msvc17-x86_64-pc-windows-msvc
-
-      - name: Restore exact build tools
-        id: tools-cache
-        continue-on-error: true
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.CSA_TOOL_CACHE }}
-          key: csa-build-tools-v1-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}
-
-      - name: Restore release compiler cache
-        id: release-compiler-cache
-        continue-on-error: true
-        uses: actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.SCCACHE_DIR }}
-          key: csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-shared-${{ steps.resolve.outputs.build_profile_sha256 }}-upstream-${{ steps.resolve.outputs.upstream_commit }}-patch-${{ steps.resolve.outputs.manifest_sha256 }}
-          restore-keys: csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-shared-${{ steps.resolve.outputs.build_profile_sha256 }}-
-
-      - name: Clone exact reviewed upstream source
-        shell: bash
-        run: |
-          set -euo pipefail
-          source_root="$(realpath -m "$SOURCE_ROOT")"
-          runner_temp="$(realpath -m "$RUNNER_TEMP")"
-          workspace="$(realpath -m "$GITHUB_WORKSPACE")"
-          case "$source_root/" in
-            "$runner_temp/"*) ;;
-            *)
-              echo "Codex source must live below RUNNER_TEMP: $source_root" >&2
-              exit 2
-              ;;
-          esac
-          case "$source_root/" in
-            "$workspace/"*)
-              echo "Codex source must not live inside the CSA repository: $source_root" >&2
-              exit 2
-              ;;
-          esac
-          for attempt in 1 2 3; do
-            rm -rf "$SOURCE_ROOT"
-            if git clone \
-              --filter=blob:none \
-              --no-checkout \
-              --branch '${{ steps.resolve.outputs.upstream_tag }}' \
-              --single-branch \
-              https://github.com/openai/codex.git \
-              "$SOURCE_ROOT"; then
-              break
-            fi
-            if [[ "$attempt" == 3 ]]; then
-              echo "Pinned upstream clone failed after $attempt attempts." >&2
-              exit 1
-            fi
-            sleep $((attempt * 5))
-          done
-          git -C "$SOURCE_ROOT" checkout --detach '${{ steps.resolve.outputs.upstream_commit }}'
-          test "$(git -C "$SOURCE_ROOT" rev-parse 'refs/tags/${{ steps.resolve.outputs.upstream_tag }}^{commit}')" = '${{ steps.resolve.outputs.upstream_commit }}'
-          test "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = '${{ steps.resolve.outputs.upstream_commit }}'
-
-      - name: Prepare pinned build tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/build_patched_codex_bundle.sh tools \
-            "$RESOLUTION_JSON" \
-            "$SOURCE_ROOT" \
-            "$CARGO_TARGET_DIR" \
-            "$BUNDLE_ROOT" \
-            "$SCCACHE_STATS"
-
-      - name: Save exact build tools
-        if: steps.tools-cache.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.CSA_TOOL_CACHE }}
-          key: csa-build-tools-v1-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}
-
-      - name: Prepare exact Rust toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/build_patched_codex_bundle.sh rust \
-            "$RESOLUTION_JSON" \
-            "$SOURCE_ROOT" \
-            "$CARGO_TARGET_DIR" \
-            "$BUNDLE_ROOT" \
-            "$SCCACHE_STATS"
-
-      - name: Save exact Rust toolchain
-        if: steps.rustup-cache.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.RUSTUP_HOME }}
-          key: csa-rustup-v3-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}
-
-      - name: Prepare exact xwin SDK and LLVM toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/build_patched_codex_bundle.sh xwin \
-            "$RESOLUTION_JSON" \
-            "$SOURCE_ROOT" \
-            "$CARGO_TARGET_DIR" \
-            "$BUNDLE_ROOT" \
-            "$SCCACHE_STATS"
-
-      - name: Save exact xwin SDK
-        if: steps.xwin-cache.outputs.cache-hit != 'true'
-        continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.XWIN_CACHE_DIR }}
-          key: csa-xwin-v3-linux-X64-${{ steps.resolve.outputs.build_profile_sha256 }}
-
-      - name: Build canonical patched Codex CLI bundle
-        shell: bash
-        env:
-          SCCACHE_DIR: ${{ env.SCCACHE_DIR }}
-          CSA_SCCACHE_CACHE_SIZE: 6G
-          CSA_SCCACHE_PROFILE: release
-          CSA_MINIMUM_RUST_HIT_RATE: 95
-        run: |
-          set -euo pipefail
-          bash scripts/build_patched_codex_bundle.sh release \
-            "$RESOLUTION_JSON" \
-            "$SOURCE_ROOT" \
-            "$CARGO_TARGET_DIR" \
-            "$BUNDLE_ROOT" \
-            "$SCCACHE_STATS"
-
-      - name: Replace rolling caches after build
-        continue-on-error: true
-        shell: bash
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          for key in \
-            csa-patched-codex-cargo-v8-linux-X64 \
-            csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-shared-${{ steps.resolve.outputs.build_profile_sha256 }}-upstream-${{ steps.resolve.outputs.upstream_commit }}-patch-${{ steps.resolve.outputs.manifest_sha256 }}; do
-            gh cache delete "$key" \
-              --repo "$GITHUB_REPOSITORY" \
-              --ref "$GITHUB_REF" || true
-          done
-
-      - name: Save final Cargo downloads
-        continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: |
-            ${{ env.CARGO_HOME }}/registry/index
-            ${{ env.CARGO_HOME }}/registry/cache
-            ${{ env.CARGO_HOME }}/git/db
-          key: csa-patched-codex-cargo-v8-linux-X64
-
-      - name: Save release compiler cache
-        continue-on-error: true
-        uses: actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
-        with:
-          path: ${{ env.SCCACHE_DIR }}
-          key: csa-patched-codex-sccache-v9-linux-X64-${{ steps.resolve.outputs.build_target }}-rust-${{ steps.resolve.outputs.rust_toolchain }}-shared-${{ steps.resolve.outputs.build_profile_sha256 }}-upstream-${{ steps.resolve.outputs.upstream_commit }}-patch-${{ steps.resolve.outputs.manifest_sha256 }}
-
-      - name: Create local acceptance candidate
-        if: ${{ !inputs.publish }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          candidate_root="$PATCHED_CODEX_ROOT/acceptance-candidate"
-          mkdir -p "$candidate_root"
-          cp -a "$BUNDLE_ROOT" "$candidate_root/bundle"
-          cp "$RESOLUTION_JSON" "$candidate_root/resolution.json"
+          targets_root = Path(sys.argv[1])
+          output = Path(sys.argv[2])
+          target = os.environ["CANONICAL_TARGET"]
+          for record_path in targets_root.rglob("target-record.json"):
+              record = json.loads(record_path.read_text(encoding="utf-8"))
+              if record["target"] == target:
+                  source = (record_path.parent / record["artifact"]).resolve(strict=True)
+                  destination = output / "bundle" / record["artifact"]
+                  destination.parent.mkdir(parents=True)
+                  shutil.copy2(source, destination)
+                  shutil.copy2(record_path, output / "bundle" / "target-record.json")
+                  break
+          else:
+              raise SystemExit(f"missing canonical target artifact: {target}")
+          PY
           python scripts/compat_catalog.py candidate \
             --repository . \
-            --resolution "$RESOLUTION_JSON" \
-            --artifact "$ARTIFACT_PATH" \
-            --output "$candidate_root/candidate-record.json" \
+            --resolution "$root/resolution.json" \
+            --artifact "$root/bundle/bin/${{ needs.plan.outputs.artifact_filename }}" \
+            --output "$root/candidate-record.json" \
             --provider github-actions \
             --pipeline "$GITHUB_RUN_ID" \
-            --job "$GITHUB_JOB" \
-            --source-commit "$GITHUB_SHA"
+            --job "build/$CANONICAL_TARGET" \
+            --source-commit '${{ needs.plan.outputs.source_commit }}'
+          cp -a "$RUNNER_TEMP/patched-targets" "$root/targets"
+          python scripts/compat_release.py matrix \
+            --manifest "$GITHUB_WORKSPACE/${{ needs.plan.outputs.manifest_path }}" \
+            > "$root/matrix.json"
 
-      - name: Upload local acceptance candidate
-        if: ${{ !inputs.publish }}
+      - name: Upload manual acceptance bundle
+        if: needs.plan.outputs.publish_requested != 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: patched-codex-acceptance-${{ steps.resolve.outputs.compat_id }}
-          path: ${{ runner.temp }}/csa-patched-codex/acceptance-candidate
+          name: patched-codex-acceptance-${{ needs.plan.outputs.compat_id }}
+          path: ${{ runner.temp }}/acceptance-candidate
           if-no-files-found: error
           compression-level: 0
           retention-days: 14
 
-      - id: finalize
-        name: Finalize production manifest from the GitHub-built CLI
-        if: ${{ inputs.publish }}
+      - name: Finalize and pack multi-target release assets
+        if: needs.plan.outputs.publish_requested == 'true'
         shell: bash
         run: |
           set -euo pipefail
-          staged_root="$PATCHED_CODEX_ROOT/finalized-repository"
-          mkdir -p "$staged_root"
-          cp -a payload "$staged_root/"
-          staged_manifest="$staged_root/${{ steps.resolve.outputs.manifest_path }}"
-          python scripts/compat_release.py finalize \
-            --manifest "$staged_manifest" \
-            --artifact "$ARTIFACT_PATH"
-          actual_sha="$(sha256sum "$ARTIFACT_PATH" | cut -d ' ' -f 1)"
-          echo "STAGED_MANIFEST=$staged_manifest" >> "$GITHUB_ENV"
-          echo "artifact_sha256=$actual_sha" >> "$GITHUB_OUTPUT"
-
-      - name: Reverify clean source and finalized production manifest
-        if: ${{ inputs.publish }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          git -C "$SOURCE_ROOT" reset --hard '${{ steps.resolve.outputs.upstream_commit }}'
-          git -C "$SOURCE_ROOT" clean -ffd
-          python scripts/verify_patch_payload.py \
-            --manifest "$STAGED_MANIFEST" \
-            --source "$SOURCE_ROOT" \
-            --artifact "$ARTIFACT_PATH"
-
-      - name: Pack formal compatibility assets
-        if: ${{ inputs.publish }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python scripts/compat_release.py pack \
-            --manifest "$STAGED_MANIFEST" \
-            --artifact "$ARTIFACT_PATH" \
-            --source-commit "$GITHUB_SHA" \
-            --output "$PATCHED_CODEX_ROOT/release-assets"
-
-      - id: guard
-        name: Enforce exact CLI-only local Release asset set
-        if: ${{ inputs.publish }}
-        shell: bash
-        run: |
-          set -euo pipefail
-          python scripts/verify_release_asset_set.py local \
-            --root "$PATCHED_CODEX_ROOT/release-assets" \
-            --expected-executable '${{ steps.resolve.outputs.artifact_asset }}'
-          echo 'artifact_asset=${{ steps.resolve.outputs.artifact_asset }}' >> "$GITHUB_OUTPUT"
+          staged="$RUNNER_TEMP/finalized-repository"
+          mkdir -p "$staged"
+          cp -a payload "$staged/"
+          manifest="$staged/${{ needs.plan.outputs.manifest_path }}"
+          mapfile -t artifacts < <(python - "$RUNNER_TEMP/patched-targets" <<'PY'
+          import json
+          import sys
+          from pathlib import Path
+          for record_path in sorted(Path(sys.argv[1]).rglob("target-record.json")):
+              record = json.loads(record_path.read_text(encoding="utf-8"))
+              artifact = (record_path.parent / record["artifact"]).resolve(strict=True)
+              print(f"{record['target']}={artifact}")
+          PY
+          )
+          finalize=(python scripts/compat_release.py finalize --manifest "$manifest")
+          pack=(python scripts/compat_release.py pack --manifest "$manifest")
+          for artifact in "${artifacts[@]}"; do
+            finalize+=(--artifact "$artifact")
+            pack+=(--artifact "$artifact")
+          done
+          "${finalize[@]}"
+          "${pack[@]}" --source-commit '${{ needs.plan.outputs.source_commit }}' --output "$RUNNER_TEMP/release-assets"
+          python scripts/verify_release_asset_set.py local --root "$RUNNER_TEMP/release-assets"
 
       - name: Upload formal release assets
-        if: ${{ inputs.publish }}
+        if: needs.plan.outputs.publish_requested == 'true'
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
-          name: patched-codex-cli-release-${{ steps.resolve.outputs.compat_id }}
-          path: ${{ runner.temp }}/csa-patched-codex/release-assets
+          name: patched-codex-cli-release-${{ needs.plan.outputs.compat_id }}
+          path: ${{ runner.temp }}/release-assets
           if-no-files-found: error
           compression-level: 0
           retention-days: 1
 
   publish:
-    name: Publish ${{ needs.build.outputs.release_tag }}
-    needs: build
-    if: inputs.publish && needs.build.outputs.release_enabled == 'true'
+    name: Publish ${{ needs.bundle.outputs.release_tag }}
+    needs: bundle
+    if: needs.bundle.outputs.publish_requested == 'true' && needs.bundle.outputs.release_enabled == 'true'
     runs-on: ubuntu-24.04
     permissions:
       contents: write
@@ -469,13 +355,14 @@ jobs:
 
       - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
         with:
-          name: patched-codex-cli-release-${{ needs.build.outputs.compat_id }}
+          name: patched-codex-cli-release-${{ needs.bundle.outputs.compat_id }}
           path: ${{ runner.temp }}/patched-codex-release-assets
 
       - name: Build no-login install display catalog
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.build.outputs.release_tag }}
+          TAG: ${{ needs.bundle.outputs.release_tag }}
+          SOURCE_COMMIT: ${{ needs.bundle.outputs.source_commit }}
         run: |
           set -euo pipefail
           git fetch --force --tags origin
@@ -484,77 +371,61 @@ jobs:
             --jq '.[] | select(.draft == false and .prerelease == false and (.tag_name | startswith("compat-"))) | .tag_name' \
             > "$formal_tags"
           python scripts/compat_catalog.py install-catalog \
-            --repository . \
-            --formal-tags "$formal_tags" \
-            --current-release-tag "$TAG" \
-            --current-source-commit "$GITHUB_SHA" \
+            --repository . --formal-tags "$formal_tags" \
+            --current-release-tag "$TAG" --current-source-commit "$SOURCE_COMMIT" \
+            --all-targets \
             --output "$RUNNER_TEMP/patched-codex-release-assets/install-catalog-v1.json"
 
       - name: Recheck exact local asset authority
         run: |
           set -euo pipefail
           python scripts/verify_release_asset_set.py local \
-            --root "$RUNNER_TEMP/patched-codex-release-assets" \
-            --expected-executable '${{ needs.build.outputs.artifact_asset }}' \
-            --require-install-catalog
+            --root "$RUNNER_TEMP/patched-codex-release-assets" --require-install-catalog
 
       - name: Create or validate annotated compatibility tag
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.build.outputs.release_tag }}
-          RELEASE_SHA: ${{ github.sha }}
+          TAG: ${{ needs.bundle.outputs.release_tag }}
+          RELEASE_SHA: ${{ needs.bundle.outputs.source_commit }}
         run: |
           set -euo pipefail
           create_tag_object() {
             gh api --method POST "repos/$GITHUB_REPOSITORY/git/tags" \
-              -f tag="$TAG" \
-              -f message="$TAG" \
-              -f object="$RELEASE_SHA" \
-              -f type=commit \
-              --jq .sha
+              -f tag="$TAG" -f message="$TAG" -f object="$RELEASE_SHA" -f type=commit --jq .sha
           }
           if git rev-parse --verify --quiet "refs/tags/$TAG" >/dev/null; then
             existing="$(git rev-parse "$TAG^{commit}")"
             if [[ "$existing" != "$RELEASE_SHA" ]]; then
-              release_draft="$(gh api --paginate \
-                "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
+              release_draft="$(gh api --paginate "repos/$GITHUB_REPOSITORY/releases?per_page=100" \
                 --jq ".[] | select(.tag_name == \"$TAG\") | .draft")"
               case "$release_draft" in
-                false)
-                  echo "Published release $TAG remains anchored at $existing; verifying its assets."
-                  ;;
+                false) echo "Published release $TAG remains anchored at $existing." ;;
                 true|"")
                   tag_sha="$(create_tag_object)"
-                  gh api --method PATCH \
-                    "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
-                    -f sha="$tag_sha" \
-                    -F force=true >/dev/null
+                  gh api --method PATCH "repos/$GITHUB_REPOSITORY/git/refs/tags/$TAG" \
+                    -f sha="$tag_sha" -F force=true >/dev/null
                   ;;
-                *)
-                  echo "Release lookup returned an invalid draft state for $TAG: $release_draft" >&2
-                  exit 2
-                  ;;
+                *) exit 2 ;;
               esac
             fi
           else
             tag_sha="$(create_tag_object)"
             gh api --method POST "repos/$GITHUB_REPOSITORY/git/refs" \
-              -f ref="refs/tags/$TAG" \
-              -f sha="$tag_sha" >/dev/null
+              -f ref="refs/tags/$TAG" -f sha="$tag_sha" >/dev/null
           fi
           git fetch --force --tags origin
 
       - name: Create or resume draft, upload idempotently, verify, then publish
         env:
           GH_TOKEN: ${{ github.token }}
-          TAG: ${{ needs.build.outputs.release_tag }}
-          CODEX_VERSION: ${{ needs.build.outputs.codex_version }}
-          UPSTREAM_TAG: ${{ needs.build.outputs.upstream_tag }}
-          UPSTREAM_COMMIT: ${{ needs.build.outputs.upstream_commit }}
-          COMPAT_ID: ${{ needs.build.outputs.compat_id }}
-          TARGET: ${{ needs.build.outputs.build_target }}
-          PRODUCTION_CODEX_SHA256: ${{ needs.build.outputs.artifact_sha256 }}
-          EXPECTED_EXECUTABLE: ${{ needs.build.outputs.artifact_asset }}
+          TAG: ${{ needs.bundle.outputs.release_tag }}
+          CODEX_VERSION: ${{ needs.bundle.outputs.codex_version }}
+          UPSTREAM_TAG: ${{ needs.bundle.outputs.upstream_tag }}
+          UPSTREAM_COMMIT: ${{ needs.bundle.outputs.upstream_commit }}
+          COMPAT_ID: ${{ needs.bundle.outputs.compat_id }}
+          TARGET: ${{ needs.bundle.outputs.build_target }}
+          SOURCE_COMMIT: ${{ needs.bundle.outputs.source_commit }}
+          PRODUCTION_CODEX_SHA256: ${{ needs.bundle.outputs.artifact_sha256 }}
         run: |
           set -euo pipefail
           root="$RUNNER_TEMP/patched-codex-release-assets"
@@ -562,109 +433,66 @@ jobs:
           remote="$RUNNER_TEMP/release.json"
           load_release() {
             local release_id
-            if ! release_id="$(gh release view "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --json databaseId \
-              --jq .databaseId 2>/dev/null)"; then
-              return 1
-            fi
+            release_id="$(gh release view "$TAG" --repo "$GITHUB_REPOSITORY" --json databaseId --jq .databaseId 2>/dev/null)" || return 1
             gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" > "$remote"
           }
           release_exists=false
           if load_release; then
             existing_draft="$(python -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["draft"]).lower())' "$remote")"
             existing_prerelease="$(python -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["prerelease"]).lower())' "$remote")"
-            [[ "$existing_prerelease" == false ]] || { echo "Existing release is a prerelease." >&2; exit 2; }
+            [[ "$existing_prerelease" == false ]] || exit 2
             if [[ "$existing_draft" == false ]]; then
               python scripts/verify_release_asset_set.py remote \
-                --root "$root" \
-                --expected-executable "$EXPECTED_EXECUTABLE" \
-                --release-json "$remote" \
-                --require-install-catalog
-              echo "Published release already exists with the exact reviewed asset set."
+                --root "$root" --release-json "$remote" --require-install-catalog
               exit 0
             fi
             release_exists=true
           fi
 
           python scripts/generate_release_notes.py \
-            --repository . \
-            --stream compat \
-            --current-ref "$GITHUB_SHA" \
-            --compat-id "$COMPAT_ID" \
-            --codex-version "$CODEX_VERSION" \
-            --upstream-tag "$UPSTREAM_TAG" \
-            --upstream-commit "$UPSTREAM_COMMIT" \
-            --target "$TARGET" \
-            --artifact-sha256 "$PRODUCTION_CODEX_SHA256" \
-            --output "$notes"
+            --repository . --stream compat --current-ref "$SOURCE_COMMIT" \
+            --compat-id "$COMPAT_ID" --codex-version "$CODEX_VERSION" \
+            --upstream-tag "$UPSTREAM_TAG" --upstream-commit "$UPSTREAM_COMMIT" \
+            --target "$TARGET" --artifact-sha256 "$PRODUCTION_CODEX_SHA256" --output "$notes"
 
           if [[ "$release_exists" == true ]]; then
-            gh release edit "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --draft \
-              --title "CSA patched Codex CLI ${CODEX_VERSION}" \
-              --notes-file "$notes"
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft \
+              --title "CSA patched Codex CLI ${CODEX_VERSION}" --notes-file "$notes"
           else
-            gh release create "$TAG" \
-              --repo "$GITHUB_REPOSITORY" \
-              --verify-tag \
-              --draft \
-              --title "CSA patched Codex CLI ${CODEX_VERSION}" \
-              --notes-file "$notes"
+            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+              --title "CSA patched Codex CLI ${CODEX_VERSION}" --notes-file "$notes"
           fi
 
           mapfile -t assets < <(find "$root" -maxdepth 1 -type f -print | sort)
-          (( ${#assets[@]} > 0 )) || { echo "No release assets were produced." >&2; exit 2; }
-
-          # A failed earlier upload may have left an extra asset in the draft.
-          # Reconcile the draft to the local reviewed inventory before replacing
-          # expected names. Published releases are never mutated above.
+          (( ${#assets[@]} > 0 )) || exit 2
           declare -A expected=()
-          for asset in "${assets[@]}"; do
-            expected["$(basename "$asset")"]=1
-          done
+          for asset in "${assets[@]}"; do expected["$(basename "$asset")"]=1; done
           load_release
           mapfile -t remote_names < <(python - "$remote" <<'PY'
           import json
           import sys
-          release = json.load(open(sys.argv[1], encoding="utf-8"))
-          for asset in release.get("assets", []):
-              name = asset.get("name")
-              if isinstance(name, str):
-                  print(name)
+          for asset in json.load(open(sys.argv[1], encoding="utf-8")).get("assets", []):
+              if isinstance(asset.get("name"), str):
+                  print(asset["name"])
           PY
           )
           for name in "${remote_names[@]}"; do
             if [[ -z "${expected[$name]+x}" ]]; then
-              gh release delete-asset "$TAG" "$name" \
-                --repo "$GITHUB_REPOSITORY" \
-                --yes
+              gh release delete-asset "$TAG" "$name" --repo "$GITHUB_REPOSITORY" --yes
             fi
           done
-
-          gh release upload "$TAG" "${assets[@]}" \
-            --repo "$GITHUB_REPOSITORY" \
-            --clobber
+          gh release upload "$TAG" "${assets[@]}" --repo "$GITHUB_REPOSITORY" --clobber
 
           verified=false
           for attempt in {1..12}; do
             load_release
             if python scripts/verify_release_asset_set.py remote \
-              --root "$root" \
-              --expected-executable "$EXPECTED_EXECUTABLE" \
-              --release-json "$remote" \
-              --require-install-catalog; then
+              --root "$root" --release-json "$remote" --require-install-catalog; then
               verified=true
               break
             fi
             sleep 5
           done
-          [[ "$verified" == true ]] || { echo "GitHub never exposed the exact uploaded asset digest set." >&2; exit 2; }
-
-          gh release edit "$TAG" \
-            --repo "$GITHUB_REPOSITORY" \
-            --draft=false \
-            --latest=false \
-            --title "CSA patched Codex CLI ${CODEX_VERSION}" \
-            --notes-file "$notes"
+          [[ "$verified" == true ]] || exit 2
+          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false \
+            --title "CSA patched Codex CLI ${CODEX_VERSION}" --notes-file "$notes"

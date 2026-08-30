@@ -137,8 +137,38 @@ sha256 = "a43d27498cb093460d6e358341c3b2ee748cc18fcfbad9ae23bd28d65da31e93"
 "codex-rs/tui/src/version.rs" = "c908ba75a710fb92d84995f8b512f109930501e2cba8f04a33f41b4bd3c9cbb6"
 
 [artifacts."x86_64-pc-windows-msvc"]
-url = "https://github.com/dslzl/CSA/releases/download/compat-rust-v0.151.0-native-join-p10/rust-v0.151.0-native-join-p10--codex.exe"
+url = "https://github.com/dslzl/CSA/releases/download/compat-rust-v0.151.0-native-join-p10/rust-v0.151.0-native-join-p10--x86_64-pc-windows-msvc--codex.exe"
 filename = "codex.exe"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 1
+
+[artifacts."aarch64-pc-windows-msvc"]
+url = "https://github.com/dslzl/CSA/releases/download/compat-rust-v0.151.0-native-join-p10/rust-v0.151.0-native-join-p10--aarch64-pc-windows-msvc--codex.exe"
+filename = "codex.exe"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 1
+
+[artifacts."x86_64-unknown-linux-musl"]
+url = "https://github.com/dslzl/CSA/releases/download/compat-rust-v0.151.0-native-join-p10/rust-v0.151.0-native-join-p10--x86_64-unknown-linux-musl--codex"
+filename = "codex"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 1
+
+[artifacts."aarch64-unknown-linux-musl"]
+url = "https://github.com/dslzl/CSA/releases/download/compat-rust-v0.151.0-native-join-p10/rust-v0.151.0-native-join-p10--aarch64-unknown-linux-musl--codex"
+filename = "codex"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 1
+
+[artifacts."x86_64-apple-darwin"]
+url = "https://github.com/dslzl/CSA/releases/download/compat-rust-v0.151.0-native-join-p10/rust-v0.151.0-native-join-p10--x86_64-apple-darwin--codex"
+filename = "codex"
+sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
+size = 1
+
+[artifacts."aarch64-apple-darwin"]
+url = "https://github.com/dslzl/CSA/releases/download/compat-rust-v0.151.0-native-join-p10/rust-v0.151.0-native-join-p10--aarch64-apple-darwin--codex"
+filename = "codex"
 sha256 = "0000000000000000000000000000000000000000000000000000000000000000"
 size = 1
 

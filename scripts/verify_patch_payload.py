@@ -388,19 +388,21 @@ def _validate_manifest(manifest: dict[str, object]) -> None:
 
     artifacts = manifest["artifacts"]
     target = manifest["build_target"]
-    if not isinstance(artifacts, dict) or set(artifacts) != {target}:
-        raise VerificationError("artifacts must contain only the exact build_target")
-    artifact = artifacts[target]
-    if not isinstance(artifact, dict) or set(artifact) != {"url", "filename", "sha256", "size"}:
-        raise VerificationError("invalid artifact entry")
-    if not isinstance(artifact["url"], str) or not re.match(r"^(https|artifact|unpublished)://", artifact["url"]):
-        raise VerificationError("artifact url must be explicit")
-    if not isinstance(artifact["filename"], str) or not artifact["filename"]:
-        raise VerificationError("artifact filename must be non-empty")
-    if not isinstance(artifact["sha256"], str) or not SHA256.fullmatch(artifact["sha256"]):
-        raise VerificationError("invalid artifact sha256")
-    if type(artifact["size"]) is not int or artifact["size"] < 1:
-        raise VerificationError("artifact size must be positive")
+    if not isinstance(artifacts, dict) or target not in artifacts or not artifacts:
+        raise VerificationError("artifacts must contain the canonical build_target")
+    for artifact_target, artifact in artifacts.items():
+        if not isinstance(artifact_target, str) or not TARGET.fullmatch(artifact_target):
+            raise VerificationError("invalid artifact target")
+        if not isinstance(artifact, dict) or set(artifact) != {"url", "filename", "sha256", "size"}:
+            raise VerificationError("invalid artifact entry")
+        if not isinstance(artifact["url"], str) or not re.match(r"^(https|artifact|unpublished)://", artifact["url"]):
+            raise VerificationError("artifact url must be explicit")
+        if not isinstance(artifact["filename"], str) or not artifact["filename"]:
+            raise VerificationError("artifact filename must be non-empty")
+        if not isinstance(artifact["sha256"], str) or not SHA256.fullmatch(artifact["sha256"]):
+            raise VerificationError("invalid artifact sha256")
+        if type(artifact["size"]) is not int or artifact["size"] < 1:
+            raise VerificationError("artifact size must be positive")
 
 
 def _touched_paths(patches: list[Path]) -> set[str]:

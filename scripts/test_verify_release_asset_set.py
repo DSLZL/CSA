@@ -51,8 +51,41 @@ class ReleaseAssetSetTests(unittest.TestCase):
         holder, root = self.fixture()
         self.addCleanup(holder.cleanup)
         (root / "codex-app.exe").write_bytes(b"bad")
-        with self.assertRaisesRegex(ValueError, "exactly"):
+        with self.assertRaisesRegex(ValueError, "differs"):
             MODULE.local_inventory(root, "codex.exe")
+
+    def test_local_inventory_accepts_multi_target_cli_set(self) -> None:
+        holder, root = self.fixture()
+        self.addCleanup(holder.cleanup)
+        unix_asset = "rust-v9.9.9-native-join-p9--x86_64-unknown-linux-musl--codex"
+        windows_asset = "rust-v9.9.9-native-join-p9--x86_64-pc-windows-msvc--codex.exe"
+        (root / "codex.exe").rename(root / windows_asset)
+        (root / unix_asset).write_bytes(b"codex-linux")
+        descriptor_path = root / "compatibility-release.json"
+        descriptor = json.loads(descriptor_path.read_text(encoding="utf-8"))
+        descriptor["schema"] = 2
+        artifact = descriptor.pop("artifact")
+        artifact["asset"] = windows_asset
+        descriptor["artifacts"] = {
+            "x86_64-pc-windows-msvc": artifact,
+            "x86_64-unknown-linux-musl": {
+                "path": "codex",
+                "asset": unix_asset,
+                "size": 11,
+                "sha256": hashlib.sha256(b"codex-linux").hexdigest(),
+            },
+        }
+        descriptor_path.write_text(json.dumps(descriptor), encoding="utf-8")
+        sums = "".join(
+            f"{hashlib.sha256(path.read_bytes()).hexdigest()}  {path.name}\n"
+            for path in sorted(root.iterdir())
+            if path.is_file() and path.name != "SHA256SUMS"
+        )
+        (root / "SHA256SUMS").write_text(sums, encoding="ascii")
+
+        inventory = MODULE.local_inventory(root, None)
+        self.assertIn(unix_asset, inventory)
+        self.assertIn(windows_asset, inventory)
 
     def test_remote_inventory_must_match_digest_and_size(self) -> None:
         holder, root = self.fixture()

@@ -193,7 +193,8 @@ def validate_install_catalog(
         {"schema", "repository", "source_release_tag", "source_commit", "entries"},
         INSTALL_CATALOG_NAME,
     )
-    if require_int(catalog.get("schema"), f"{INSTALL_CATALOG_NAME}.schema", minimum=1) != 1:
+    schema = require_int(catalog.get("schema"), f"{INSTALL_CATALOG_NAME}.schema", minimum=1)
+    if schema not in {1, 2}:
         fail("unsupported install catalog schema")
     repository = require_string(catalog.get("repository"), f"{INSTALL_CATALOG_NAME}.repository")
     source_tag = require_string(
@@ -217,15 +218,16 @@ def validate_install_catalog(
     normalized: list[dict[str, Any]] = []
     for index, raw in enumerate(entries):
         label = f"{INSTALL_CATALOG_NAME}.entries[{index}]"
+        target_key = "build_target" if schema == 1 else "build_targets"
         entry = require_exact_keys(
             raw,
             {
                 "compat_id", "release_tag", "release_commit", "codex_version",
-                "build_target", "patch_revision", "recorded_on",
+                target_key, "patch_revision", "recorded_on",
             },
             {
                 "compat_id", "release_tag", "release_commit", "codex_version",
-                "build_target", "patch_revision", "recorded_on",
+                target_key, "patch_revision", "recorded_on",
             },
             label,
         )
@@ -238,7 +240,20 @@ def validate_install_catalog(
         version_match = CODEX_VERSION.fullmatch(codex_version)
         if version_match is None or ".".join(str(int(part)) for part in version_match.groups()) != codex_version:
             fail(f"{label}.codex_version must be canonical numeric X.Y.Z")
-        build_target = require_string(entry.get("build_target"), f"{label}.build_target", pattern=SAFE_ID)
+        if schema == 1:
+            build_targets = [
+                require_string(entry.get("build_target"), f"{label}.build_target", pattern=SAFE_ID)
+            ]
+        else:
+            raw_targets = entry.get("build_targets")
+            if not isinstance(raw_targets, list) or not raw_targets:
+                fail(f"{label}.build_targets must be a non-empty array")
+            build_targets = [
+                require_string(value, f"{label}.build_targets[{target_index}]", pattern=SAFE_ID)
+                for target_index, value in enumerate(raw_targets)
+            ]
+            if build_targets != sorted(set(build_targets)):
+                fail(f"{label}.build_targets must be unique and sorted")
         patch_revision = require_int(entry.get("patch_revision"), f"{label}.patch_revision")
         revision_match = PATCH_REVISION.search(compat_id)
         if revision_match is None or int(revision_match.group(1)) != patch_revision:
@@ -261,7 +276,7 @@ def validate_install_catalog(
                 "release_tag": release_tag,
                 "release_commit": release_commit,
                 "codex_version": codex_version,
-                "build_target": build_target,
+                target_key: build_targets[0] if schema == 1 else build_targets,
                 "patch_revision": patch_revision,
                 "recorded_on": recorded_on,
             }
@@ -272,7 +287,7 @@ def validate_install_catalog(
     if len(source_entries) != 1 or source_entries[0]["release_commit"] != source_commit:
         fail("install catalog source identity is not represented by exactly one entry")
     return {
-        "schema": 1,
+        "schema": schema,
         "repository": repository,
         "source_release_tag": source_tag,
         "source_commit": source_commit,
@@ -894,6 +909,7 @@ def build_install_catalog(
     current_release_tag: str,
     current_source_commit: str,
     target: str,
+    all_targets: bool = False,
 ) -> dict[str, Any]:
     repository = repository.resolve(strict=True)
     current_release_tag = require_string(current_release_tag, "current release tag")
@@ -936,6 +952,8 @@ def build_install_catalog(
             require_acceptance=True,
             require_release=True,
         )
+        manifest, _, _ = load_manifest(repository, repository / resolved["manifest_path"])
+        selected_targets = sorted(manifest["artifacts"]) if all_targets else [target]
         release_commit = (
             current_source_commit
             if release_tag == current_release_tag
@@ -949,22 +967,24 @@ def build_install_catalog(
         revision_match = PATCH_REVISION.search(compat_id)
         if revision_match is None:
             fail(f"compatibility ID has no numeric patch revision: {compat_id}")
-        catalog_entries.append(
-            {
-                "compat_id": compat_id,
-                "release_tag": release_tag,
-                "release_commit": release_commit,
-                "codex_version": resolved["codex_version"],
-                "build_target": target,
-                "patch_revision": int(revision_match.group(1)),
-                "recorded_on": require_string(
-                    acceptance.get("recorded_at"), f"acceptance recorded_at for {compat_id}"
-                ),
-            }
-        )
+        entry = {
+            "compat_id": compat_id,
+            "release_tag": release_tag,
+            "release_commit": release_commit,
+            "codex_version": resolved["codex_version"],
+            "patch_revision": int(revision_match.group(1)),
+            "recorded_on": require_string(
+                acceptance.get("recorded_at"), f"acceptance recorded_at for {compat_id}"
+            ),
+        }
+        if all_targets:
+            entry["build_targets"] = selected_targets
+        else:
+            entry["build_target"] = target
+        catalog_entries.append(entry)
     catalog_entries.sort(key=_install_catalog_sort_key)
     catalog = {
-        "schema": 1,
+        "schema": 2 if all_targets else 1,
         "repository": CSA_REPOSITORY,
         "source_release_tag": current_release_tag,
         "source_commit": current_source_commit,
@@ -1390,6 +1410,7 @@ def command_install_catalog(args: argparse.Namespace) -> None:
         args.current_release_tag,
         args.current_source_commit,
         args.target,
+        args.all_targets,
     )
     write_json_atomic(args.output, catalog)
     print(
@@ -1440,6 +1461,7 @@ def build_parser() -> argparse.ArgumentParser:
     install_catalog_parser.add_argument("--current-release-tag", required=True)
     install_catalog_parser.add_argument("--current-source-commit", required=True)
     install_catalog_parser.add_argument("--target", default="x86_64-pc-windows-msvc")
+    install_catalog_parser.add_argument("--all-targets", action="store_true")
     install_catalog_parser.add_argument("--output", type=Path, required=True)
     install_catalog_parser.set_defaults(handler=command_install_catalog)
 

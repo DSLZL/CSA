@@ -192,7 +192,7 @@ fn resolve_online_install_inner(
     validate_catalog_descriptor(&descriptor, &release_tag, &csa_commit, compat_id)?;
     if selected.catalog_entry.is_some_and(|expected| {
         descriptor.upstream.version != expected.codex_version
-            || descriptor.build_target != expected.build_target
+            || !descriptor_supports_target(&descriptor, &expected.build_target)
     }) {
         return Err(ManagerError::new(
             "compatibility_release_changed",
@@ -247,21 +247,20 @@ fn resolve_online_install_inner(
             ));
         }
     }
-    validate_declared_asset(&descriptor.artifact, &checksums)?;
-    let artifact_path = selected_path
-        .join("artifact")
-        .join(&descriptor.artifact.path);
+    let release_artifact = descriptor_artifact(&descriptor, BUILD_TARGET)?;
+    validate_declared_asset(release_artifact, &checksums)?;
+    let artifact_path = selected_path.join("artifact").join(&release_artifact.path);
     ensure_managed_directory(
         &paths.root,
         artifact_path.parent().expect("artifact path has a parent"),
     )?;
     if !client.download_asset_with_progress(
         &release_tag,
-        &descriptor.artifact.asset,
+        &release_artifact.asset,
         &artifact_path,
         (
-            Some(descriptor.artifact.size),
-            Some(&descriptor.artifact.sha256),
+            Some(release_artifact.size),
+            Some(&release_artifact.sha256),
             MAX_ARTIFACT_BYTES,
         ),
         Some(progress),
@@ -270,13 +269,13 @@ fn resolve_online_install_inner(
             "invalid_compatibility_release",
             format!(
                 "declared release asset is missing: {}",
-                descriptor.artifact.asset
+                release_artifact.asset
             ),
         ));
     }
 
     let manifest_path = payload_root.join("manifest.toml");
-    let compatibility = LoadedCompatibility::load(&manifest_path)?;
+    let compatibility = LoadedCompatibility::load_for_target(&manifest_path, BUILD_TARGET)?;
     compatibility.test_contract()?;
     validate_downloaded_compatibility(&compatibility, &descriptor, &upstream_commit)?;
     Ok(OnlineBundle {
@@ -313,12 +312,12 @@ fn install_candidates(
         .entries
         .into_iter()
         .filter(|entry| {
-            entry.codex_version == official_version && entry.build_target == BUILD_TARGET
+            entry.codex_version == official_version && entry.supports_target(BUILD_TARGET)
         })
         .map(|entry| InstallCandidate {
             compat_id: entry.compat_id,
             codex_version: entry.codex_version,
-            build_target: entry.build_target,
+            build_target: BUILD_TARGET.to_owned(),
             patch_revision: entry.patch_revision,
             recorded_on: entry.recorded_on,
             recommended: false,
@@ -521,7 +520,7 @@ fn validate_install_catalog(
     refs: &BTreeMap<String, String>,
     containing_release_tag: Option<&str>,
 ) -> Result<()> {
-    if catalog.schema != 1
+    if !matches!(catalog.schema, 1 | 2)
         || !catalog.repository.eq_ignore_ascii_case(CSA_REPOSITORY)
         || catalog.entries.is_empty()
         || catalog.entries.len() > MAX_COMPATIBILITY_TAGS
@@ -554,8 +553,33 @@ fn validate_install_catalog(
             .map_err(|_| invalid_install_catalog("install catalog compatibility ID is invalid"))?;
         validate_asset_name(&entry.release_tag)
             .map_err(|_| invalid_install_catalog("install catalog release tag is invalid"))?;
-        validate_asset_name(&entry.build_target)
-            .map_err(|_| invalid_install_catalog("install catalog build target is invalid"))?;
+        let targets: Vec<&str> = match catalog.schema {
+            1 if entry.build_target.is_some() && entry.build_targets.is_empty() => {
+                vec![
+                    entry
+                        .build_target
+                        .as_deref()
+                        .expect("schema 1 target checked"),
+                ]
+            }
+            2 if entry.build_target.is_none() && !entry.build_targets.is_empty() => {
+                entry.build_targets.iter().map(String::as_str).collect()
+            }
+            _ => {
+                return Err(invalid_install_catalog(
+                    "install catalog target fields do not match its schema",
+                ));
+            }
+        };
+        if targets.windows(2).any(|pair| pair[0] >= pair[1]) {
+            return Err(invalid_install_catalog(
+                "install catalog build targets must be unique and sorted",
+            ));
+        }
+        for target in targets {
+            validate_asset_name(target)
+                .map_err(|_| invalid_install_catalog("install catalog build target is invalid"))?;
+        }
         validate_sha(&entry.release_commit)
             .map_err(|_| invalid_install_catalog("install catalog release commit is invalid"))?;
         let key = version_key(&entry.codex_version)
@@ -1185,9 +1209,22 @@ struct InstallCatalogEntry {
     release_tag: String,
     release_commit: String,
     codex_version: String,
-    build_target: String,
+    #[serde(default)]
+    build_target: Option<String>,
+    #[serde(default)]
+    build_targets: Vec<String>,
     patch_revision: u64,
     recorded_on: String,
+}
+
+impl InstallCatalogEntry {
+    fn supports_target(&self, target: &str) -> bool {
+        self.build_target.as_deref() == Some(target)
+            || self
+                .build_targets
+                .iter()
+                .any(|candidate| candidate == target)
+    }
 }
 
 #[derive(Deserialize)]
@@ -1199,9 +1236,13 @@ struct CompatibilityRelease {
     source_commit: String,
     compat_id: String,
     upstream: UpstreamRelease,
-    build_target: String,
+    #[serde(default)]
+    build_target: Option<String>,
     payload: Vec<ReleaseFile>,
-    artifact: ReleaseFile,
+    #[serde(default)]
+    artifact: Option<ReleaseFile>,
+    #[serde(default)]
+    artifacts: BTreeMap<String, ReleaseFile>,
 }
 
 #[derive(Deserialize)]
@@ -1286,6 +1327,37 @@ fn read_install_catalog(path: &Path) -> Result<InstallCatalog> {
     })
 }
 
+fn descriptor_supports_target(descriptor: &CompatibilityRelease, target: &str) -> bool {
+    match descriptor.schema {
+        1 => descriptor.build_target.as_deref() == Some(target) && descriptor.artifact.is_some(),
+        2 => descriptor.artifacts.contains_key(target),
+        _ => false,
+    }
+}
+
+fn descriptor_artifact<'a>(
+    descriptor: &'a CompatibilityRelease,
+    target: &str,
+) -> Result<&'a ReleaseFile> {
+    match descriptor.schema {
+        1 if descriptor.build_target.as_deref() == Some(target)
+            && descriptor.artifacts.is_empty() =>
+        {
+            descriptor.artifact.as_ref()
+        }
+        2 if descriptor.build_target.is_none() && descriptor.artifact.is_none() => {
+            descriptor.artifacts.get(target)
+        }
+        _ => None,
+    }
+    .ok_or_else(|| {
+        ManagerError::new(
+            "invalid_compatibility_release",
+            format!("compatibility release has no exact artifact for {target}"),
+        )
+    })
+}
+
 fn validate_catalog_descriptor(
     descriptor: &CompatibilityRelease,
     release_tag: &str,
@@ -1293,7 +1365,33 @@ fn validate_catalog_descriptor(
     compat_id: &str,
 ) -> Result<()> {
     validate_asset_name(compat_id)?;
-    validate_asset_name(&descriptor.build_target)?;
+    match descriptor.schema {
+        1 if descriptor.build_target.is_some()
+            && descriptor.artifact.is_some()
+            && descriptor.artifacts.is_empty() =>
+        {
+            validate_asset_name(
+                descriptor
+                    .build_target
+                    .as_deref()
+                    .expect("schema 1 target checked"),
+            )?;
+        }
+        2 if descriptor.build_target.is_none()
+            && descriptor.artifact.is_none()
+            && !descriptor.artifacts.is_empty() =>
+        {
+            for target in descriptor.artifacts.keys() {
+                validate_asset_name(target)?;
+            }
+        }
+        _ => {
+            return Err(ManagerError::new(
+                "invalid_compatibility_release",
+                "compatibility descriptor target fields do not match its schema",
+            ));
+        }
+    }
     validate_sha(csa_commit)?;
     validate_sha(&descriptor.source_commit)?;
     validate_sha(&descriptor.upstream.commit)?;
@@ -1305,8 +1403,7 @@ fn validate_catalog_descriptor(
             )
         })?;
     version_key(&parsed_version)?;
-    if descriptor.schema != 1
-        || descriptor.repository != CSA_REPOSITORY
+    if descriptor.repository != CSA_REPOSITORY
         || descriptor.release_tag != release_tag
         || descriptor.source_commit != csa_commit
         || descriptor.compat_id != compat_id
@@ -1332,8 +1429,8 @@ fn validate_descriptor(
     upstream_commit: &str,
 ) -> Result<()> {
     validate_catalog_descriptor(descriptor, release_tag, csa_commit, compat_id)?;
-    if descriptor.build_target != BUILD_TARGET
-        || descriptor.upstream.version != upstream_version
+    descriptor_artifact(descriptor, BUILD_TARGET)?;
+    if descriptor.upstream.version != upstream_version
         || descriptor.upstream.tag != upstream_tag
         || descriptor.upstream.commit != upstream_commit
     {
@@ -1348,16 +1445,11 @@ fn validate_descriptor(
 fn descriptor_assets(descriptor: &CompatibilityRelease) -> Result<BTreeMap<String, &ReleaseFile>> {
     let mut assets = BTreeMap::new();
     let mut paths = BTreeSet::new();
-    for (file, limit) in descriptor
-        .payload
-        .iter()
-        .map(|file| (file, MAX_RELEASE_FILE_BYTES))
-        .chain([(&descriptor.artifact, MAX_ARTIFACT_BYTES)])
-    {
+    for file in &descriptor.payload {
         validate_relative(&file.path, false)?;
         validate_asset_name(&file.asset)?;
         validate_sha256(&file.sha256)?;
-        if file.size == 0 || file.size > limit {
+        if file.size == 0 || file.size > MAX_RELEASE_FILE_BYTES {
             return Err(ManagerError::new(
                 "invalid_compatibility_release",
                 format!("declared file size is invalid: {}", file.path),
@@ -1373,6 +1465,28 @@ fn descriptor_assets(descriptor: &CompatibilityRelease) -> Result<BTreeMap<Strin
             return Err(ManagerError::new(
                 "invalid_compatibility_release",
                 format!("descriptor repeats file path: {}", file.path),
+            ));
+        }
+    }
+    let artifacts: Vec<&ReleaseFile> = match descriptor.schema {
+        1 => descriptor.artifact.iter().collect(),
+        2 => descriptor.artifacts.values().collect(),
+        _ => Vec::new(),
+    };
+    for file in artifacts {
+        validate_relative(&file.path, false)?;
+        validate_asset_name(&file.asset)?;
+        validate_sha256(&file.sha256)?;
+        if file.size == 0 || file.size > MAX_ARTIFACT_BYTES {
+            return Err(ManagerError::new(
+                "invalid_compatibility_release",
+                format!("declared file size is invalid: {}", file.path),
+            ));
+        }
+        if assets.insert(file.asset.clone(), file).is_some() {
+            return Err(ManagerError::new(
+                "invalid_compatibility_release",
+                format!("descriptor repeats release asset: {}", file.asset),
             ));
         }
     }
@@ -1396,14 +1510,15 @@ fn validate_downloaded_compatibility(
 ) -> Result<()> {
     let manifest = &compatibility.manifest;
     let manifest_artifact = compatibility.artifact();
+    let release_artifact = descriptor_artifact(descriptor, compatibility.selected_target())?;
     if manifest.compat_id != descriptor.compat_id
         || manifest.codex_version != descriptor.upstream.version
         || manifest.upstream_tag != descriptor.upstream.tag
         || manifest.upstream_commit != upstream_commit
-        || manifest.build_target != BUILD_TARGET
-        || manifest_artifact.filename != descriptor.artifact.path
-        || manifest_artifact.size != descriptor.artifact.size
-        || manifest_artifact.sha256 != descriptor.artifact.sha256
+        || compatibility.selected_target() != BUILD_TARGET
+        || manifest_artifact.filename != release_artifact.path
+        || manifest_artifact.size != release_artifact.size
+        || manifest_artifact.sha256 != release_artifact.sha256
     {
         return Err(ManagerError::new(
             "invalid_compatibility_release",
@@ -1416,8 +1531,7 @@ fn validate_downloaded_compatibility(
         .iter()
         .map(|file| file.path.clone())
         .collect();
-    if expected_paths != actual_paths
-        || descriptor.artifact.path != compatibility.artifact().filename
+    if expected_paths != actual_paths || release_artifact.path != compatibility.artifact().filename
     {
         return Err(ManagerError::new(
             "invalid_compatibility_release",
@@ -1576,7 +1690,8 @@ mod tests {
                 release_tag: source_tag.to_owned(),
                 release_commit: source_commit,
                 codex_version: "0.10.0".to_owned(),
-                build_target: BUILD_TARGET.to_owned(),
+                build_target: Some(BUILD_TARGET.to_owned()),
+                build_targets: Vec::new(),
                 patch_revision: 10,
                 recorded_on: "2026-08-29".to_owned(),
             }],
@@ -1612,7 +1727,8 @@ mod tests {
                     release_commit: format!("{revision:040x}"),
                     compat_id,
                     codex_version: "0.10.0".to_owned(),
-                    build_target: BUILD_TARGET.to_owned(),
+                    build_target: Some(BUILD_TARGET.to_owned()),
+                    build_targets: Vec::new(),
                     patch_revision: revision,
                     recorded_on: "2026-08-29".to_owned(),
                 }
@@ -1715,9 +1831,10 @@ mod tests {
                 tag: "rust-v1.2.3".to_owned(),
                 commit: commit.clone(),
             },
-            build_target: BUILD_TARGET.to_owned(),
+            build_target: Some(BUILD_TARGET.to_owned()),
             payload: vec![file],
-            artifact,
+            artifact: Some(artifact),
+            artifacts: BTreeMap::new(),
         };
         assert!(
             validate_descriptor(
@@ -1747,10 +1864,11 @@ mod tests {
 
         assert!(descriptor_assets(&descriptor).is_ok());
         let mut checksums = BTreeMap::new();
-        checksums.insert(descriptor.artifact.asset.clone(), sha);
-        assert!(validate_declared_asset(&descriptor.artifact, &checksums).is_ok());
+        let artifact = descriptor.artifact.as_ref().unwrap();
+        checksums.insert(artifact.asset.clone(), sha);
+        assert!(validate_declared_asset(artifact, &checksums).is_ok());
         checksums.clear();
-        assert!(validate_declared_asset(&descriptor.artifact, &checksums).is_err());
+        assert!(validate_declared_asset(artifact, &checksums).is_err());
 
         let allowed = "https://release-assets.githubusercontent.com/asset"
             .parse()

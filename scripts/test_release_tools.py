@@ -38,6 +38,7 @@ from compat_release import (  # noqa: E402
     finalize,
     pack,
     port,
+    release_matrix,
     render_binding_manifest,
     render_manifest,
     stable_version,
@@ -845,35 +846,158 @@ def test_release_stream_contracts() -> None:
     validation_workflow = (
         REPOSITORY / ".github" / "workflows" / "validate-patched-codex.yml"
     ).read_text(encoding="utf-8")
-    assert patched_workflow.count("Codex source must not live inside the CSA repository") == 1
+    target_workflow = (
+        REPOSITORY / ".github" / "workflows" / "build-patched-codex-target.yml"
+    ).read_text(encoding="utf-8")
+    windows_test_workflow = (
+        REPOSITORY / ".github" / "workflows" / "build-patched-codex-windows.yml"
+    ).read_text(encoding="utf-8")
     assert validation_workflow.count("Codex source must not live inside the CSA repository") == 1
+    assert "Patched Codex validation must be dispatched from" in validation_workflow
     assert "default: current" in patched_workflow
     assert "scripts/compat_catalog.py resolve" in patched_workflow
     assert "--require-acceptance" not in patched_workflow
     assert "--require-release" in patched_workflow
     assert 'if [[ "$PUBLISH_REQUESTED" == "true" ]]' in patched_workflow
-    assert "if: inputs.publish && needs.build.outputs.release_enabled == 'true'" in patched_workflow
+    assert (
+        "if: needs.bundle.outputs.publish_requested == 'true' && "
+        "needs.bundle.outputs.release_enabled == 'true'"
+    ) in patched_workflow
     assert "accepted_codex_sha256:" not in patched_workflow
-    assert "Finalize production manifest from the GitHub-built CLI" in patched_workflow
     assert patched_workflow.count("compat_release.py finalize") == 1
-    assert 'cp -a payload "$staged_root/"' in patched_workflow
-    assert '--manifest "$STAGED_MANIFEST"' in patched_workflow
-    assert 'sha256sum "$ARTIFACT_PATH"' in patched_workflow
-    assert "Upload local acceptance candidate" in patched_workflow
+    assert "Finalize and pack multi-target release assets" in patched_workflow
+    assert "Upload manual acceptance bundle" in patched_workflow
     assert "Upload formal release assets" in patched_workflow
     assert patched_workflow.count("actions/download-artifact@") == 2
-    assert "Upload production build bundle" not in patched_workflow
-    assert "patched-codex-cli-bundle-" not in patched_workflow
-    assert "patched-codex-validation-${{ steps.resolve.outputs.compat_id }}" in patched_workflow
-    assert "run-id: ${{ steps.validation.outputs.validation_run_id }}" in patched_workflow
-    assert "github-token: ${{ github.token }}" in patched_workflow
-    assert "validation_evidence.py verify" in patched_workflow
+    assert "uses: ./.github/workflows/validate-patched-codex.yml" in patched_workflow
+    assert "needs: [plan, validate]" in patched_workflow
+    assert "source_commit: ${{ needs.plan.outputs.source_commit }}" in patched_workflow
+    assert "validation_run_id" not in patched_workflow
+    assert "Select successful exact-commit validation" not in patched_workflow
+    assert "validation_evidence.py verify" not in patched_workflow
     assert validation_workflow.count("actions/upload-artifact@") == 1
     assert validation_workflow.count("actions/download-artifact@") == 0
     assert "patched-codex-validation-${{ steps.resolve.outputs.compat_id }}" in validation_workflow
     assert "validation-result.json" in validation_workflow
     assert "test-report.json" in validation_workflow
     assert "bin/codex.exe" not in validation_workflow
+    assert "uses: ./.github/workflows/build-patched-codex-target.yml" in patched_workflow
+    assert "uses: ./.github/workflows/build-patched-codex-target.yml" in windows_test_workflow
+    assert "workflow_call:" in target_workflow and "workflow_dispatch:" not in target_workflow
+    assert "workflow_call:" in validation_workflow and "workflow_dispatch:" in validation_workflow
+    assert "ref: ${{ inputs.source_commit }}" in target_workflow
+    assert "ref: ${{ inputs.source_commit || github.sha }}" in validation_workflow
+    assert 'test "$(git rev-parse HEAD)" = "$CSA_SOURCE_COMMIT"' in validation_workflow
+    assert '--csa-commit "$CSA_SOURCE_COMMIT"' in validation_workflow
+
+    windows_test_triggers = windows_test_workflow.split("\nconcurrency:", 1)[0]
+    assert "  workflow_dispatch:" in windows_test_triggers
+    assert "  push:" not in windows_test_triggers
+    assert "  pull_request:" not in windows_test_triggers
+    assert "runner: windows-2025" in windows_test_workflow
+    assert "--target x86_64-pc-windows-msvc" in windows_test_workflow
+    assert "compat_catalog.py candidate" in windows_test_workflow
+    assert "patched-codex-windows-test-${{ needs.plan.outputs.compat_id }}" in windows_test_workflow
+    assert "validation_evidence.py" not in windows_test_workflow
+    assert "compat_release.py finalize" not in windows_test_workflow
+    assert "compat_release.py pack" not in windows_test_workflow
+    assert "gh release" not in windows_test_workflow
+    assert "contents: write" not in windows_test_workflow
+    assert "--require-release" not in windows_test_workflow
+    assert "--require-acceptance" not in windows_test_workflow
+
+    manifest = (
+        REPOSITORY
+        / "payload/codex/native-join-p10/bindings/rust-v0.151.0-native-join-p10/manifest.toml"
+    )
+    matrix = release_matrix(manifest)
+    assert matrix == {
+        "include": [
+            {
+                "target": "aarch64-apple-darwin",
+                "runner": "macos-15",
+                "artifact_filename": "codex",
+            },
+            {
+                "target": "aarch64-pc-windows-msvc",
+                "runner": "windows-11-arm",
+                "artifact_filename": "codex.exe",
+            },
+            {
+                "target": "aarch64-unknown-linux-musl",
+                "runner": "ubuntu-24.04-arm",
+                "artifact_filename": "codex",
+            },
+            {
+                "target": "x86_64-apple-darwin",
+                "runner": "macos-15-intel",
+                "artifact_filename": "codex",
+            },
+            {
+                "target": "x86_64-pc-windows-msvc",
+                "runner": "windows-2025",
+                "artifact_filename": "codex.exe",
+            },
+            {
+                "target": "x86_64-unknown-linux-musl",
+                "runner": "ubuntu-24.04",
+                "artifact_filename": "codex",
+            },
+        ]
+    }
+    assert "matrix: ${{ fromJSON(needs.plan.outputs.matrix) }}" in patched_workflow
+    assert "runner: ${{ matrix.runner }}" in patched_workflow
+    assert "target: ${{ matrix.target }}" in patched_workflow
+    assert "runs-on: ${{ inputs.runner }}" in target_workflow
+    assert "targets: ${{ inputs.target }}" in target_workflow
+    assert "fail-fast: false" in patched_workflow
+    assert "patched-codex-target-${{ inputs.compat_id }}-${{ inputs.target }}" in target_workflow
+    assert "pattern: patched-codex-target-${{ needs.plan.outputs.compat_id }}-*" in patched_workflow
+    assert "EXPECTED_COUNT: ${{ needs.plan.outputs.artifact_count }}" in patched_workflow
+    assert "compat_catalog.py candidate" in patched_workflow
+    assert "--provider github-actions" in patched_workflow
+    assert '"$root/candidate-record.json"' in patched_workflow
+    assert '"$root/resolution.json"' in patched_workflow
+    assert '"$root/targets"' in patched_workflow
+    assert "--all-targets" in patched_workflow
+
+    sccache_action = (
+        "mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c"
+    )
+    for workflow in (target_workflow, validation_workflow):
+        assert 'SCCACHE_GHA_ENABLED: "on"' in workflow
+        assert "SCCACHE_GHA_VERSION: csa-patched-codex-v1" in workflow
+        assert workflow.count(sccache_action) == 1
+        assert "actions/cache/restore@" not in workflow
+        assert "actions/cache/save@" not in workflow
+        assert "gh cache delete" not in workflow
+        assert "actions: write" in workflow
+        assert "github.run_id" not in workflow
+
+    for upstream_step in (
+        "install-musl-build-tools.sh",
+        "rusty_v8_bazel.py",
+        "setup-msvc-env.ps1",
+        "--bin bwrap",
+        'cargo build --target "$TARGET" --release --timings --bin codex',
+    ):
+        assert upstream_step in target_workflow
+    assert (
+        "group: csa-patched-codex-release-${{ inputs.compat_selector || github.ref_name }}"
+        in patched_workflow
+    )
+    assert patched_workflow.count("if: needs.plan.outputs.publish_requested != 'true'") == 2
+    assert patched_workflow.count("if: needs.plan.outputs.publish_requested == 'true'") == 2
+    assert patched_workflow.count(
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+    ) == 2
+    assert target_workflow.count(
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+    ) == 1
+    assert windows_test_workflow.count(
+        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+    ) == 1
+
     assert 'gh release view "$TAG"' in patched_workflow
     assert '--json databaseId' in patched_workflow
     assert 'releases/$release_id' in patched_workflow
@@ -908,41 +1032,30 @@ def test_release_stream_contracts() -> None:
         path.read_text(encoding="utf-8")
         for path in sorted((REPOSITORY / "release" / "runtime-locks").glob("*.json"))
     )
-    assert patched_workflow.count("bash scripts/build_patched_codex_bundle.sh") == 4
-    for phase in ("tools", "rust", "xwin", "release"):
-        assert f"build_patched_codex_bundle.sh {phase}" in patched_workflow
-    for phase in ("runtime", "tests", "build"):
-        assert f"build_patched_codex_bundle.sh {phase}" not in patched_workflow
+    assert "build_patched_codex_bundle.sh" not in patched_workflow
+    assert "build_patched_codex_bundle.sh" not in target_workflow
+    assert "build_patched_codex_bundle.sh" not in windows_test_workflow
     assert validation_workflow.count("bash scripts/build_patched_codex_bundle.sh") == 5
     for phase in ("tools", "rust", "xwin", "runtime", "tests"):
         assert f"build_patched_codex_bundle.sh {phase}" in validation_workflow
     for phase in ("build", "release"):
         assert f"build_patched_codex_bundle.sh {phase}" not in validation_workflow
-    assert "accepted_artifact_url" not in patched_workflow
-    assert patched_workflow.count("runs-on: ubuntu-24.04") == 2
+    assert patched_workflow.count("runs-on: ubuntu-24.04") == 3
     assert "runs-on: ubuntu-26.04" not in patched_workflow
-    assert "timeout-minutes: 120" in patched_workflow
-    assert "timeout 50m bash scripts/build_patched_codex_bundle.sh" not in patched_workflow
-    assert "bash scripts/build_patched_codex_bundle.sh" in patched_workflow
     assert "bash scripts/build_patched_codex_bundle.sh" in validation_workflow
     assert "llvm-toolchain-noble-21" in build_profile
     assert "6084F3CF814B57C1CF12EFD515CF4D18AF4F7421" in build_profile
     assert "/usr/lib/llvm-$LLVM_MAJOR/bin" in shared_build
-    assert "CARGO_HOME: ${{ runner.temp }}" not in patched_workflow
-    assert 'echo "CARGO_HOME=$root/cache/cargo-home"' in patched_workflow
     assert "CARGO_HOME: ${{ runner.temp }}" not in validation_workflow
     assert 'echo "CARGO_HOME=$root/cache/cargo-home"' in validation_workflow
-    shared_xwin_cache = (
-        'echo "XWIN_CACHE_DIR=$RUNNER_TEMP/csa-patched-codex-cache/xwin"'
-    )
-    assert patched_workflow.count(shared_xwin_cache) == 1
-    assert validation_workflow.count(shared_xwin_cache) == 1
     assert 'tmp="$RUNNER_TEMP/csa-tmp"' in validation_workflow
     assert 'echo "TMPDIR=$tmp"' in validation_workflow
     assert 'chmod 0700 "$tmp"' in validation_workflow
     assert "build_patched_codex_bundle.sh" not in ci_workflow
     assert "compat_catalog.py guard-workflows" in ci_workflow
     assert "scripts/test_validation_evidence.py" in ci_workflow
+    assert ".github/workflows/build-patched-codex-target.yml" in ci_workflow
+    assert ".github/workflows/build-patched-codex-windows.yml" in ci_workflow
     assert ".github/workflows/validate-patched-codex.yml" in ci_workflow
     assert "build_patched_codex_bundle.sh" not in watcher
     assert "compat_release.py finalize" not in watcher
@@ -952,14 +1065,6 @@ def test_release_stream_contracts() -> None:
     assert "full_payload" not in ci_workflow
     assert "warm_cache_acceptance" not in ci_workflow
     assert 'export RUSTC_WRAPPER="$CSA_TOOL_BIN/sccache"' in shared_build
-    assert "Create local acceptance candidate" in patched_workflow
-    assert "compat_catalog.py candidate" in patched_workflow
-    assert "--provider github-actions" in patched_workflow
-    assert "patched-codex-acceptance-${{ steps.resolve.outputs.compat_id }}" in patched_workflow
-    assert patched_workflow.count("if: ${{ !inputs.publish }}") == 2
-    assert patched_workflow.count("if: ${{ inputs.publish }}") == 5
-    assert patched_workflow.count("actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a") == 2
-
     assert "--portable-evidence" in shared_build
     assert "--stats-format json" in shared_build
     assert "CSA_MINIMUM_RUST_HIT_RATE" in shared_build
@@ -1001,91 +1106,41 @@ def test_release_stream_contracts() -> None:
         assert path in runtime_locks
         assert path not in shared_build
         assert f'cp "$official_root/{path}"' not in shared_build
-    cache_restore = "actions/cache/restore@668228422ae6a00e4ad889ee87cd7109ec5666a7"
-    cache_save = "actions/cache/save@668228422ae6a00e4ad889ee87cd7109ec5666a7"
-    assert patched_workflow.count(cache_restore) == 5
-    assert patched_workflow.count(cache_save) == 5
-    assert patched_workflow.count("gh cache delete") == 1
-    assert patched_workflow.count("continue-on-error: true") == 11
-    assert validation_workflow.count(cache_restore) == 6
-    assert validation_workflow.count(cache_save) == 6
-    assert validation_workflow.count("gh cache delete") == 1
-    assert validation_workflow.count("continue-on-error: true") == 13
-    assert "actions: write" in patched_workflow
-    assert "actions: write" in validation_workflow
-    assert "group: csa-patched-codex-release-${{ inputs.target }}" in patched_workflow
-    assert "github.run_id" not in patched_workflow
-    assert "github.run_id" not in validation_workflow
-    cargo_key = "csa-patched-codex-cargo-v8-linux-X64"
-    for workflow in (patched_workflow, validation_workflow):
-        assert workflow.count(cargo_key) == 3
-        assert f"{cargo_key}-" not in workflow
-    assert "csa-patched-codex-sccache-v8-linux-X64" not in (
-        patched_workflow + validation_workflow
-    )
-    compiler_prefix = (
-        "csa-patched-codex-sccache-v9-linux-X64-"
-        "${{ steps.resolve.outputs.build_target }}-rust-"
-        "${{ steps.resolve.outputs.rust_toolchain }}"
-    )
-    shared_compatible = (
-        f"{compiler_prefix}-shared-"
-        "${{ steps.resolve.outputs.build_profile_sha256 }}-"
-    )
-    shared_exact = (
-        f"{shared_compatible}upstream-${{{{ steps.resolve.outputs.upstream_commit }}}}-"
-        "patch-${{ steps.resolve.outputs.manifest_sha256 }}"
-    )
-    shared_dir = "SCCACHE_DIR=$RUNNER_TEMP/csa-patched-codex-cache/sccache"
-    for workflow in (patched_workflow, validation_workflow):
-        assert workflow.count(shared_exact) == 3
-        assert workflow.count(f"restore-keys: {shared_compatible}") == 1
-        assert shared_dir in workflow
-        assert "SCCACHE_DIR: ${{ env.SCCACHE_DIR }}" in workflow
-        assert "CSA_SCCACHE_CACHE_SIZE: 6G" in workflow
-        assert "SCCACHE_RELEASE_DIR" not in workflow
-    assert "CSA_SCCACHE_PROFILE: release" in patched_workflow
-    assert patched_workflow.count("CSA_MINIMUM_RUST_HIT_RATE: 95") == 1
     assert "CSA_SCCACHE_PROFILE: test" in validation_workflow
     assert validation_workflow.count("CSA_MINIMUM_RUST_HIT_RATE: 95") == 1
-    assert 'echo "SCCACHE_STATS=$root/sccache-stats.json"' in patched_workflow
     assert 'echo "SCCACHE_STATS=$root/sccache-stats.json"' in validation_workflow
-    assert "sccache-stats*.json" not in patched_workflow + validation_workflow
     release_steps = (
-        "Select successful exact-commit validation",
-        "Download exact validation evidence",
-        "Verify exact validation evidence",
-        "Prepare pinned build tools",
-        "Save exact build tools",
-        "Prepare exact Rust toolchain",
-        "Save exact Rust toolchain",
-        "Prepare exact xwin SDK and LLVM toolchain",
-        "Save exact xwin SDK",
-        "Build canonical patched Codex CLI bundle",
-        "Save release compiler cache",
-        "Finalize production manifest",
+        "Resolve native target matrix",
+        "uses: ./.github/workflows/validate-patched-codex.yml",
+        "uses: ./.github/workflows/build-patched-codex-target.yml",
+        "Download every native target",
+        "Verify complete target inventory",
+        "Finalize and pack multi-target release assets",
     )
     assert list(map(patched_workflow.index, release_steps)) == sorted(
         map(patched_workflow.index, release_steps)
     )
+    target_steps = (
+        "Clone exact reviewed upstream source",
+        "Apply exact reviewed patch payload",
+        "Build patched Codex CLI",
+        "Upload target artifact",
+    )
+    assert list(map(target_workflow.index, target_steps)) == sorted(
+        map(target_workflow.index, target_steps)
+    )
     validation_steps = (
         "Prepare pinned build tools",
-        "Save exact build tools",
         "Prepare exact Rust toolchain",
-        "Save exact Rust toolchain",
         "Prepare exact xwin SDK and LLVM toolchain",
-        "Save exact xwin SDK",
         "Prepare official runtime archive",
-        "Save official runtime archive",
         "Run complete patch generation and contract tests",
-        "Save validation compiler cache",
         "Create exact validation evidence",
         "Upload validation evidence",
     )
     assert list(map(validation_workflow.index, validation_steps)) == sorted(
         map(validation_workflow.index, validation_steps)
     )
-    assert "SCCACHE_DIR" in patched_workflow
     assert "SCCACHE_DIR" in validation_workflow
     assert 'export SCCACHE_CACHE_SIZE="${CSA_SCCACHE_CACHE_SIZE:-$SCCACHE_CACHE_SIZE_PROFILE}"' in shared_build
     assert "--github-step-summary" in shared_build
@@ -1097,12 +1152,6 @@ def test_release_stream_contracts() -> None:
     assert '{"all", "tests", "build", "release"}' in contract_runner
     assert 'if phase == "build" and resume is None:' in contract_runner
     assert 'if phase in {"all", "tests", "release"} and cargo_target.exists():' in contract_runner
-    assert "csa-sccache-v5-linux-X64-rustc-" not in patched_workflow
-    assert "csa-sccache-v5-linux-X64-rustc-" not in validation_workflow
-    assert "csa-sccache-v3-" not in patched_workflow
-    assert "csa-sccache-v3-" not in validation_workflow
-    for workflow in (ci_workflow, watcher):
-        assert "csa-sccache-v5-linux-X64-rustc-" not in workflow
 
     online = (REPOSITORY / "src" / "online.rs").read_text(encoding="utf-8")
     assert "compatibility_id_for_version" not in online
@@ -1177,13 +1226,15 @@ def test_release_stream_contracts() -> None:
         encoding="utf-8"
     )
     assert '".github/workflows/publish-npm.yml"' in generator
+    assert '".github/workflows/build-patched-codex-target.yml"' in generator
+    assert '".github/workflows/build-patched-codex-windows.yml"' in generator
     release_policy = (REPOSITORY / ".github" / "release.yml").read_text(encoding="utf-8")
     assert manager_workflow.count("python scripts/generate_release_notes.py") == 1
     assert "--stream manager" in manager_workflow
     assert patched_workflow.count("python scripts/generate_release_notes.py") == 1
     assert "--stream compat" in patched_workflow
-    assert "build_target: ${{ steps.resolve.outputs.build_target }}" in patched_workflow
-    assert 'TARGET: ${{ needs.build.outputs.build_target }}' in patched_workflow
+    assert "build_target: ${{ needs.plan.outputs.build_target }}" in patched_workflow
+    assert 'TARGET: ${{ needs.bundle.outputs.build_target }}' in patched_workflow
     for workflow in (manager_workflow, patched_workflow):
         assert "--generate-notes" not in workflow
         assert 'cat > "$RUNNER_TEMP/release-notes.md"' not in workflow
@@ -1268,16 +1319,27 @@ def test_release_stream_contracts() -> None:
     for documentation_path in ("README.md", "README_ZH.md", "docs/**", ".trellis/**"):
         assert documentation_path not in ci_triggers
     validation_triggers = validation_workflow.split("\nconcurrency:", 1)[0]
+    assert "  workflow_call:" in validation_triggers
     assert "  workflow_dispatch:" in validation_triggers
-    assert validation_triggers.count('    branches: ["main"]') == 2
-    assert validation_triggers.count("    paths:") == 2
-    assert validation_triggers.count('      - "release/acceptance/**"') == 2
-    assert "docs/**" not in validation_triggers
-    for release_workflow in (manager_workflow, patched_workflow):
-        release_triggers = release_workflow.split("\nconcurrency:", 1)[0]
-        assert "  workflow_dispatch:" in release_triggers
-        assert "  push:" not in release_triggers
-        assert "  pull_request:" not in release_triggers
+    assert "  push:" not in validation_triggers
+    assert "  pull_request:" not in validation_triggers
+    assert "    paths:" not in validation_triggers
+    manager_release_triggers = manager_workflow.split("\nconcurrency:", 1)[0]
+    assert "  workflow_dispatch:" in manager_release_triggers
+    assert "  push:" not in manager_release_triggers
+    assert "  pull_request:" not in manager_release_triggers
+    patched_release_triggers = patched_workflow.split("\nconcurrency:", 1)[0]
+    assert "  workflow_dispatch:" in patched_release_triggers
+    assert "  push:" in patched_release_triggers
+    assert '      - "compat-rust-v*-native-join-p*"' in patched_release_triggers
+    assert "  pull_request:" not in patched_release_triggers
+    assert "    branches:" not in patched_release_triggers
+    assert "Formal compatibility tags must be annotated." in patched_workflow
+    assert 'git merge-base --is-ancestor "$source_commit"' in patched_workflow
+    assert "Formal compatibility tags must point to a commit on" in patched_workflow
+    assert "Verify formal tag identity" in patched_workflow
+    assert "needs: [plan, validate, build]" in patched_workflow
+    assert "RELEASE_SHA: ${{ needs.bundle.outputs.source_commit }}" in patched_workflow
     watcher_triggers = watcher.split("\nconcurrency:", 1)[0]
     assert "  schedule:" in watcher_triggers
     assert "  workflow_dispatch:" in watcher_triggers
@@ -1292,6 +1354,8 @@ def test_release_stream_contracts() -> None:
     patched_lines = patched_workflow.splitlines()
     assert patched_lines.count("          retention-days: 1") == 1
     assert patched_lines.count("          retention-days: 14") == 1
+    assert target_workflow.splitlines().count("          retention-days: 14") == 1
+    assert windows_test_workflow.splitlines().count("          retention-days: 14") == 1
     validation_lines = validation_workflow.splitlines()
     assert validation_lines.count("          retention-days: 1") == 0
     assert validation_lines.count("          retention-days: 14") == 1
@@ -1746,6 +1810,39 @@ def test_compatibility_release_tools(root: Path) -> None:
     }
     assert checksum_names == {path.name for path in assets.iterdir() if path.name != "SHA256SUMS"}
     assert all(not name.endswith(".tgz") and not name.startswith("csa-") for name in checksum_names)
+
+    multi_candidate = root / "multi" / candidate.name
+    multi_candidate.parent.mkdir()
+    shutil.copytree(candidate, multi_candidate)
+    multi_manifest_path = multi_candidate / "manifest.toml"
+    multi_manifest = tomllib.loads(multi_manifest_path.read_text(encoding="utf-8"))
+    multi_manifest["artifacts"]["x86_64-unknown-linux-musl"] = {
+        "url": "unpublished://fixture/codex",
+        "filename": "codex",
+        "sha256": "0" * 64,
+        "size": 1,
+    }
+    multi_manifest_path.write_text(render_manifest(multi_manifest), encoding="utf-8")
+    linux_artifact = root / "linux" / "codex"
+    linux_artifact.parent.mkdir()
+    linux_artifact.write_bytes(b"deterministic linux artifact")
+    windows_artifact = root / "windows" / "codex.exe"
+    windows_artifact.parent.mkdir()
+    windows_artifact.write_bytes(b"deterministic windows artifact")
+    multi_artifacts = {
+        "x86_64-pc-windows-msvc": windows_artifact.resolve(),
+        "x86_64-unknown-linux-musl": linux_artifact.resolve(),
+    }
+    multi_finalized = finalize(multi_manifest_path.resolve(), multi_artifacts)
+    assert set(multi_finalized["artifacts"]) == set(multi_artifacts)
+    multi_assets = root / "multi-assets"
+    pack(multi_manifest_path.resolve(), multi_artifacts, "e" * 40, multi_assets.resolve())
+    multi_descriptor = json.loads((multi_assets / "compatibility-release.json").read_bytes())
+    assert multi_descriptor["schema"] == 2
+    assert set(multi_descriptor["artifacts"]) == set(multi_artifacts)
+    release_names = [item["asset"] for item in multi_descriptor["artifacts"].values()]
+    assert len(release_names) == len(set(release_names)) == 2
+    assert all((multi_assets / name).is_file() for name in release_names)
 
     family_container = root / "family-port"
     family = family_container / "native-join-p2"

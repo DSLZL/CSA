@@ -45,6 +45,14 @@ TARGET_START = "<!-- csa-blocker-target:start -->"
 TARGET_END = "<!-- csa-blocker-target:end -->"
 FAILURE_START = "<!-- csa-blocker-failure:start -->"
 FAILURE_END = "<!-- csa-blocker-failure:end -->"
+TARGET_RUNNERS = {
+    "aarch64-apple-darwin": "macos-15",
+    "x86_64-apple-darwin": "macos-15-intel",
+    "aarch64-unknown-linux-musl": "ubuntu-24.04-arm",
+    "x86_64-unknown-linux-musl": "ubuntu-24.04",
+    "aarch64-pc-windows-msvc": "windows-11-arm",
+    "x86_64-pc-windows-msvc": "windows-2025",
+}
 
 
 class CompatibilityReleaseError(RuntimeError):
@@ -89,6 +97,10 @@ def asset_name(compat_id: str, relative: str) -> str:
     ):
         raise CompatibilityReleaseError(f"invalid compatibility file path: {relative}")
     return f"{compat_id}--{'--'.join(parts)}"
+
+
+def artifact_asset_name(compat_id: str, target: str, filename: str, multi: bool) -> str:
+    return asset_name(compat_id, f"{target}/{filename}" if multi else filename)
 
 
 class GitHubApi:
@@ -321,6 +333,27 @@ def write_github_output(path: Path, value: dict[str, Any]) -> None:
             output.write(f"{key}={rendered}\n")
 
 
+def release_matrix(manifest_path: Path) -> dict[str, Any]:
+    if not manifest_path.is_absolute():
+        raise CompatibilityReleaseError("manifest must be absolute")
+    manifest = _load_payload(manifest_path.resolve(strict=True)).manifest
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict) or not artifacts:
+        raise CompatibilityReleaseError("manifest has no release artifacts")
+    unknown = sorted(set(artifacts) - set(TARGET_RUNNERS))
+    if unknown:
+        raise CompatibilityReleaseError(f"unsupported release targets: {', '.join(unknown)}")
+    include = [
+        {
+            "target": target,
+            "runner": TARGET_RUNNERS[target],
+            "artifact_filename": artifacts[target]["filename"],
+        }
+        for target in sorted(artifacts)
+    ]
+    return {"include": include}
+
+
 def git_blob(source: Path, commit: str, relative: str) -> bytes | None:
     result = _run(["git", "show", f"{commit}:{relative}"], source, check=False)
     return result.stdout if result.returncode == 0 else None
@@ -331,7 +364,6 @@ def toml_string(value: str) -> str:
 
 
 def render_manifest(manifest: dict[str, Any]) -> str:
-    artifact = manifest["artifacts"][manifest["build_target"]]
     lines = [
         "schema = 1",
         f"compat_id = {toml_string(manifest['compat_id'])}",
@@ -364,17 +396,18 @@ def render_manifest(manifest: dict[str, Any]) -> str:
         f"{toml_string(path)} = {toml_string(digest)}"
         for path, digest in sorted(manifest["preimage"].items())
     )
-    lines.extend(
-        [
-            "",
-            f"[artifacts.{toml_string(manifest['build_target'])}]",
-            f"url = {toml_string(artifact['url'])}",
-            f"filename = {toml_string(artifact['filename'])}",
-            f"sha256 = {toml_string(artifact['sha256'])}",
-            f"size = {artifact['size']}",
-            "",
-        ]
-    )
+    for target, artifact in sorted(manifest["artifacts"].items()):
+        lines.extend(
+            [
+                "",
+                f"[artifacts.{toml_string(target)}]",
+                f"url = {toml_string(artifact['url'])}",
+                f"filename = {toml_string(artifact['filename'])}",
+                f"sha256 = {toml_string(artifact['sha256'])}",
+                f"size = {artifact['size']}",
+            ]
+        )
+    lines.append("")
     return "\n".join(lines)
 
 
@@ -515,13 +548,14 @@ def port(base_manifest: Path, source: Path, tag: str, commit: str, output: Path)
         hash_path.parent.mkdir(parents=True, exist_ok=True)
         hash_path.write_bytes(json_bytes(hashes))
         manifest["source_hashes_sha256"] = file_digest(hash_path)
-        artifact = manifest["artifacts"][manifest["build_target"]]
-        artifact["sha256"] = "0" * 64
-        artifact["size"] = 1
-        artifact["url"] = (
-            f"https://github.com/{CSA_REPOSITORY}/releases/download/compat-{compat_id}/"
-            f"{asset_name(compat_id, artifact['filename'])}"
-        )
+        multi = len(manifest["artifacts"]) > 1
+        for target, artifact in manifest["artifacts"].items():
+            artifact["sha256"] = "0" * 64
+            artifact["size"] = 1
+            artifact["url"] = (
+                f"https://github.com/{CSA_REPOSITORY}/releases/download/compat-{compat_id}/"
+                f"{artifact_asset_name(compat_id, target, artifact['filename'], multi)}"
+            )
         if payload.source_schema == 2:
             files = family_file_map(payload)
             binding_prefix = f"bindings/{base_compat_id}/"
@@ -580,22 +614,38 @@ def port(base_manifest: Path, source: Path, tag: str, commit: str, output: Path)
     }
 
 
-def finalize(manifest_path: Path, artifact_path: Path) -> dict[str, Any]:
-    if not manifest_path.is_absolute() or not artifact_path.is_absolute():
-        raise CompatibilityReleaseError("manifest and artifact must be absolute")
+def normalize_artifacts(
+    manifest: dict[str, Any], artifacts: Path | dict[str, Path]
+) -> dict[str, Path]:
+    values = {manifest["build_target"]: artifacts} if isinstance(artifacts, Path) else artifacts
+    if set(values) != set(manifest["artifacts"]):
+        raise CompatibilityReleaseError("built artifacts must exactly cover manifest targets")
+    normalized: dict[str, Path] = {}
+    for target, path in values.items():
+        if not path.is_absolute():
+            raise CompatibilityReleaseError("artifact paths must be absolute")
+        normalized[target] = path.resolve(strict=True)
+    return normalized
+
+
+def finalize(manifest_path: Path, artifact_paths: Path | dict[str, Path]) -> dict[str, Any]:
+    if not manifest_path.is_absolute():
+        raise CompatibilityReleaseError("manifest must be absolute")
     manifest_path = manifest_path.resolve(strict=True)
-    artifact_path = artifact_path.resolve(strict=True)
     payload = _load_payload(manifest_path)
     manifest = payload.manifest
-    artifact = manifest["artifacts"][manifest["build_target"]]
-    if artifact_path.name != artifact["filename"]:
-        raise CompatibilityReleaseError("built artifact filename differs from the manifest")
-    artifact["size"] = artifact_path.stat().st_size
-    artifact["sha256"] = file_digest(artifact_path)
-    artifact["url"] = (
-        f"https://github.com/{CSA_REPOSITORY}/releases/download/compat-{manifest['compat_id']}/"
-        f"{asset_name(manifest['compat_id'], artifact['filename'])}"
-    )
+    artifact_paths = normalize_artifacts(manifest, artifact_paths)
+    multi = len(artifact_paths) > 1
+    for target, artifact_path in artifact_paths.items():
+        artifact = manifest["artifacts"][target]
+        if artifact_path.name != artifact["filename"]:
+            raise CompatibilityReleaseError(f"built artifact filename differs for {target}")
+        artifact["size"] = artifact_path.stat().st_size
+        artifact["sha256"] = file_digest(artifact_path)
+        artifact["url"] = (
+            f"https://github.com/{CSA_REPOSITORY}/releases/download/compat-{manifest['compat_id']}/"
+            f"{artifact_asset_name(manifest['compat_id'], target, artifact['filename'], multi)}"
+        )
     staged = manifest_path.with_name("manifest.toml.next")
     if staged.exists():
         raise CompatibilityReleaseError("staged manifest already exists")
@@ -633,16 +683,24 @@ def finalize(manifest_path: Path, artifact_path: Path) -> dict[str, Any]:
         if family_replaced and old_family is not None:
             family_path.write_bytes(old_family)
         raise
-    return {
+    result: dict[str, Any] = {
         "schema": payload.source_schema,
         "result": "finalized",
         "compat_id": manifest["compat_id"],
-        "artifact": {
-            "path": str(artifact_path),
-            "size": artifact["size"],
-            "sha256": artifact["sha256"],
-        },
     }
+    finalized = {
+        target: {
+            "path": str(path),
+            "size": manifest["artifacts"][target]["size"],
+            "sha256": manifest["artifacts"][target]["sha256"],
+        }
+        for target, path in sorted(artifact_paths.items())
+    }
+    if multi:
+        result["artifacts"] = finalized
+    else:
+        result["artifact"] = next(iter(finalized.values()))
+    return result
 
 
 def payload_bytes(manifest_path: Path) -> list[tuple[str, bytes]]:
@@ -662,25 +720,34 @@ def payload_bytes(manifest_path: Path) -> list[tuple[str, bytes]]:
     return sorted(values)
 
 
-def pack(manifest_path: Path, artifact_path: Path, source_commit: str, output: Path) -> dict[str, Any]:
-    for path, label in ((manifest_path, "manifest"), (artifact_path, "artifact"), (output, "output")):
+def pack(
+    manifest_path: Path,
+    artifact_paths: Path | dict[str, Path],
+    source_commit: str,
+    output: Path,
+) -> dict[str, Any]:
+    for path, label in ((manifest_path, "manifest"), (output, "output")):
         if not path.is_absolute():
             raise CompatibilityReleaseError(f"{label} must be absolute")
     manifest_path = manifest_path.resolve(strict=True)
-    artifact_path = artifact_path.resolve(strict=True)
     if not SHA1.fullmatch(source_commit):
         raise CompatibilityReleaseError("CSA source commit must be lowercase 40-hex")
     if output.exists() or not output.parent.is_dir():
         raise CompatibilityReleaseError("output must be a new directory under an existing parent")
     validate_new_entry(manifest_path.parent)
     manifest = _load_manifest(manifest_path)
-    artifact = manifest["artifacts"][manifest["build_target"]]
-    if (
-        artifact_path.name != artifact["filename"]
-        or artifact_path.stat().st_size != artifact["size"]
-        or file_digest(artifact_path) != artifact["sha256"]
-    ):
-        raise CompatibilityReleaseError("patched artifact differs from the finalized manifest")
+    artifact_paths = normalize_artifacts(manifest, artifact_paths)
+    multi = len(artifact_paths) > 1
+    for target, artifact_path in artifact_paths.items():
+        artifact = manifest["artifacts"][target]
+        if (
+            artifact_path.name != artifact["filename"]
+            or artifact_path.stat().st_size != artifact["size"]
+            or file_digest(artifact_path) != artifact["sha256"]
+        ):
+            raise CompatibilityReleaseError(
+                f"patched artifact differs from the finalized manifest for {target}"
+            )
 
     compat_id = manifest["compat_id"]
     temporary = Path(tempfile.mkdtemp(prefix=f".{output.name}.", dir=output.parent))
@@ -702,13 +769,25 @@ def pack(manifest_path: Path, artifact_path: Path, source_commit: str, output: P
                     "sha256": file_digest(destination),
                 }
             )
-        artifact_name = asset_name(compat_id, artifact["filename"])
-        if artifact_name in names:
-            raise CompatibilityReleaseError(f"release asset name collision: {artifact_name}")
-        artifact_destination = temporary / artifact_name
-        shutil.copyfile(artifact_path, artifact_destination)
+        release_artifacts: dict[str, dict[str, Any]] = {}
+        for target, artifact_path in sorted(artifact_paths.items()):
+            artifact = manifest["artifacts"][target]
+            artifact_name = artifact_asset_name(
+                compat_id, target, artifact["filename"], multi
+            )
+            if artifact_name in names:
+                raise CompatibilityReleaseError(f"release asset name collision: {artifact_name}")
+            names.add(artifact_name)
+            artifact_destination = temporary / artifact_name
+            shutil.copyfile(artifact_path, artifact_destination)
+            release_artifacts[target] = {
+                "path": artifact["filename"],
+                "asset": artifact_name,
+                "size": artifact_destination.stat().st_size,
+                "sha256": file_digest(artifact_destination),
+            }
         descriptor = {
-            "schema": 1,
+            "schema": 2 if multi else 1,
             "repository": CSA_REPOSITORY,
             "release_tag": f"compat-{compat_id}",
             "source_commit": source_commit,
@@ -719,15 +798,13 @@ def pack(manifest_path: Path, artifact_path: Path, source_commit: str, output: P
                 "tag": manifest["upstream_tag"],
                 "commit": manifest["upstream_commit"],
             },
-            "build_target": manifest["build_target"],
             "payload": payload,
-            "artifact": {
-                "path": artifact["filename"],
-                "asset": artifact_name,
-                "size": artifact_destination.stat().st_size,
-                "sha256": file_digest(artifact_destination),
-            },
         }
+        if multi:
+            descriptor["artifacts"] = release_artifacts
+        else:
+            descriptor["build_target"] = manifest["build_target"]
+            descriptor["artifact"] = release_artifacts[manifest["build_target"]]
         (temporary / DESCRIPTOR_NAME).write_bytes(json_bytes(descriptor))
         checksums = []
         for path in sorted(temporary.iterdir()):
@@ -839,6 +916,22 @@ def write_new(path: Path, data: bytes) -> None:
         output.write(data)
 
 
+def parse_artifact_args(values: list[str]) -> Path | dict[str, Path]:
+    if len(values) == 1 and "=" not in values[0]:
+        return Path(values[0])
+    artifacts: dict[str, Path] = {}
+    for value in values:
+        target, separator, path = value.partition("=")
+        if not separator or not target or not path or not re.fullmatch(r"[A-Za-z0-9._-]+", target):
+            raise CompatibilityReleaseError(
+                "multi-target artifacts must use --artifact <target>=<absolute-path>"
+            )
+        if target in artifacts:
+            raise CompatibilityReleaseError(f"duplicate artifact target: {target}")
+        artifacts[target] = Path(path)
+    return artifacts
+
+
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     commands = parser.add_subparsers(dest="command", required=True)
@@ -855,13 +948,17 @@ def parse_args() -> argparse.Namespace:
     port_parser.add_argument("--commit", required=True)
     port_parser.add_argument("--output", type=Path, required=True)
 
+    matrix_parser = commands.add_parser("matrix")
+    matrix_parser.add_argument("--manifest", type=Path, required=True)
+    matrix_parser.add_argument("--github-output", type=Path)
+
     finalize_parser = commands.add_parser("finalize")
     finalize_parser.add_argument("--manifest", type=Path, required=True)
-    finalize_parser.add_argument("--artifact", type=Path, required=True)
+    finalize_parser.add_argument("--artifact", action="append", required=True)
 
     pack_parser = commands.add_parser("pack")
     pack_parser.add_argument("--manifest", type=Path, required=True)
-    pack_parser.add_argument("--artifact", type=Path, required=True)
+    pack_parser.add_argument("--artifact", action="append", required=True)
     pack_parser.add_argument("--source-commit", required=True)
     pack_parser.add_argument("--output", type=Path, required=True)
 
@@ -887,10 +984,21 @@ def main() -> int:
                 write_github_output(args.github_output, result)
         elif args.command == "port":
             result = port(args.base_manifest, args.source, args.tag, args.commit, args.output)
+        elif args.command == "matrix":
+            result = release_matrix(args.manifest)
+            if args.github_output:
+                with args.github_output.open("a", encoding="utf-8", newline="\n") as output:
+                    output.write(f"matrix={json.dumps(result, separators=(',', ':'))}\n")
+                    output.write(f"artifact_count={len(result['include'])}\n")
         elif args.command == "finalize":
-            result = finalize(args.manifest, args.artifact)
+            result = finalize(args.manifest, parse_artifact_args(args.artifact))
         elif args.command == "pack":
-            result = pack(args.manifest, args.artifact, args.source_commit, args.output)
+            result = pack(
+                args.manifest,
+                parse_artifact_args(args.artifact),
+                args.source_commit,
+                args.output,
+            )
         else:
             existing = args.existing.read_text(encoding="utf-8") if args.existing else ""
             log = args.log.read_text(encoding="utf-8", errors="replace") if args.log else None

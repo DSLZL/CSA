@@ -449,6 +449,26 @@ url = "{url}"
     def test_install_catalog_is_generated_from_formal_release_and_acceptance(self) -> None:
         holder, root = self.fixture()
         self.addCleanup(holder.cleanup)
+        manifest = root / f"payload/codex/{COMPAT}/manifest.toml"
+        with manifest.open("a", encoding="utf-8") as stream:
+            stream.write(
+                f'''\n[artifacts."aarch64-apple-darwin"]
+filename = "codex"
+sha256 = "{'2' * 64}"
+size = 2
+url = "https://github.com/dslzl/CSA/releases/download/compat-{COMPAT}/{COMPAT}--aarch64-apple-darwin--codex"
+'''
+            )
+        acceptance_path = root / f"release/acceptance/{COMPAT}/{TARGET}.json"
+        acceptance = json.loads(acceptance_path.read_text(encoding="utf-8"))
+        acceptance["manifest_sha256"] = sha(manifest)
+        dump(acceptance_path, acceptance)
+        index_path = root / "release/compatibility-index.json"
+        index = json.loads(index_path.read_text(encoding="utf-8"))
+        entry = index["compatibilities"][COMPAT]
+        entry["manifest_sha256"] = sha(manifest)
+        entry["targets"][TARGET]["acceptance_sha256"] = sha(acceptance_path)
+        dump(index_path, index)
         subprocess.run(["git", "init", "-q", str(root)], check=True)
         subprocess.run(["git", "-C", str(root), "config", "user.name", "CSA Tests"], check=True)
         subprocess.run(["git", "-C", str(root), "config", "user.email", "csa@example.invalid"], check=True)
@@ -482,6 +502,28 @@ url = "{url}"
         self.assertEqual([entry["compat_id"] for entry in catalog["entries"]], [COMPAT])
         self.assertEqual(catalog["entries"][0]["patch_revision"], 9)
         self.assertEqual(catalog["entries"][0]["recorded_on"], "2026-08-29")
+
+        multi_output = root / "bundle/install-catalog-v2.json"
+        multi = self.run_catalog(
+            root,
+            "install-catalog",
+            "--formal-tags",
+            str(formal_tags),
+            "--current-release-tag",
+            release_tag,
+            "--current-source-commit",
+            source_commit,
+            "--all-targets",
+            "--output",
+            str(multi_output),
+        )
+        self.assertEqual(multi.returncode, 0, multi.stderr)
+        multi_catalog = json.loads(multi_output.read_text(encoding="utf-8"))
+        self.assertEqual(multi_catalog["schema"], 2)
+        self.assertEqual(
+            multi_catalog["entries"][0]["build_targets"],
+            ["aarch64-apple-darwin", TARGET],
+        )
 
     def test_install_catalog_schema_rejects_duplicates_unknown_fields_and_bad_dates(self) -> None:
         entries = []

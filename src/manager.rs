@@ -231,7 +231,7 @@ pub fn doctor(options: DoctorOptions, runner: &dyn ProcessRunner) -> Result<Doct
             codex_version: loaded.manifest.codex_version.clone(),
             build_target: loaded.manifest.build_target.clone(),
             exact_official_version: loaded.manifest.codex_version == official.version,
-            supported_build_target: loaded.manifest.build_target == BUILD_TARGET,
+            supported_build_target: loaded.manifest.artifacts.contains_key(BUILD_TARGET),
         });
     Ok(DoctorReport {
         schema: 1,
@@ -255,17 +255,8 @@ pub fn prepare(
             "pass exactly one of --artifact or --source",
         ));
     }
-    let compatibility = LoadedCompatibility::load(&options.manifest)?;
+    let compatibility = LoadedCompatibility::load_for_target(&options.manifest, BUILD_TARGET)?;
     compatibility.test_contract()?;
-    if compatibility.manifest.build_target != BUILD_TARGET {
-        return Err(ManagerError::new(
-            "unsupported_build_target",
-            format!(
-                "payload targets {}, manager targets {BUILD_TARGET}",
-                compatibility.manifest.build_target
-            ),
-        ));
-    }
     let paths = ManagerPaths::resolve(options.manager_root)?;
     let _lock = PrepareLock::acquire(&paths)?;
     let store = StateStore::new(&paths);
@@ -317,7 +308,7 @@ pub fn prepare(
         schema: 2,
         compat_id: compatibility.manifest.compat_id.clone(),
         manifest_path: compatibility.manifest_path.clone(),
-        build_target: compatibility.manifest.build_target.clone(),
+        build_target: compatibility.selected_target().to_owned(),
         artifact_path: artifact.path,
         artifact_sha256: artifact.sha256,
         artifact_size: artifact.size,
@@ -470,7 +461,7 @@ fn publish_compatibility(
                 "compatibility cache must be a real directory inside the manager root",
             ));
         }
-        let existing = LoadedCompatibility::load(&final_manifest)?;
+        let existing = LoadedCompatibility::load_for_target(&final_manifest, BUILD_TARGET)?;
         existing.test_contract()?;
         compare_payload_files(&files, &existing.payload_files()?)?;
         return Ok(existing);
@@ -500,7 +491,7 @@ fn publish_compatibility(
         }
         fs::rename(&staged, &final_root)
             .map_err(|error| ManagerError::io("publish compatibility payload", error))?;
-        let published = LoadedCompatibility::load(&final_manifest)?;
+        let published = LoadedCompatibility::load_for_target(&final_manifest, BUILD_TARGET)?;
         published.test_contract()?;
         compare_payload_files(&files, &published.payload_files()?)?;
         Ok(published)
@@ -799,9 +790,10 @@ pub(crate) fn validate_prepared_state(
             "prepared state predates official runtime binding; run csa install again",
         ));
     }
-    let compatibility = LoadedCompatibility::load(&state.manifest_path)?;
+    let compatibility =
+        LoadedCompatibility::load_for_target(&state.manifest_path, &state.build_target)?;
     if state.compat_id != compatibility.manifest.compat_id
-        || state.build_target != compatibility.manifest.build_target
+        || state.build_target != compatibility.selected_target()
         || state.artifact_sha256 != compatibility.artifact().sha256
         || state.artifact_size != compatibility.artifact().size
     {
@@ -946,6 +938,12 @@ fn build_from_source(
     source: &Path,
     runner: &dyn ProcessRunner,
 ) -> Result<PathBuf> {
+    if compatibility.selected_target() != compatibility.manifest.build_target {
+        return Err(ManagerError::new(
+            "unsupported_source_build_target",
+            "local source builds are supported only for the manifest's canonical validation target",
+        ));
+    }
     if !source.is_absolute() {
         return Err(ManagerError::new(
             "unsafe_source_path",
@@ -1005,7 +1003,7 @@ fn build_from_source(
         .builds
         .join(&compatibility.manifest.compat_id)
         .join("target")
-        .join(&compatibility.manifest.build_target)
+        .join(compatibility.selected_target())
         .join("release")
         .join(&compatibility.artifact().filename))
 }
