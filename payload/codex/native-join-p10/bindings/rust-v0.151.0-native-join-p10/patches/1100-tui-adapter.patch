@@ -2885,10 +2885,27 @@ index e79c0d3ca6d7256506c8b7df00d6026a009c2a6d..61ec2b11e1092138abe1dea53a904ea2
  
      fn terminal_title_uses_activity(&self) -> bool {
 diff --git a/codex-rs/tui/src/chatwidget/tests/app_server.rs b/codex-rs/tui/src/chatwidget/tests/app_server.rs
-index 2fb09c6124d0ea7bfa98c318a09443339ddb42bd..af88fa1f1512d9b5eabac8ba0b3ac9daaed020f4 100644
+index 2fb09c6124d0ea7bfa98c318a09443339ddb42bd..71438c21456016d42883e01900394ecbe20cab58 100644
 --- a/codex-rs/tui/src/chatwidget/tests/app_server.rs
 +++ b/codex-rs/tui/src/chatwidget/tests/app_server.rs
-@@ -996,7 +996,7 @@ async fn live_app_server_sub_agent_activity_renders_once() {
+@@ -961,7 +961,7 @@ async fn live_app_server_command_output_delta_transcript_snapshot() {
+ }
+ 
+ #[tokio::test]
+-async fn live_app_server_sub_agent_activity_renders_once() {
++async fn live_app_server_sub_agent_activity_is_suppressed_from_history() {
+     let (mut chat, mut rx, _op_rx) = make_chatwidget_manual(/*model_override*/ None).await;
+     let activity = AppServerThreadItem::SubAgentActivity {
+         id: "activity-1".to_string(),
+@@ -989,14 +989,11 @@ async fn live_app_server_sub_agent_activity_renders_once() {
+         /*replay_kind*/ None,
+     );
+ 
+-    let cells = drain_insert_history(&mut rx);
+-    assert_eq!(cells.len(), 1);
+-    let rendered = lines_to_single_string(&cells[0]);
+-    assert_chatwidget_snapshot!("app_server_sub_agent_activity_renders_once", rendered);
++    assert!(drain_insert_history(&mut rx).is_empty());
  }
  
  #[tokio::test]
