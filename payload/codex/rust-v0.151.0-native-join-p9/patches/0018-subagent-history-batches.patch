@@ -1,0 +1,776 @@
+diff --git a/codex-rs/tui/src/app.rs b/codex-rs/tui/src/app.rs
+index d7894a317d48586b33a426146a86ab3056e9c95e..936f71218480fbb9dbfb9d04364cf8baba68a910 100644
+--- a/codex-rs/tui/src/app.rs
++++ b/codex-rs/tui/src/app.rs
+@@ -80,6 +80,7 @@ use crate::subagent_live_panel::LivePanelAgent;
+ use crate::subagent_live_panel::LivePanelFrame;
+ use crate::subagent_live_panel::LivePanelSnapshot;
+ use crate::subagent_live_panel::SubagentLivePanelRenderable;
++use crate::subagent_live_panel::terminal_history_lines;
+ #[cfg(test)]
+ use crate::test_support::PathBufExt;
+ #[cfg(test)]
+@@ -875,7 +876,6 @@ impl App {
+                     self.chat_widget.handle_paste(pasted);
+                 }
+                 TuiEvent::Draw | TuiEvent::Resume | TuiEvent::Resize(_) | TuiEvent::FocusGained => {
+-                    let _ = self.subagent_live.cleanup_expired(Instant::now());
+                     if self.backtrack_render_pending {
+                         self.rebuild_transcript_after_backtrack(tui, screen_size.into())?;
+                         self.backtrack_render_pending = false;
+diff --git a/codex-rs/tui/src/app/agent_status_feed.rs b/codex-rs/tui/src/app/agent_status_feed.rs
+index f22f14f6f1e684c6a3245c60a55b8ccbe89f1787..ef8cb5de45e35bc96428500797a55942f38e8d4d 100644
+--- a/codex-rs/tui/src/app/agent_status_feed.rs
++++ b/codex-rs/tui/src/app/agent_status_feed.rs
+@@ -145,7 +145,8 @@ impl AgentStatusThreadPreview {
+                 },
+                 ThreadBufferedEvent::Request(_)
+                 | ThreadBufferedEvent::HistoryEntryResponse(_)
+-                | ThreadBufferedEvent::FeedbackSubmission(_) => continue,
++                | ThreadBufferedEvent::FeedbackSubmission(_)
++                | ThreadBufferedEvent::SubagentHistory(_) => continue,
+             };
+             if !seen_item_ids.insert(item.id().to_string()) {
+                 continue;
+diff --git a/codex-rs/tui/src/app/session_lifecycle.rs b/codex-rs/tui/src/app/session_lifecycle.rs
+index f655e87455bbf1424862a47ee6ffa1489149cc73..0d60f06c245aa5bec3731284cfa09f4f0ece86b5 100644
+--- a/codex-rs/tui/src/app/session_lifecycle.rs
++++ b/codex-rs/tui/src/app/session_lifecycle.rs
+@@ -675,7 +675,8 @@ impl App {
+                         server_request_thread_id(request) == Some(thread_id)
+                     }
+                     ThreadBufferedEvent::HistoryEntryResponse(_)
+-                    | ThreadBufferedEvent::FeedbackSubmission(_) => true,
++                    | ThreadBufferedEvent::FeedbackSubmission(_)
++                    | ThreadBufferedEvent::SubagentHistory(_) => true,
+                 });
+                 self.pending_app_server_requests.clear();
+                 let mut unsupported_requests = Vec::new();
+diff --git a/codex-rs/tui/src/app/subagent_live.rs b/codex-rs/tui/src/app/subagent_live.rs
+index 36def27ada6416d0d65ba6ef9f2286d6fa3724bc..05bb5c206fafa7d39060a0794c0362dc91efbe2c 100644
+--- a/codex-rs/tui/src/app/subagent_live.rs
++++ b/codex-rs/tui/src/app/subagent_live.rs
+@@ -1,7 +1,7 @@
+-//! Pure, bounded projection of live sub-agent activity.
++//! Pure projection of the current sub-agent activity batch.
+ //!
+ //! Navigation order and display metadata remain owned by `AgentNavigationState`; this module
+-//! stores only ephemeral lifecycle and compact activity records.
++//! stores only the active batch's lifecycle and compact activity records.
+ 
+ use super::agent_status_feed::ActivityPhase;
+ use super::agent_status_feed::ActivityStatus;
+@@ -13,12 +13,12 @@ use codex_app_server_protocol::ServerRequest;
+ use codex_app_server_protocol::TurnStatus;
+ use codex_protocol::ThreadId;
+ use std::collections::HashMap;
++use std::collections::HashSet;
+ use std::collections::VecDeque;
+ use std::time::Duration;
+ use std::time::Instant;
+ 
+ pub(crate) const RECENT_ACTIVITY_LIMIT: usize = 3;
+-pub(crate) const TERMINAL_GRACE: Duration = Duration::from_secs(5);
+ 
+ pub(crate) type RecentActivity = WorkActivityInput;
+ 
+@@ -61,7 +61,6 @@ pub(crate) struct LiveAgentState {
+     lifecycle: LiveAgentStatus,
+     recent: VecDeque<RecentActivity>,
+     open_approval: Option<ApprovalRef>,
+-    terminal_deadline: Option<Instant>,
+     animation_started_at: Instant,
+     turn_started_at: Option<Instant>,
+     tool_uses_started: usize,
+@@ -76,7 +75,6 @@ impl LiveAgentState {
+             lifecycle,
+             recent: VecDeque::with_capacity(RECENT_ACTIVITY_LIMIT),
+             open_approval: None,
+-            terminal_deadline: None,
+             animation_started_at: now,
+             turn_started_at: (lifecycle != LiveAgentStatus::Starting).then_some(now),
+             tool_uses_started: 0,
+@@ -102,17 +100,8 @@ impl LiveAgentState {
+         self.terminal_stats
+     }
+ 
+-    pub(crate) fn is_renderable_at(&self, now: Instant) -> bool {
+-        match self.lifecycle {
+-            LiveAgentStatus::Failed | LiveAgentStatus::Cancelled | LiveAgentStatus::Completed => {
+-                self.terminal_deadline
+-                    .is_some_and(|deadline| now < deadline)
+-            }
+-            LiveAgentStatus::Starting
+-            | LiveAgentStatus::Running
+-            | LiveAgentStatus::WaitingApproval
+-            | LiveAgentStatus::Waiting => true,
+-        }
++    pub(crate) fn is_renderable_at(&self, _now: Instant) -> bool {
++        true
+     }
+ }
+ 
+@@ -120,7 +109,6 @@ impl LiveAgentState {
+ pub(crate) enum LiveStateChange {
+     Unchanged,
+     Changed,
+-    ChangedWithCleanupDeadline(Instant),
+ }
+ 
+ #[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
+@@ -133,6 +121,7 @@ pub(crate) struct SubagentLiveTelemetry {
+ #[derive(Debug, Default)]
+ pub(crate) struct SubagentLiveState {
+     agents: HashMap<ThreadId, LiveAgentState>,
++    archived_agents: HashSet<ThreadId>,
+     revision: u64,
+     telemetry: SubagentLiveTelemetry,
+ }
+@@ -163,6 +152,7 @@ impl SubagentLiveState {
+             self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
+             return LiveStateChange::Unchanged;
+         }
++        self.archived_agents.remove(&thread_id);
+         self.agents.insert(
+             thread_id,
+             LiveAgentState::new(LiveAgentStatus::Starting, now),
+@@ -170,14 +160,6 @@ impl SubagentLiveState {
+         self.finish_change(true)
+     }
+ 
+-    #[cfg(test)]
+-    pub(crate) fn nearest_cleanup_deadline(&self) -> Option<Instant> {
+-        self.agents
+-            .values()
+-            .filter_map(|agent| agent.terminal_deadline)
+-            .min()
+-    }
+-
+     #[cfg(test)]
+     pub(crate) fn retained_activity_count(&self) -> usize {
+         self.agents.values().map(|agent| agent.recent.len()).sum()
+@@ -280,6 +262,11 @@ impl SubagentLiveState {
+     ) -> LiveStateChange {
+         self.telemetry.events_reduced = self.telemetry.events_reduced.saturating_add(1);
+ 
++        if self.archived_agents.contains(&thread_id) {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
++
+         if self
+             .agents
+             .get(&thread_id)
+@@ -366,6 +353,7 @@ impl SubagentLiveState {
+ 
+     fn start_turn(&mut self, thread_id: ThreadId, now: Instant) -> LiveStateChange {
+         self.telemetry.events_reduced = self.telemetry.events_reduced.saturating_add(1);
++        self.archived_agents.remove(&thread_id);
+         let Some(agent) = self.agents.get_mut(&thread_id) else {
+             self.agents.insert(
+                 thread_id,
+@@ -391,7 +379,6 @@ impl SubagentLiveState {
+         agent.lifecycle = LiveAgentStatus::Running;
+         agent.recent.clear();
+         agent.open_approval = None;
+-        agent.terminal_deadline = None;
+         agent.animation_started_at = now;
+         agent.turn_started_at = Some(now);
+         agent.tool_uses_started = 0;
+@@ -406,6 +393,10 @@ impl SubagentLiveState {
+         total_tokens: i64,
+         now: Instant,
+     ) -> LiveStateChange {
++        if self.archived_agents.contains(&thread_id) {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
+         let total_tokens = total_tokens.max(0);
+         let agent = self
+             .agents
+@@ -429,6 +420,10 @@ impl SubagentLiveState {
+         turn: &codex_app_server_protocol::Turn,
+         now: Instant,
+     ) -> LiveStateChange {
++        if self.archived_agents.contains(&thread_id) {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
+         let status = match turn.status {
+             TurnStatus::Completed => LiveAgentStatus::Completed,
+             TurnStatus::Interrupted => LiveAgentStatus::Cancelled,
+@@ -527,6 +522,10 @@ impl SubagentLiveState {
+         item_id: Option<String>,
+     ) -> LiveStateChange {
+         self.telemetry.events_reduced = self.telemetry.events_reduced.saturating_add(1);
++        if self.archived_agents.contains(&thread_id) {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
+         if self
+             .agents
+             .get(&thread_id)
+@@ -601,20 +600,6 @@ impl SubagentLiveState {
+         self.finish_change(changed)
+     }
+ 
+-    pub(crate) fn cleanup_expired(&mut self, now: Instant) -> LiveStateChange {
+-        let mut changed = false;
+-        for agent in self.agents.values_mut() {
+-            if agent
+-                .terminal_deadline
+-                .is_some_and(|deadline| deadline <= now)
+-            {
+-                agent.terminal_deadline = None;
+-                changed = true;
+-            }
+-        }
+-        self.finish_change(changed)
+-    }
+-
+     /// Authoritative one-shot hydration may begin a new live epoch for a terminal tombstone.
+     #[cfg(test)]
+     pub(crate) fn hydrate_live_agent(
+@@ -626,6 +611,7 @@ impl SubagentLiveState {
+             let changed = self.agents.remove(&thread_id).is_some();
+             return self.finish_change(changed);
+         }
++        self.archived_agents.remove(&thread_id);
+         let changed = hydrate_agent(&mut self.agents, thread_id, status, Instant::now());
+         self.finish_change(changed)
+     }
+@@ -645,17 +631,34 @@ impl SubagentLiveState {
+         let mut changed = self.agents.len() != original_len;
+         let now = Instant::now();
+         for (thread_id, status) in authoritative {
++            self.archived_agents.remove(&thread_id);
+             changed |= hydrate_agent(&mut self.agents, thread_id, status, now);
+         }
+         self.finish_change(changed)
+     }
+ 
+     pub(crate) fn reset(&mut self) -> LiveStateChange {
+-        let changed = !self.agents.is_empty();
++        let changed = !self.agents.is_empty() || !self.archived_agents.is_empty();
+         self.agents.clear();
++        self.archived_agents.clear();
+         self.finish_change(changed)
+     }
+ 
++    pub(crate) fn take_terminal_batch(&mut self) -> Option<HashMap<ThreadId, LiveAgentState>> {
++        if self.agents.is_empty()
++            || self
++                .agents
++                .values()
++                .any(|agent| !agent.lifecycle.is_terminal())
++        {
++            return None;
++        }
++
++        self.archived_agents.extend(self.agents.keys().copied());
++        self.revision = self.revision.wrapping_add(1);
++        Some(std::mem::take(&mut self.agents))
++    }
++
+     fn set_terminal(
+         &mut self,
+         thread_id: ThreadId,
+@@ -663,6 +666,10 @@ impl SubagentLiveState {
+         now: Instant,
+         stats: Option<LiveAgentStats>,
+     ) -> LiveStateChange {
++        if self.archived_agents.contains(&thread_id) {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
+         if let Some(agent) = self.agents.get(&thread_id)
+             && agent.lifecycle.is_terminal()
+         {
+@@ -690,10 +697,7 @@ impl SubagentLiveState {
+         agent.recent.clear();
+         agent.open_approval = None;
+         agent.terminal_stats = Some(stats);
+-        let deadline = now + TERMINAL_GRACE;
+-        agent.terminal_deadline = Some(deadline);
+-        self.revision = self.revision.wrapping_add(1);
+-        LiveStateChange::ChangedWithCleanupDeadline(deadline)
++        self.finish_change(true)
+     }
+ 
+     fn finish_change(&mut self, changed: bool) -> LiveStateChange {
+@@ -756,12 +760,9 @@ fn hydrate_agent(
+         return true;
+     };
+     let was_terminal = agent.lifecycle.is_terminal();
+-    let changed = agent.lifecycle != status
+-        || agent.open_approval.is_some()
+-        || agent.terminal_deadline.is_some();
++    let changed = agent.lifecycle != status || agent.open_approval.is_some();
+     agent.lifecycle = status;
+     agent.open_approval = None;
+-    agent.terminal_deadline = None;
+     agent.terminal_stats = None;
+     if was_terminal {
+         agent.recent.clear();
+@@ -1042,7 +1043,7 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn r15_r16_activity_failure_is_independent_and_agent_terminal_is_bounded() {
++    fn r15_r16_terminal_rows_remain_until_the_whole_batch_is_archived() {
+         let thread_id = ThreadId::new();
+         let failed_thread_id = ThreadId::new();
+         let now = Instant::now();
+@@ -1059,29 +1060,32 @@ mod tests {
+ 
+         assert_eq!(
+             state.set_agent_status(thread_id, LiveAgentStatus::Completed, now),
+-            LiveStateChange::ChangedWithCleanupDeadline(now + TERMINAL_GRACE)
++            LiveStateChange::Changed
++        );
++        assert!(
++            state
++                .agent(thread_id)
++                .unwrap()
++                .is_renderable_at(now + Duration::from_secs(60))
+         );
+-        assert!(state.agent(thread_id).unwrap().is_renderable_at(now));
+         assert!(state.agent(thread_id).unwrap().recent().is_empty());
++        assert!(state.take_terminal_batch().is_some());
+ 
+-        let deadline = now + TERMINAL_GRACE;
++        state.ensure_started(thread_id, now);
+         assert_eq!(
+             state.set_agent_status(failed_thread_id, LiveAgentStatus::Failed, now),
+-            LiveStateChange::ChangedWithCleanupDeadline(deadline)
++            LiveStateChange::Changed
+         );
+         assert!(state.agent(failed_thread_id).unwrap().is_renderable_at(now));
+-        assert_eq!(state.nearest_cleanup_deadline(), Some(deadline));
++        assert!(state.take_terminal_batch().is_none());
++        state.set_agent_status(thread_id, LiveAgentStatus::Completed, now);
++        let batch = state.take_terminal_batch().expect("all terminal batch");
++        assert_eq!(batch.len(), 2);
++        assert!(!state.has_renderable_rows_at(now));
+         assert_eq!(
+             state.set_agent_status(failed_thread_id, LiveAgentStatus::Failed, now),
+             LiveStateChange::Unchanged
+         );
+-        state.cleanup_expired(deadline);
+-        assert!(
+-            !state
+-                .agent(failed_thread_id)
+-                .unwrap()
+-                .is_renderable_at(deadline)
+-        );
+     }
+ 
+     #[test]
+@@ -1146,7 +1150,6 @@ mod tests {
+         let mut state = SubagentLiveState::default();
+ 
+         state.set_agent_status(thread_id, LiveAgentStatus::Cancelled, now);
+-        let deadline = state.nearest_cleanup_deadline();
+         assert_eq!(
+             state.set_agent_status(thread_id, LiveAgentStatus::Failed, now),
+             LiveStateChange::Unchanged
+@@ -1155,7 +1158,6 @@ mod tests {
+             state.agent(thread_id).unwrap().lifecycle(),
+             LiveAgentStatus::Cancelled
+         );
+-        assert_eq!(state.nearest_cleanup_deadline(), deadline);
+         assert_eq!(state.telemetry().conflicting_terminal_events, 1);
+ 
+         state.hydrate_live_agent(thread_id, LiveAgentStatus::Running);
+@@ -1163,7 +1165,6 @@ mod tests {
+             state.agent(thread_id).unwrap().lifecycle(),
+             LiveAgentStatus::Running
+         );
+-        assert!(state.nearest_cleanup_deadline().is_none());
+     }
+ 
+     #[test]
+diff --git a/codex-rs/tui/src/app/thread_event_buffer.rs b/codex-rs/tui/src/app/thread_event_buffer.rs
+index 0e01361aae2ae0a2b5e1bb191d7eec289d1779d2..a3f4ee13b377240673891ab8bff72d54dd56b047 100644
+--- a/codex-rs/tui/src/app/thread_event_buffer.rs
++++ b/codex-rs/tui/src/app/thread_event_buffer.rs
+@@ -70,7 +70,8 @@ impl ThreadEventStore {
+                     .pending_interactive_replay
+                     .note_evicted_server_request(request.as_ref()),
+                 ThreadBufferedEvent::HistoryEntryResponse(_)
+-                | ThreadBufferedEvent::FeedbackSubmission(_) => {}
++                | ThreadBufferedEvent::FeedbackSubmission(_)
++                | ThreadBufferedEvent::SubagentHistory(_) => {}
+             }
+         }
+     }
+diff --git a/codex-rs/tui/src/app/thread_events.rs b/codex-rs/tui/src/app/thread_events.rs
+index 32e2d9f368eef21b2524f288017ea0c685c195f6..9b11f8a95d8b02639004a640707f6d72f3949806 100644
+--- a/codex-rs/tui/src/app/thread_events.rs
++++ b/codex-rs/tui/src/app/thread_events.rs
+@@ -22,6 +22,7 @@ pub(super) enum ThreadBufferedEvent {
+     Request(Box<ServerRequest>),
+     HistoryEntryResponse(HistoryLookupResponse),
+     FeedbackSubmission(FeedbackThreadEvent),
++    SubagentHistory(Vec<Line<'static>>),
+ }
+ 
+ #[derive(Debug, Clone, PartialEq, Eq)]
+@@ -56,7 +57,9 @@ pub(super) struct ThreadEventStore {
+ impl ThreadEventStore {
+     pub(super) fn event_survives_session_refresh(event: &ThreadBufferedEvent) -> bool {
+         match event {
+-            ThreadBufferedEvent::Request(_) | ThreadBufferedEvent::FeedbackSubmission(_) => true,
++            ThreadBufferedEvent::Request(_)
++            | ThreadBufferedEvent::FeedbackSubmission(_)
++            | ThreadBufferedEvent::SubagentHistory(_) => true,
+             ThreadBufferedEvent::Notification(notification) => matches!(
+                 notification.as_ref(),
+                 ServerNotification::HookStarted(_)
+@@ -193,7 +196,8 @@ impl ThreadEventStore {
+                 ThreadBufferedEvent::Request(_)
+                 | ThreadBufferedEvent::Notification(_)
+                 | ThreadBufferedEvent::HistoryEntryResponse(_)
+-                | ThreadBufferedEvent::FeedbackSubmission(_) => None,
++                | ThreadBufferedEvent::FeedbackSubmission(_)
++                | ThreadBufferedEvent::SubagentHistory(_) => None,
+             })
+             .collect()
+     }
+@@ -221,7 +225,8 @@ impl ThreadEventStore {
+                         .should_replay_snapshot_request(request.as_ref()),
+                     ThreadBufferedEvent::Notification(_)
+                     | ThreadBufferedEvent::HistoryEntryResponse(_)
+-                    | ThreadBufferedEvent::FeedbackSubmission(_) => true,
++                    | ThreadBufferedEvent::FeedbackSubmission(_)
++                    | ThreadBufferedEvent::SubagentHistory(_) => true,
+                 })
+                 .cloned()
+                 .collect(),
+@@ -728,6 +733,26 @@ mod tests {
+         );
+     }
+ 
++    #[test]
++    fn thread_event_store_preserves_archived_subagent_batches() {
++        let mut store = ThreadEventStore::new(/*capacity*/ 8);
++        store.push_buffered_event(ThreadBufferedEvent::SubagentHistory(vec![
++            Line::from("✓ reviewer"),
++            Line::from("└─ Done"),
++        ]));
++
++        store.rebase_buffer_after_session_refresh();
++
++        let snapshot = store.snapshot();
++        let [ThreadBufferedEvent::SubagentHistory(lines)] = snapshot.events.as_slice() else {
++            panic!("expected one archived subagent batch");
++        };
++        assert_eq!(
++            lines.iter().map(Line::to_string).collect::<Vec<_>>(),
++            ["✓ reviewer", "└─ Done"]
++        );
++    }
++
+     #[test]
+     fn thread_event_store_rebase_preserves_mcp_startup_notifications() {
+         let thread_id = ThreadId::new();
+diff --git a/codex-rs/tui/src/app/thread_routing.rs b/codex-rs/tui/src/app/thread_routing.rs
+index b9ce80b5e496b1435fce6e4b40100d9c02e5beef..8deecc6a825beac43f6f50333379a184bac8b09d 100644
+--- a/codex-rs/tui/src/app/thread_routing.rs
++++ b/codex-rs/tui/src/app/thread_routing.rs
+@@ -27,12 +27,6 @@ impl App {
+             subagent_live::LiveStateChange::Changed => {
+                 self.chat_widget.frame_requester.schedule_frame();
+             }
+-            subagent_live::LiveStateChange::ChangedWithCleanupDeadline(deadline) => {
+-                self.chat_widget.frame_requester.schedule_frame();
+-                self.chat_widget
+-                    .frame_requester
+-                    .schedule_frame_in(deadline.saturating_duration_since(Instant::now()));
+-            }
+         }
+     }
+ 
+@@ -40,14 +34,71 @@ impl App {
+         &mut self,
+         thread_id: ThreadId,
+         notification: &ServerNotification,
+-    ) {
++    ) -> Option<Vec<Line<'static>>> {
+         if !self.tracks_live_subagent(thread_id) {
+-            return;
++            return None;
+         }
+         let change =
+             self.subagent_live
+                 .reduce_notification(thread_id, notification, Instant::now());
+         self.schedule_subagent_live_change(change);
++        self.take_completed_subagent_history()
++    }
++
++    fn take_completed_subagent_history(&mut self) -> Option<Vec<Line<'static>>> {
++        let primary_thread_id = self.primary_thread_id?;
++        let states = self.subagent_live.take_terminal_batch()?;
++        let agents = self
++            .agent_navigation
++            .ordered_threads()
++            .into_iter()
++            .filter_map(|(thread_id, _)| {
++                (thread_id != primary_thread_id && self.agent_navigation.is_parent_owned(thread_id))
++                    .then(|| states.get(&thread_id))
++                    .flatten()
++                    .map(|state| {
++                        LivePanelAgent::new(thread_id, self.subagent_live_label(thread_id), state)
++                    })
++            })
++            .collect::<Vec<_>>();
++        self.subagent_live_panel_frame.borrow_mut().clear();
++        let color_enabled = supports_color::on_cached(supports_color::Stream::Stdout).is_some();
++        let lines = terminal_history_lines(&agents, color_enabled);
++        (!lines.is_empty()).then_some(lines)
++    }
++
++    async fn enqueue_primary_subagent_history(&mut self, lines: Vec<Line<'static>>) {
++        let Some(primary_thread_id) = self.primary_thread_id else {
++            return;
++        };
++        let event = ThreadBufferedEvent::SubagentHistory(lines);
++        let (sender, store) = {
++            let channel = self.ensure_thread_channel(primary_thread_id);
++            (channel.sender.clone(), Arc::clone(&channel.store))
++        };
++        let should_send = {
++            let mut store = store.lock().await;
++            store.push_buffered_event(event.clone());
++            store.active
++        };
++        if !should_send {
++            return;
++        }
++        match sender.try_send(event) {
++            Ok(()) => {}
++            Err(TrySendError::Full(event)) => {
++                tokio::spawn(async move {
++                    if let Err(err) = sender.send(event).await {
++                        tracing::warn!(
++                            "primary thread {primary_thread_id} event channel closed: {err}"
++                        );
++                    }
++                });
++            }
++            Err(TrySendError::Closed(_)) => {
++                tracing::warn!("primary thread {primary_thread_id} event channel closed");
++            }
++        }
+     }
+ 
+     fn reduce_subagent_request(&mut self, thread_id: ThreadId, request: &ServerRequest) {
+@@ -1121,7 +1172,8 @@ impl App {
+         } else {
+             None
+         };
+-        self.reduce_subagent_notification(thread_id, &notification);
++        let completed_subagent_history =
++            self.reduce_subagent_notification(thread_id, &notification);
+         let is_turn_started = matches!(notification, ServerNotification::TurnStarted(_));
+         let is_thread_closed = matches!(notification, ServerNotification::ThreadClosed(_));
+         let notification_status_change = SideParentStatusChange::for_notification(&notification);
+@@ -1187,6 +1239,9 @@ impl App {
+         } else if previous_pending_status.is_some() {
+             self.clear_side_parent_action_status(thread_id);
+         }
++        if let Some(lines) = completed_subagent_history {
++            self.enqueue_primary_subagent_history(lines).await;
++        }
+         self.refresh_pending_thread_approvals().await;
+         Ok(())
+     }
+@@ -1465,6 +1520,9 @@ impl App {
+                 ThreadBufferedEvent::FeedbackSubmission(event) => {
+                     self.enqueue_thread_feedback_event(thread_id, event).await;
+                 }
++                ThreadBufferedEvent::SubagentHistory(lines) => {
++                    self.enqueue_primary_subagent_history(lines).await;
++                }
+             }
+         }
+         self.chat_widget
+@@ -1828,6 +1886,9 @@ impl App {
+             ThreadBufferedEvent::FeedbackSubmission(event) => {
+                 self.handle_feedback_thread_event(event);
+             }
++            ThreadBufferedEvent::SubagentHistory(lines) => {
++                self.chat_widget.add_plain_history_lines(lines);
++            }
+         }
+         if needs_refresh {
+             self.refresh_status_line();
+@@ -1857,6 +1918,9 @@ impl App {
+             ThreadBufferedEvent::FeedbackSubmission(event) => {
+                 self.handle_feedback_thread_event(event);
+             }
++            ThreadBufferedEvent::SubagentHistory(lines) => {
++                self.chat_widget.add_plain_history_lines(lines);
++            }
+         }
+     }
+ 
+diff --git a/codex-rs/tui/src/multi_agents.rs b/codex-rs/tui/src/multi_agents.rs
+index f218bcf8f5a5227fc0c01e1df294a7fca56981a3..4b11cb35b6519c3d94102cede5d4de25ddefdf23 100644
+--- a/codex-rs/tui/src/multi_agents.rs
++++ b/codex-rs/tui/src/multi_agents.rs
+@@ -301,7 +301,10 @@ pub(crate) fn sub_agent_activity_history_cell(item: &ThreadItem) -> Option<Plain
+     else {
+         return None;
+     };
+-    if matches!(kind, SubAgentActivityKind::Started) {
++    if matches!(
++        kind,
++        SubAgentActivityKind::Started | SubAgentActivityKind::Completed
++    ) {
+         return None;
+     }
+     Some(collab_event(
+@@ -624,15 +627,20 @@ mod tests {
+     }
+ 
+     #[test]
+-    fn subagent_live_started_activity_is_not_duplicated_in_history() {
+-        let item = ThreadItem::SubAgentActivity {
+-            id: "activity-start".to_string(),
+-            kind: SubAgentActivityKind::Started,
+-            agent_thread_id: ThreadId::new().to_string(),
+-            agent_path: "/root/current_time_latest".to_string(),
+-        };
+-
+-        assert!(sub_agent_activity_history_cell(&item).is_none());
++    fn subagent_live_lifecycle_activity_is_not_duplicated_in_history() {
++        for kind in [
++            SubAgentActivityKind::Started,
++            SubAgentActivityKind::Completed,
++        ] {
++            let item = ThreadItem::SubAgentActivity {
++                id: "activity".to_string(),
++                kind,
++                agent_thread_id: ThreadId::new().to_string(),
++                agent_path: "/root/current_time_latest".to_string(),
++            };
++
++            assert!(sub_agent_activity_history_cell(&item).is_none());
++        }
+     }
+ 
+     #[test]
+diff --git a/codex-rs/tui/src/subagent_live_panel.rs b/codex-rs/tui/src/subagent_live_panel.rs
+index 7c9a0a643848317047d0b19bf68705bd318aa926..95f2f4dc480d6986a2481ebf4d73410d41b8000d 100644
+--- a/codex-rs/tui/src/subagent_live_panel.rs
++++ b/codex-rs/tui/src/subagent_live_panel.rs
+@@ -1,4 +1,4 @@
+-//! Resident, non-scrollback rendering for the App-owned sub-agent projection.
++//! Resident rendering and final-history formatting for the App-owned sub-agent projection.
+ 
+ use crate::app::ActivityStatus;
+ use crate::app::LiveAgentState;
+@@ -73,6 +73,23 @@ impl<'a> LivePanelSnapshot<'a> {
+     }
+ }
+ 
++pub(crate) fn terminal_history_lines(
++    agents: &[LivePanelAgent<'_>],
++    color_enabled: bool,
++) -> Vec<Line<'static>> {
++    agents
++        .iter()
++        .flat_map(|agent| {
++            std::iter::once(agent_header_line(
++                agent,
++                color_enabled,
++                /*use_csa_graphics*/ false,
++            ))
++            .chain(terminal_line(agent.state, color_enabled))
++        })
++        .collect()
++}
++
+ #[derive(Clone, Debug, Eq, PartialEq)]
+ pub(crate) struct LiveAgentHitRegion {
+     pub(crate) thread_id: ThreadId,
+@@ -1062,6 +1079,42 @@ mod tests {
+         assert_eq!(overflow.frame.hit_test(0, 3, revision), None);
+     }
+ 
++    #[test]
++    fn terminal_history_reuses_the_final_live_rows() {
++        let mut fixture = Fixture::new();
++        let done = fixture.add_agent("Robie（review_task）", LiveAgentStatus::Running);
++        fixture.complete_with_stats(
++            done,
++            crate::app::LiveAgentStats {
++                tool_uses: 19,
++                tokens: 32_000,
++                duration: std::time::Duration::from_millis(132_200),
++            },
++        );
++        let agents = fixture
++            .agents
++            .iter()
++            .map(|(thread_id, label)| {
++                LivePanelAgent::new(
++                    *thread_id,
++                    label.clone(),
++                    fixture.state.agent(*thread_id).expect("terminal agent"),
++                )
++            })
++            .collect::<Vec<_>>();
++
++        assert_eq!(
++            terminal_history_lines(&agents, /*color_enabled*/ false)
++                .into_iter()
++                .map(|line| line.to_string())
++                .collect::<Vec<_>>(),
++            [
++                "✓ Robie（review_task）",
++                "└─ Done (19 tool uses ⋅ 32.0k tokens ⋅ 2m 12.2s)",
++            ]
++        );
++    }
++
+     #[test]
+     fn compact_80x24_unicode_long_text_and_no_color_remain_readable() {
+         let mut compact = Fixture::new();
+diff --git a/codex-rs/tui/src/thread_transcript.rs b/codex-rs/tui/src/thread_transcript.rs
+index c0c175b755b676db92d79fba3af4e66d86074b51..324163ddabde64b526cb59ecafb2455b9b2a04dc 100644
+--- a/codex-rs/tui/src/thread_transcript.rs
++++ b/codex-rs/tui/src/thread_transcript.rs
+@@ -274,7 +274,9 @@ fn fallback_transcript_cell(item: &ThreadItem) -> Option<PlainHistoryCell> {
+             vec![format!("agent tool: {tool:?} · {status:?}").dim().into()]
+         }
+         ThreadItem::SubAgentActivity {
+-            kind: codex_app_server_protocol::SubAgentActivityKind::Started,
++            kind:
++                codex_app_server_protocol::SubAgentActivityKind::Started
++                | codex_app_server_protocol::SubAgentActivityKind::Completed,
+             ..
+         } => Vec::new(),
+         ThreadItem::SubAgentActivity {
+@@ -335,6 +337,12 @@ mod tests {
+             agent_thread_id: thread_id.clone(),
+             agent_path: "/root/current_time_latest".to_string(),
+         };
++        let completed = ThreadItem::SubAgentActivity {
++            id: "completed".to_string(),
++            kind: codex_app_server_protocol::SubAgentActivityKind::Completed,
++            agent_thread_id: thread_id.clone(),
++            agent_path: "/root/current_time_latest".to_string(),
++        };
+         let wait = |status| ThreadItem::CollabAgentToolCall {
+             id: "wait".to_string(),
+             tool: codex_app_server_protocol::CollabAgentTool::Wait,
+@@ -348,6 +356,7 @@ mod tests {
+         };
+ 
+         assert!(fallback_transcript_cell(&started).is_none());
++        assert!(fallback_transcript_cell(&completed).is_none());
+         assert!(
+             fallback_transcript_cell(&wait(
+                 codex_app_server_protocol::CollabAgentToolCallStatus::InProgress

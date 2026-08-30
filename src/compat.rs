@@ -507,11 +507,23 @@ fn validate_manifest(manifest: &CompatibilityManifest) -> Result<()> {
             ));
         }
     };
-    if manifest.patches.len() != expected_patch_count {
+    let patch_count_matches = manifest.patches.len() == expected_patch_count
+        || (manifest.patch_set_version == 9
+            && manifest.patches.len() == 18
+            && manifest
+                .patches
+                .last()
+                .is_some_and(|patch| patch.path == "patches/0018-subagent-history-batches.patch"));
+    if !patch_count_matches {
+        let required = if manifest.patch_set_version == 9 {
+            "17 or 18".to_string()
+        } else {
+            expected_patch_count.to_string()
+        };
         return Err(ManagerError::new(
             "invalid_patch_set",
             format!(
-                "patch set {} requires exactly {expected_patch_count} ordered patches",
+                "patch set {} requires {required} ordered patches",
                 manifest.patch_set_version
             ),
         ));

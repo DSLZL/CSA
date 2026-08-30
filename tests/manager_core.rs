@@ -1363,6 +1363,19 @@ fn bundled_p9_candidate_adds_state_db_compatibility_gate() {
 }
 
 #[test]
+fn bundled_current_p9_candidate_adds_subagent_history_batches() {
+    let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
+        .join("payload/codex/rust-v0.151.0-native-join-p9/manifest.toml")
+        .canonicalize()
+        .unwrap();
+    let loaded = LoadedCompatibility::load(&manifest).unwrap();
+
+    assert_eq!(loaded.manifest.patch_set_version, 9);
+    assert_eq!(loaded.patch_paths.len(), 18);
+    assert!(loaded.patch_paths[17].ends_with("patches/0018-subagent-history-batches.patch"));
+}
+
+#[test]
 fn family_bindings_resolve_to_the_exact_legacy_p2_payloads() {
     let repository = Path::new(env!("CARGO_MANIFEST_DIR"));
     for version in ["0.147.0", "0.148.0"] {

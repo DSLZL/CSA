@@ -332,9 +332,18 @@ def _validate_manifest(manifest: dict[str, object]) -> None:
     expected_patch_count = {1: 5, 2: 6, 3: 11, 4: 12, 5: 13, 6: 14, 7: 15, 8: 16, 9: 17}[
         manifest["patch_set_version"]
     ]
-    if not isinstance(patches, list) or len(patches) != expected_patch_count:
+    patch_count_matches = isinstance(patches, list) and (
+        len(patches) == expected_patch_count
+        or (manifest["patch_set_version"] == 9 and len(patches) == 18)
+    )
+    if not patch_count_matches:
+        required = (
+            "17 or 18"
+            if manifest["patch_set_version"] == 9
+            else str(expected_patch_count)
+        )
         raise VerificationError(
-            f"patch set {manifest['patch_set_version']} requires exactly {expected_patch_count} ordered patches"
+            f"patch set {manifest['patch_set_version']} requires {required} ordered patches"
         )
     patch_paths: list[str] = []
     for index, patch in enumerate(patches):
@@ -345,6 +354,12 @@ def _validate_manifest(manifest: dict[str, object]) -> None:
             raise VerificationError(f"invalid patches[{index}].sha256")
     if patch_paths != sorted(patch_paths) or len(set(patch_paths)) != len(patch_paths):
         raise VerificationError("patch paths must be unique and lexically ordered")
+    if (
+        manifest["patch_set_version"] == 9
+        and len(patch_paths) == 18
+        and patch_paths[-1] != "patches/0018-subagent-history-batches.patch"
+    ):
+        raise VerificationError("patch set 9 extension must end with the reviewed patch 0018")
 
     preimage = manifest["preimage"]
     absent = manifest["preimage_absent"]

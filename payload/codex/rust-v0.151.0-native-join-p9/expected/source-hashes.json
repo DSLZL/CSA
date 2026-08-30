@@ -58,6 +58,8 @@
     "codex-rs/tui/src/app/tests.rs": "595360f51b17ff0f01fc8ee080893ac83f6ed16f96b949de2df277b218548f6f",
     "codex-rs/tui/src/app/tests/key_chords.rs": "1e6f99c36b63b05d39a85e06118e1ffa1dda8c2beee781b5ef733e8b3a05db26",
     "codex-rs/tui/src/app/tests/session_lifecycle_requests.rs": "2594ad54e34042c26f3ae0f1fdcefd9aa070b0a370bb379f7f96f412475dd5c9",
+    "codex-rs/tui/src/app/thread_event_buffer.rs": "16094f2b2c742cbf0661e7cda5d8a3b2c691373b873332aaa278633110c2ad85",
+    "codex-rs/tui/src/app/thread_events.rs": "f83eb65cbc1bfa2b4b2cf9a6a52cd0eed00f1b792b4463595787aa7fe97a7b6b",
     "codex-rs/tui/src/app/thread_routing.rs": "80ca85471d37c0c8e3a4b6fffc308700052447c0d486527bfd966534f7f3e9d3",
     "codex-rs/tui/src/chatwidget.rs": "3cce0f903abfc95b7498193ddf98c2a5fa736a44579514c2b6443271b6b11268",
     "codex-rs/tui/src/chatwidget/rendering.rs": "6776b480bc943fb687e54f92526b54f49fd2943b966c2098bedc3ee51baf4ce3",

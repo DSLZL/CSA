@@ -557,6 +557,20 @@ def test_contract_shape() -> None:
     assert "codex-rs/state/src/migrations.rs" in p9_hashes["present"]
     assert "codex-rs/state/src/migrations_tests.rs" in p9_hashes["present"]
     assert "codex-rs/state/src/sqlite.rs" in p9_hashes["present"]
+    current_p9 = REPOSITORY / "payload" / "codex" / "rust-v0.151.0-native-join-p9"
+    current_p9_manifest = tomllib.loads(
+        (current_p9 / "manifest.toml").read_text(encoding="utf-8")
+    )
+    assert len(current_p9_manifest["patches"]) == 18
+    assert current_p9_manifest["patches"][-1]["path"] == (
+        "patches/0018-subagent-history-batches.patch"
+    )
+    current_p9_patch = (
+        current_p9 / "patches" / "0018-subagent-history-batches.patch"
+    ).read_text(encoding="utf-8")
+    assert "take_terminal_batch" in current_p9_patch
+    assert "SubagentHistory" in current_p9_patch
+    assert "SubAgentActivityKind::Started | SubAgentActivityKind::Completed" in current_p9_patch
     for attributes in (
         REPOSITORY / "payload" / "codex" / ".gitattributes",
         REPOSITORY / "release" / ".gitattributes",
