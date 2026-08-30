@@ -1,0 +1,36 @@
+{
+  "schema": 1,
+  "status": "accepted",
+  "compat_id": "rust-v0.151.0-native-join-p10",
+  "target": "x86_64-pc-windows-msvc",
+  "artifact_filename": "codex.exe",
+  "artifact_sha256": "67bdf36f6ac50a79c80b88e39506b2a32200ea5e8bc0d2af76eb34abfe656633",
+  "artifact_size": 314201088,
+  "manifest_sha256": "563b34f187e61e70aee5453f2383df640058475d742be38137e99c0cb2f9ca0d",
+  "build_profile_sha256": "be3194ff9dab2c69914ef0751f700d8d4114a0bd53528bd5b566c61fdf05df13",
+  "runtime_lock_sha256": "e24eda740d7771b6e8881b9f3b802d773316b1b8e54a10c93da5fd3fa9551f66",
+  "recorded_at": "2026-08-30",
+  "accepted_by": "DSLZL",
+  "evidence": {
+    "schema": 1,
+    "environment": "disposable-windows-local",
+    "compat_id": "rust-v0.151.0-native-join-p10",
+    "target": "x86_64-pc-windows-msvc",
+    "candidate_run_id": 33316173523,
+    "validation_run_id": 33316162397,
+    "lanes": {
+      "candidate_identity_and_sha256": "passed",
+      "candidate_version": "passed",
+      "isolated_state_database_initialized": "passed",
+      "single_child_native_join": "passed",
+      "official_runtime_unchanged": "passed",
+      "real_config_and_auth_unchanged": "passed"
+    },
+    "unverified": [
+      "interactive TUI rendering",
+      "multi-child native join",
+      "database roundtrip",
+      "formal release publication"
+    ]
+  }
+}

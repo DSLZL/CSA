@@ -1,7 +1,7 @@
 {
   "schema": 1,
   "current": {
-    "x86_64-pc-windows-msvc": "rust-v0.150.1-native-join-p9"
+    "x86_64-pc-windows-msvc": "rust-v0.151.0-native-join-p10"
   },
   "compatibilities": {
     "rust-v0.147.0-native-join-p2": {
@@ -141,9 +141,9 @@
       }
     },
     "rust-v0.151.0-native-join-p10": {
-      "lifecycle": "candidate",
+      "lifecycle": "accepted",
       "build_enabled": true,
-      "release_enabled": false,
+      "release_enabled": true,
       "manifest": "payload/codex/native-join-p10/bindings/rust-v0.151.0-native-join-p10/manifest.toml",
       "manifest_sha256": "563b34f187e61e70aee5453f2383df640058475d742be38137e99c0cb2f9ca0d",
       "targets": {
@@ -152,8 +152,8 @@
           "build_profile_sha256": "be3194ff9dab2c69914ef0751f700d8d4114a0bd53528bd5b566c61fdf05df13",
           "runtime_lock": "release/runtime-locks/rust-v0.151.0-native-join-p10.json",
           "runtime_lock_sha256": "e24eda740d7771b6e8881b9f3b802d773316b1b8e54a10c93da5fd3fa9551f66",
-          "acceptance": null,
-          "acceptance_sha256": null
+          "acceptance": "release/acceptance/rust-v0.151.0-native-join-p10/x86_64-pc-windows-msvc.json",
+          "acceptance_sha256": "0f92a978f43156e87076f17ff8a39482f0c0d3fd17bf8ff7a223feee22fcab25"
         }
       }
     }
