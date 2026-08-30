@@ -1310,7 +1310,7 @@ index a3602856325d9a1793f6d529f840f9682c4bc5ab..1f69468d3c2324f0148ad5ba2da051a4
  
      assert_eq!(desired_height_calls.load(Ordering::Relaxed), 1);
  }
-@@ -873,6 +877,769 @@ async fn selected_side_thread_close_is_handled_by_foreground_event_owner() -> Re
+@@ -873,6 +877,765 @@ async fn selected_side_thread_close_is_handled_by_foreground_event_owner() -> Re
      Ok(())
  }
  
@@ -1516,15 +1516,11 @@ index a3602856325d9a1793f6d529f840f9682c4bc5ab..1f69468d3c2324f0148ad5ba2da051a4
 +    )
 +    .await?;
 +    assert!(
-+        app.subagent_live_state()
-+            .agent(active_child_id)
-+            .is_none(),
++        app.subagent_live_state().agent(active_child_id).is_none(),
 +        "I-08 final terminal event archives the active child"
 +    );
 +    assert!(
-+        app.subagent_live_state()
-+            .agent(inactive_child_id)
-+            .is_none(),
++        app.subagent_live_state().agent(inactive_child_id).is_none(),
 +        "I-08 final terminal event archives the completed sibling"
 +    );
 +    let scheduled = std::iter::from_fn(|| frame_rx.try_recv().ok()).collect::<Vec<_>>();
