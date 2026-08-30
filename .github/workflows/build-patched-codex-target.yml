@@ -46,7 +46,6 @@ jobs:
   build:
     name: Build ${{ inputs.target }}
     runs-on: ${{ inputs.runner }}
-    timeout-minutes: 180
     permissions:
       actions: write
       contents: read

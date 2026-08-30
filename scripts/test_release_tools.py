@@ -949,6 +949,7 @@ def test_release_stream_contracts() -> None:
     assert "runner: ${{ matrix.runner }}" in patched_workflow
     assert "target: ${{ matrix.target }}" in patched_workflow
     assert "runs-on: ${{ inputs.runner }}" in target_workflow
+    assert "timeout-minutes:" not in target_workflow
     assert "targets: ${{ inputs.target }}" in target_workflow
     assert "fail-fast: false" in patched_workflow
     assert "patched-codex-target-${{ inputs.compat_id }}-${{ inputs.target }}" in target_workflow
