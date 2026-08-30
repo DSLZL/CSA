@@ -30,6 +30,7 @@ from compatibility_audit import AuditError, check_immutability  # noqa: E402
 from check_sccache_stats import main as sccache_stats_main  # noqa: E402
 from check_sccache_stats import summarize as summarize_sccache_stats  # noqa: E402
 from generate_release_notes import ReleaseNotesError, generate  # noqa: E402
+from patch_family import PatchFamilyError, verify_family  # noqa: E402
 from compat_release import (  # noqa: E402
     CompatibilityReleaseError,
     blocker_body,
@@ -367,6 +368,31 @@ def test_family_payload(root: Path) -> None:
         raise AssertionError("mutation of an immutable shared family file was accepted")
 
 
+def test_patch_family_rules(root: Path) -> None:
+    source = REPOSITORY / "payload" / "codex" / "native-join-p10"
+    candidate = root / source.name
+    root.mkdir()
+    shutil.copytree(source, candidate)
+    addition = candidate / "shared" / "additions" / "0010-core-owned-files.patch"
+    text = addition.read_text(encoding="utf-8")
+    old = (
+        "diff --git a/codex-rs/core/src/agent/completion.rs "
+        "b/codex-rs/core/src/agent/completion.rs"
+    )
+    new = (
+        "diff --git a/codex-rs/core/src/agent/control.rs "
+        "b/codex-rs/core/src/agent/control.rs"
+    )
+    assert old in text
+    addition.write_text(text.replace(old, new, 1), encoding="utf-8", newline="\n")
+    try:
+        verify_family(candidate)
+    except PatchFamilyError:
+        pass
+    else:
+        raise AssertionError("shared addition modified an upstream-owned path")
+
+
 def test_contract_shape() -> None:
     p1 = REPOSITORY / "payload" / "codex" / "rust-v0.148.0-native-join-p1"
     p1_contract = load_contract(p1 / "test-contract.json", p1.name)
@@ -557,20 +583,35 @@ def test_contract_shape() -> None:
     assert "codex-rs/state/src/migrations.rs" in p9_hashes["present"]
     assert "codex-rs/state/src/migrations_tests.rs" in p9_hashes["present"]
     assert "codex-rs/state/src/sqlite.rs" in p9_hashes["present"]
-    current_p9 = REPOSITORY / "payload" / "codex" / "rust-v0.151.0-native-join-p9"
-    current_p9_manifest = tomllib.loads(
-        (current_p9 / "manifest.toml").read_text(encoding="utf-8")
+    p10 = REPOSITORY / "payload" / "codex" / "native-join-p10"
+    p10_manifest_path = p10 / "bindings" / "rust-v0.151.0-native-join-p10" / "manifest.toml"
+    p10_payload = _load_payload(p10_manifest_path)
+    assert p10_payload.source_schema == 2
+    assert p10_payload.family_id == "native-join-p10"
+    assert p10_payload.manifest["patch_set_version"] == 10
+    assert len(p10_payload.manifest["patches"]) == 5
+    p10_tui_patch = _payload_file(p10_payload, "patches/1100-tui-adapter.patch").read_text(
+        encoding="utf-8"
     )
-    assert len(current_p9_manifest["patches"]) == 18
-    assert current_p9_manifest["patches"][-1]["path"] == (
-        "patches/0018-subagent-history-batches.patch"
+    assert "take_terminal_batch" in p10_tui_patch
+    assert "SubagentHistory" in p10_tui_patch
+    assert "SubAgentActivityKind::Started | SubAgentActivityKind::Completed" in p10_tui_patch
+    family_report = verify_family(p10)
+    assert family_report["status"] == "pass"
+    assert family_report["bindings"] == 1
+    analysis = json.loads(
+        (REPOSITORY / "release" / "patch-family" / "native-join-p10-analysis.json").read_bytes()
     )
-    current_p9_patch = (
-        current_p9 / "patches" / "0018-subagent-history-batches.patch"
-    ).read_text(encoding="utf-8")
-    assert "take_terminal_batch" in current_p9_patch
-    assert "SubagentHistory" in current_p9_patch
-    assert "SubAgentActivityKind::Started | SubAgentActivityKind::Completed" in current_p9_patch
+    assert "paths" not in analysis["left"] and "paths" not in analysis["right"]
+    assert analysis["metrics"]["shared_files"] == 40
+    assert sum(row["classification"] == "VERSION_SPECIFIC" for row in analysis["paths"]) == 3
+    recommendations = {row["logical_path"]: row["recommendation"] for row in analysis["patches"]}
+    assert recommendations["patches/0001-exact-run-identity.patch"] == (
+        "split CSA core from the upstream adapter"
+    )
+    assert recommendations["patches/0012-official-runtime-overlay.patch"] == (
+        "defer shared/patches until a second p10 binding proves reuse"
+    )
     for attributes in (
         REPOSITORY / "payload" / "codex" / ".gitattributes",
         REPOSITORY / "release" / ".gitattributes",
@@ -793,8 +834,10 @@ def test_release_stream_contracts() -> None:
     assert watcher.count('cron: "0 * * * *"') == 1
     assert watcher.count("Codex source must not live inside the CSA repository") == 1
     assert watcher.count('--branch "$env:UPSTREAM_TAG" --single-branch') == 1
-    assert '"payload/codex/$env:COMPAT_ID"' in watcher
-    assert '"payload/codex/native-join-p2/family.toml"' not in watcher
+    assert '$baseDirectory.Parent.Name -eq "bindings"' in watcher
+    assert "CANDIDATE_MANIFEST" in watcher
+    assert "CANDIDATE_FAMILY_INDEX" in watcher
+    assert '"payload/codex/$env:COMPAT_ID"' not in watcher
 
     patched_workflow = (
         REPOSITORY / ".github" / "workflows" / "release-patched-codex.yml"
@@ -1750,7 +1793,7 @@ def test_compatibility_release_tools(root: Path) -> None:
     loaded_family_candidate = _load_payload(family_candidate / "manifest.toml")
     assert loaded_family_candidate.family_id == family.name
     assert all(
-        not path.is_relative_to(family_candidate)
+        path.is_relative_to(family_candidate)
         for logical_path, path in loaded_family_candidate.files.items()
         if logical_path.startswith("patches/")
     )
@@ -1802,7 +1845,7 @@ def test_compatibility_release_tools(root: Path) -> None:
             if repository == "openai/codex":
                 assert tag == "rust-v9.8.7"
                 return "f" * 40
-            assert repository == "dslzl/CSA" and tag == "compat-rust-v9.8.7-native-join-p9"
+            assert repository == "dslzl/CSA" and tag == "compat-rust-v9.8.7-native-join-p10"
             return "d" * 40
 
     fake = FakeApi()
@@ -1815,13 +1858,13 @@ def test_compatibility_release_tools(root: Path) -> None:
     detection = detect(REPOSITORY.resolve(), fake)
     assert detection["action"] == "blocked" and detection["issue_needs_update"] is False
     fake.issue_body = ""
-    fake.pulls = [{"head": {"ref": "automation/compat-rust-v9.8.7-native-join-p9"}}]
+    fake.pulls = [{"head": {"ref": "automation/compat-rust-v9.8.7-native-join-p10"}}]
     assert detect(REPOSITORY.resolve(), fake)["action"] == "candidate_open"
     fake.pulls = []
     with patch("compat_release.exact_local_entry", return_value=True):
         assert detect(REPOSITORY.resolve(), fake)["action"] == "publish"
     fake.release = {
-        "tag_name": "compat-rust-v9.8.7-native-join-p9",
+        "tag_name": "compat-rust-v9.8.7-native-join-p10",
         "draft": False,
         "prerelease": False,
     }
@@ -1852,6 +1895,7 @@ def main() -> int:
         test_ci_input(root)
         test_immutability(root)
         test_family_payload(root / "family")
+        test_patch_family_rules(root / "patch-family")
         test_contract_shape()
         test_sccache_statistics()
         test_release_stream_contracts()
@@ -1869,6 +1913,7 @@ def main() -> int:
                 "ci_input": "pass",
                 "compatibility_immutability": "pass",
                 "multi_version_family": "pass",
+                "patch_family_rules": "pass",
                 "patch_contract_shape": "pass",
                 "sccache_statistics": "pass",
                 "release_stream_contracts": "pass",

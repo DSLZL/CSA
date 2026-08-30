@@ -160,12 +160,33 @@ jobs:
         continue-on-error: true
         shell: pwsh
         run: |
+          $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE)
+          $baseManifest = Get-Item "$workspace/$env:BASE_MANIFEST"
+          $baseDirectory = $baseManifest.Directory
+          if ($baseDirectory.Parent.Name -eq "bindings") {
+            $bindingsRoot = $baseDirectory.Parent
+            $familyRoot = $bindingsRoot.Parent
+            $output = Join-Path $bindingsRoot.FullName $env:COMPAT_ID
+            $stageRoot = $familyRoot.FullName
+            $familyIndex = [IO.Path]::GetRelativePath($workspace, (Join-Path $familyRoot.FullName "family.toml")).Replace('\', '/')
+          } else {
+            $output = Join-Path "$workspace/payload/codex" $env:COMPAT_ID
+            $stageRoot = $output
+            $familyIndex = ""
+          }
+          $candidatePrefix = [IO.Path]::GetRelativePath($workspace, $output).Replace('\', '/') + "/"
+          @(
+            "CANDIDATE_MANIFEST=$(Join-Path $output 'manifest.toml')"
+            "CANDIDATE_STAGE_ROOT=$([IO.Path]::GetRelativePath($workspace, $stageRoot).Replace('\', '/'))"
+            "CANDIDATE_PREFIX=$candidatePrefix"
+            "CANDIDATE_FAMILY_INDEX=$familyIndex"
+          ) | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
           & python scripts/compat_release.py port `
-            --base-manifest "$env:GITHUB_WORKSPACE/$env:BASE_MANIFEST" `
+            --base-manifest $baseManifest.FullName `
             --source "$env:SOURCE_ROOT" `
             --tag "$env:UPSTREAM_TAG" `
             --commit "$env:UPSTREAM_COMMIT" `
-            --output "$env:GITHUB_WORKSPACE/payload/codex/$env:COMPAT_ID" *> "$env:WATCH_ROOT/port.log"
+            --output $output *> "$env:WATCH_ROOT/port.log"
           $code = $LASTEXITCODE
           Get-Content "$env:WATCH_ROOT/port.log"
           exit $code
@@ -177,7 +198,7 @@ jobs:
         run: |
           & python scripts/compat_catalog.py stage-candidate `
             --repository "$env:GITHUB_WORKSPACE" `
-            --manifest "$env:GITHUB_WORKSPACE/payload/codex/$env:COMPAT_ID/manifest.toml" `
+            --manifest "$env:CANDIDATE_MANIFEST" `
             --target "x86_64-pc-windows-msvc" `
             --runtime-lock "$env:GITHUB_WORKSPACE/release/runtime-locks/$env:COMPAT_ID.json" `
             --npm-integrity registry *> "$env:WATCH_ROOT/register.log"
@@ -194,16 +215,17 @@ jobs:
           & git switch -c $branch *> "$env:WATCH_ROOT/candidate.log"
           if ($LASTEXITCODE -ne 0) { Get-Content "$env:WATCH_ROOT/candidate.log"; exit $LASTEXITCODE }
           & git add -- `
-            "payload/codex/$env:COMPAT_ID" `
+            "$env:CANDIDATE_STAGE_ROOT" `
             "release/runtime-locks/$env:COMPAT_ID.json" `
             "release/compatibility-index.json" *>> "$env:WATCH_ROOT/candidate.log"
           if ($LASTEXITCODE -ne 0) { Get-Content "$env:WATCH_ROOT/candidate.log"; exit $LASTEXITCODE }
           $changed = @(& git diff --cached --name-only)
-          $payloadPrefix = "payload/codex/$env:COMPAT_ID/"
+          $payloadPrefix = $env:CANDIDATE_PREFIX
+          $familyIndex = $env:CANDIDATE_FAMILY_INDEX
           $runtimeLock = "release/runtime-locks/$env:COMPAT_ID.json"
           $index = "release/compatibility-index.json"
           $outOfScope = @($changed | Where-Object {
-            -not $_.StartsWith($payloadPrefix) -and $_ -ne $runtimeLock -and $_ -ne $index
+            -not $_.StartsWith($payloadPrefix) -and $_ -ne $familyIndex -and $_ -ne $runtimeLock -and $_ -ne $index
           })
           if ($changed.Count -eq 0 -or $outOfScope.Count -ne 0) {
             "Candidate contains an empty or out-of-scope diff: $changed" | Add-Content "$env:WATCH_ROOT/candidate.log"

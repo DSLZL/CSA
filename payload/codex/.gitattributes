@@ -1,3 +1,5 @@
 # Compatibility manifests hash payload bytes; never let Windows checkout
 # policy rewrite them behind the verifier's back.
 ** text eol=lf
+# Patch payloads preserve exact upstream source bytes, including space-only lines.
+**/*.patch whitespace=-blank-at-eol

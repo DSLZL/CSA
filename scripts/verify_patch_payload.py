@@ -13,8 +13,10 @@ import subprocess
 import sys
 import tempfile
 import tomllib
+from contextlib import contextmanager
 from dataclasses import dataclass
 from pathlib import Path, PurePosixPath
+from typing import Iterator
 
 
 SHA1 = re.compile(r"[0-9a-f]{40}\Z")
@@ -309,8 +311,8 @@ def _validate_manifest(manifest: dict[str, object]) -> None:
         or manifest["patch_api"] != 1
     ):
         raise VerificationError("unsupported manifest schema or patch_api")
-    if type(manifest["patch_set_version"]) is not int or manifest["patch_set_version"] not in {1, 2, 3, 4, 5, 6, 7, 8, 9}:
-        raise VerificationError("patch_set_version must be an integer from 1 through 9")
+    if type(manifest["patch_set_version"]) is not int or manifest["patch_set_version"] not in range(1, 11):
+        raise VerificationError("patch_set_version must be an integer from 1 through 10")
     for key, pattern in (
         ("compat_id", COMPAT_ID),
         ("codex_version", VERSION),
@@ -329,17 +331,20 @@ def _validate_manifest(manifest: dict[str, object]) -> None:
     _relative(manifest["source_hashes"], "source_hashes")
 
     patches = manifest["patches"]
-    expected_patch_count = {1: 5, 2: 6, 3: 11, 4: 12, 5: 13, 6: 14, 7: 15, 8: 16, 9: 17}[
+    expected_patch_count = {1: 5, 2: 6, 3: 11, 4: 12, 5: 13, 6: 14, 7: 15, 8: 16, 9: 17}.get(
         manifest["patch_set_version"]
-    ]
+    )
     patch_count_matches = isinstance(patches, list) and (
-        len(patches) == expected_patch_count
+        (expected_patch_count is None and bool(patches))
+        or len(patches) == expected_patch_count
         or (manifest["patch_set_version"] == 9 and len(patches) == 18)
     )
     if not patch_count_matches:
         required = (
             "17 or 18"
             if manifest["patch_set_version"] == 9
+            else "at least 1"
+            if expected_patch_count is None
             else str(expected_patch_count)
         )
         raise VerificationError(
@@ -413,6 +418,24 @@ def _touched_paths(patches: list[Path]) -> set[str]:
     return touched
 
 
+@contextmanager
+def _staged_patch_index(
+    source: Path, commit: str, patch_paths: list[Path]
+) -> Iterator[dict[str, str]]:
+    with tempfile.TemporaryDirectory(prefix="codex-patch-index-") as temp_dir:
+        env = os.environ.copy()
+        env["GIT_INDEX_FILE"] = str(Path(temp_dir) / "index")
+        _run(["git", "read-tree", commit], source, env=env)
+        for path in patch_paths:
+            _run(
+                ["git", "apply", "--cached", "--check", "--whitespace=error-all", str(path)],
+                source,
+                env=env,
+            )
+            _run(["git", "apply", "--cached", "--whitespace=error-all", str(path)], source, env=env)
+        yield env
+
+
 def verify(manifest_path: Path, source: Path, apply: bool, artifact_path: Path | None) -> dict[str, object]:
     if not manifest_path.is_absolute() or not source.is_absolute():
         raise VerificationError("manifest and source paths must be absolute")
@@ -473,17 +496,8 @@ def verify(manifest_path: Path, source: Path, apply: bool, artifact_path: Path |
     if _touched_paths(patch_paths) != set(manifest["preimage"]) | set(manifest["preimage_absent"]):
         raise VerificationError("preimages do not exactly cover patch-touched paths")
 
-    with tempfile.TemporaryDirectory(prefix="codex-patch-index-") as temp_dir:
-        env = os.environ.copy()
-        env["GIT_INDEX_FILE"] = str(Path(temp_dir) / "index")
-        _run(["git", "read-tree", commit], source, env=env)
-        for path in patch_paths:
-            _run(
-                ["git", "apply", "--cached", "--check", "--whitespace=error-all", str(path)],
-                source,
-                env=env,
-            )
-            _run(["git", "apply", "--cached", "--whitespace=error-all", str(path)], source, env=env)
+    with _staged_patch_index(source, commit, patch_paths):
+        pass
     if apply:
         for path in patch_paths:
             _run(["git", "apply", "--check", "--whitespace=error-all", str(path)], source)

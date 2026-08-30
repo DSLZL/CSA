@@ -19,13 +19,14 @@ The repository `AGENTS.md` defines the normal build, test, style, and security r
 | --- | --- |
 | `src/` | Rust Manager, CLI parsing, discovery, online install, state, activation, and isolation |
 | `tests/` | Cross-module Manager tests and the standalone UI harness |
-| `payload/codex/<compat-id>/` | Version-specific manifest, patches, hashes, and test contract |
+| `payload/codex/<compat-id>/` | Legacy version-specific compatibility payloads |
+| `payload/codex/<family>/bindings/<compat-id>/` | Schema-2 exact bindings backed by shared family files |
 | `release/compatibility-index.json` | Compatibility routing and lifecycle |
+| `release/patch-family/` | Reviewed patch-family classifications and machine-readable analysis |
 | `release/build-profiles/` | Pinned toolchain and build identities |
 | `release/runtime-locks/` | Exact official runtime package contracts |
 | `release/acceptance/` | Sanitized local acceptance records |
 | `scripts/` | Build, validation, release, npm staging, and test helpers |
-| `validation/` | Replacement and payload-structure checks |
 | `npm/` | Meta package, launcher, platform package metadata, and launcher tests |
 | `.github/workflows/` | CI, validation, candidate, Manager release, and compatibility release workflows |
 
@@ -33,7 +34,7 @@ Compatibility facts belong in the catalog, manifest, build profile, runtime lock
 
 ## Toolchains and prerequisites
 
-The Manager crate declares Rust `1.89` as its minimum supported toolchain. Current CI, Manager release builds, and patched Codex `0.150.1` p9 are pinned to Rust `1.95.0`.
+The Manager crate declares Rust `1.89` as its minimum supported toolchain. Current CI, Manager release builds, patched Codex `0.150.1` p9, and the `0.151.0` p10 candidate are pinned to Rust `1.95.0`.
 
 Local work also uses:
 
@@ -82,9 +83,25 @@ A compatibility directory is named exactly after its `compat_id`. Its manifest p
 - output asset name, size, and SHA-256 state;
 - generation and test contract.
 
+Schema-2 payloads place the manifest under `payload/codex/<family>/bindings/<compat-id>/`.
+Their `[files]` table maps logical payload names to shared additions or binding-local adapters.
+Shared additions may only create paths absent from upstream; upstream-owned changes remain in the
+exact binding until at least two bindings prove that a canonical diff is byte-identical.
+
+Validate family ownership and reuse before catalog validation:
+
+```powershell
+py -3 scripts\patch_family.py verify --family payload\codex\native-join-p10
+py -3 scripts\compat_catalog.py validate --repository .
+```
+
+For a new extraction, keep the upstream checkouts outside the repository and run
+`py -3 scripts\patch_family.py analyze --help`. Commit the reviewed classification JSON, generated
+analysis JSON, and Markdown report together; the analyzer never performs fuzzy porting.
+
 Keep the upstream checkout outside the CSA repository. Check out the exact manifest commit in detached mode, verify the clean source, and apply patches only through the repository tooling. Never use fuzzy or three-way application to make a version-bound patch fit.
 
-The current p9 test contract covers workspace formatting, schema generation and reverse checks, parent fork and transport inheritance, completion and terminal-outcome mapping, single and batch Join schemas, Native Join integration, TUI live state, Orbit rendering, complete TUI library tests, TUI Clippy, official runtime overlay behavior, and state-database migration interoperability.
+The p9 and p10 test contracts cover workspace formatting, schema generation and reverse checks, parent fork and transport inheritance, completion and terminal-outcome mapping, single and batch Join schemas, Native Join integration, TUI live state, Orbit rendering, complete TUI library tests, TUI Clippy, official runtime overlay behavior, and state-database migration interoperability.
 
 Committed candidate manifests are immutable build inputs. A formal workflow finalizes a temporary manifest copy from the independently built production executable. Do not write a production hash back into the committed candidate manifest by hand.
 

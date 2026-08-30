@@ -1363,16 +1363,30 @@ fn bundled_p9_candidate_adds_state_db_compatibility_gate() {
 }
 
 #[test]
-fn bundled_current_p9_candidate_adds_subagent_history_batches() {
+fn bundled_current_p10_family_preserves_subagent_history_batches() {
     let manifest = Path::new(env!("CARGO_MANIFEST_DIR"))
-        .join("payload/codex/rust-v0.151.0-native-join-p9/manifest.toml")
+        .join("payload/codex/native-join-p10/bindings/rust-v0.151.0-native-join-p10/manifest.toml")
         .canonicalize()
         .unwrap();
     let loaded = LoadedCompatibility::load(&manifest).unwrap();
+    let contract = loaded.test_contract().unwrap();
 
-    assert_eq!(loaded.manifest.patch_set_version, 9);
-    assert_eq!(loaded.patch_paths.len(), 18);
-    assert!(loaded.patch_paths[17].ends_with("patches/0018-subagent-history-batches.patch"));
+    assert_eq!(loaded.family_id(), Some("native-join-p10"));
+    assert_eq!(loaded.manifest.patch_set_version, 10);
+    assert_eq!(loaded.patch_paths.len(), 5);
+    assert!(loaded.patch_paths[0].ends_with("shared/additions/0010-core-owned-files.patch"));
+    assert!(
+        loaded.patch_paths[3]
+            .ends_with("bindings/rust-v0.151.0-native-join-p10/patches/1100-tui-adapter.patch")
+    );
+    assert_eq!(contract.tests.len(), 20);
+    assert_eq!(
+        contract.tests[19].name,
+        "Codex state DB line-ending compatibility"
+    );
+    let tui_adapter = fs::read_to_string(&loaded.patch_paths[3]).unwrap();
+    assert!(tui_adapter.contains("take_terminal_batch"));
+    assert!(tui_adapter.contains("SubagentHistory"));
 }
 
 #[test]

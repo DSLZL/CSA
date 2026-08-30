@@ -149,8 +149,9 @@ class GitHubApi:
         raise CompatibilityReleaseError(f"tag indirection is too deep: {repository}@{tag}")
 
 
-def latest_payload_manifest(repository: Path) -> Path:
+def latest_payload_manifest(repository: Path, tag: str, commit: str) -> Path:
     candidates: list[tuple[tuple[int, int, int, int, int], Path]] = []
+    exact: list[tuple[tuple[int, int, int, int, int], Path]] = []
     for path in (repository / "payload" / "codex").rglob("manifest.toml"):
         try:
             payload = _load_payload(path)
@@ -165,10 +166,13 @@ def latest_payload_manifest(repository: Path) -> Path:
                 int(payload.source_schema == 2),
             )
             candidates.append((key, path))
+            if manifest["upstream_tag"] == tag and manifest["upstream_commit"] == commit:
+                exact.append((key, path))
     if not candidates:
         raise CompatibilityReleaseError("no Windows x64 compatibility payload can seed a port")
-    best = max(key for key, _ in candidates)
-    matches = [path for key, path in candidates if key == best]
+    pool = exact or candidates
+    best = max(key for key, _ in pool)
+    matches = [path for key, path in pool if key == best]
     if len(matches) != 1:
         raise CompatibilityReleaseError("multiple family bindings claim the latest exact identity")
     return matches[0]
@@ -214,7 +218,7 @@ def detect(repository: Path, api: GitHubApi) -> dict[str, Any]:
     tag = latest.get("tag_name")
     version = stable_version(tag)
     commit = api.peel_tag(OPENAI_REPOSITORY, tag)
-    base_manifest = latest_payload_manifest(repository)
+    base_manifest = latest_payload_manifest(repository, tag, commit)
     base = _load_manifest(base_manifest)
     compat_id = (
         base["compat_id"]
@@ -447,6 +451,7 @@ def port(base_manifest: Path, source: Path, tag: str, commit: str, output: Path)
     validate_source(source, tag, commit, version)
     payload = _load_payload(base_manifest)
     manifest = payload.manifest
+    base_compat_id = manifest["compat_id"]
     compat_id = compatibility_id(version, manifest["patch_set_version"])
     if output.name != compat_id:
         raise CompatibilityReleaseError("output directory must equal the new compat_id")
@@ -487,6 +492,13 @@ def port(base_manifest: Path, source: Path, tag: str, commit: str, output: Path)
                 destination = temporary / patch["path"]
                 destination.parent.mkdir(parents=True, exist_ok=True)
                 shutil.copyfile(source_patch, destination)
+            else:
+                relative = source_patch.relative_to(payload.payload_root).as_posix()
+                binding_prefix = f"bindings/{base_compat_id}/"
+                if relative.startswith(binding_prefix):
+                    destination = temporary / relative.removeprefix(binding_prefix)
+                    destination.parent.mkdir(parents=True, exist_ok=True)
+                    shutil.copyfile(source_patch, destination)
 
         contract = json.loads(_payload_file(payload, "test-contract.json").read_bytes())
         contract["compat_id"] = compat_id
@@ -512,6 +524,15 @@ def port(base_manifest: Path, source: Path, tag: str, commit: str, output: Path)
         )
         if payload.source_schema == 2:
             files = family_file_map(payload)
+            binding_prefix = f"bindings/{base_compat_id}/"
+            files = {
+                logical: (
+                    f"bindings/{compat_id}/{physical.removeprefix(binding_prefix)}"
+                    if physical.startswith(binding_prefix)
+                    else physical
+                )
+                for logical, physical in files.items()
+            }
             files[manifest["source_hashes"]] = (
                 f"bindings/{compat_id}/{manifest['source_hashes']}"
             )

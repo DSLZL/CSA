@@ -1,0 +1,3527 @@
+diff --git a/codex-rs/tui/src/app/subagent_live.rs b/codex-rs/tui/src/app/subagent_live.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..05bb5c206fafa7d39060a0794c0362dc91efbe2c
+--- /dev/null
++++ b/codex-rs/tui/src/app/subagent_live.rs
+@@ -0,0 +1,1198 @@
++//! Pure projection of the current sub-agent activity batch.
++//!
++//! Navigation order and display metadata remain owned by `AgentNavigationState`; this module
++//! stores only the active batch's lifecycle and compact activity records.
++
++use super::agent_status_feed::ActivityPhase;
++use super::agent_status_feed::ActivityStatus;
++use super::agent_status_feed::ActivitySummary;
++use super::agent_status_feed::WorkActivityInput;
++use super::agent_status_feed::classify_activity;
++use codex_app_server_protocol::ServerNotification;
++use codex_app_server_protocol::ServerRequest;
++use codex_app_server_protocol::TurnStatus;
++use codex_protocol::ThreadId;
++use std::collections::HashMap;
++use std::collections::HashSet;
++use std::collections::VecDeque;
++use std::time::Duration;
++use std::time::Instant;
++
++pub(crate) const RECENT_ACTIVITY_LIMIT: usize = 3;
++
++pub(crate) type RecentActivity = WorkActivityInput;
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum LiveAgentStatus {
++    #[allow(dead_code)] // Authoritative hydration can expose this state as sources become richer.
++    Starting,
++    Running,
++    WaitingApproval,
++    #[allow(dead_code)] // Authoritative hydration can expose this state as sources become richer.
++    Waiting,
++    Failed,
++    Cancelled,
++    Completed,
++}
++
++impl LiveAgentStatus {
++    fn is_terminal(self) -> bool {
++        matches!(self, Self::Failed | Self::Cancelled | Self::Completed)
++    }
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) struct LiveAgentStats {
++    pub(crate) tool_uses: usize,
++    pub(crate) tokens: i64,
++    pub(crate) duration: Duration,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++struct ApprovalRef {
++    request_id: String,
++    item_id: Option<String>,
++    previous_agent_status: LiveAgentStatus,
++    previous_activity_status: Option<ActivityStatus>,
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) struct LiveAgentState {
++    lifecycle: LiveAgentStatus,
++    recent: VecDeque<RecentActivity>,
++    open_approval: Option<ApprovalRef>,
++    animation_started_at: Instant,
++    turn_started_at: Option<Instant>,
++    tool_uses_started: usize,
++    total_tokens: i64,
++    tokens_at_turn_start: i64,
++    terminal_stats: Option<LiveAgentStats>,
++}
++
++impl LiveAgentState {
++    fn new(lifecycle: LiveAgentStatus, now: Instant) -> Self {
++        Self {
++            lifecycle,
++            recent: VecDeque::with_capacity(RECENT_ACTIVITY_LIMIT),
++            open_approval: None,
++            animation_started_at: now,
++            turn_started_at: (lifecycle != LiveAgentStatus::Starting).then_some(now),
++            tool_uses_started: 0,
++            total_tokens: 0,
++            tokens_at_turn_start: 0,
++            terminal_stats: None,
++        }
++    }
++
++    pub(crate) fn lifecycle(&self) -> LiveAgentStatus {
++        self.lifecycle
++    }
++
++    pub(crate) fn recent(&self) -> &VecDeque<RecentActivity> {
++        &self.recent
++    }
++
++    pub(crate) fn animation_started_at(&self) -> Instant {
++        self.animation_started_at
++    }
++
++    pub(crate) fn terminal_stats(&self) -> Option<LiveAgentStats> {
++        self.terminal_stats
++    }
++
++    pub(crate) fn is_renderable_at(&self, _now: Instant) -> bool {
++        true
++    }
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum LiveStateChange {
++    Unchanged,
++    Changed,
++}
++
++#[derive(Clone, Copy, Debug, Default, Eq, PartialEq)]
++pub(crate) struct SubagentLiveTelemetry {
++    events_reduced: u64,
++    duplicate_events: u64,
++    conflicting_terminal_events: u64,
++}
++
++#[derive(Debug, Default)]
++pub(crate) struct SubagentLiveState {
++    agents: HashMap<ThreadId, LiveAgentState>,
++    archived_agents: HashSet<ThreadId>,
++    revision: u64,
++    telemetry: SubagentLiveTelemetry,
++}
++
++impl SubagentLiveState {
++    pub(crate) fn revision(&self) -> u64 {
++        self.revision
++    }
++
++    pub(crate) fn agent(&self, thread_id: ThreadId) -> Option<&LiveAgentState> {
++        self.agents.get(&thread_id)
++    }
++
++    #[cfg(test)]
++    pub(crate) fn telemetry(&self) -> SubagentLiveTelemetry {
++        self.telemetry
++    }
++
++    pub(crate) fn has_renderable_rows_at(&self, now: Instant) -> bool {
++        self.agents
++            .values()
++            .any(|agent| agent.is_renderable_at(now))
++    }
++
++    pub(crate) fn ensure_started(&mut self, thread_id: ThreadId, now: Instant) -> LiveStateChange {
++        self.telemetry.events_reduced = self.telemetry.events_reduced.saturating_add(1);
++        if self.agents.contains_key(&thread_id) {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
++        self.archived_agents.remove(&thread_id);
++        self.agents.insert(
++            thread_id,
++            LiveAgentState::new(LiveAgentStatus::Starting, now),
++        );
++        self.finish_change(true)
++    }
++
++    #[cfg(test)]
++    pub(crate) fn retained_activity_count(&self) -> usize {
++        self.agents.values().map(|agent| agent.recent.len()).sum()
++    }
++
++    pub(super) fn reduce_notification(
++        &mut self,
++        thread_id: ThreadId,
++        notification: &ServerNotification,
++        now: Instant,
++    ) -> LiveStateChange {
++        match notification {
++            ServerNotification::ItemStarted(notification) => self.reduce_summary_at(
++                thread_id,
++                classify_activity(&notification.item, ActivityPhase::Started),
++                now,
++            ),
++            ServerNotification::ItemCompleted(notification) => self.reduce_summary_at(
++                thread_id,
++                classify_activity(&notification.item, ActivityPhase::Completed),
++                now,
++            ),
++            ServerNotification::TurnStarted(_) => self.start_turn(thread_id, now),
++            ServerNotification::ThreadTokenUsageUpdated(notification) => {
++                self.set_total_tokens(thread_id, notification.token_usage.total.total_tokens, now)
++            }
++            ServerNotification::TurnCompleted(notification) => {
++                self.finish_turn(thread_id, &notification.turn, now)
++            }
++            ServerNotification::ThreadClosed(_) => self.remove_agent(thread_id),
++            ServerNotification::ServerRequestResolved(notification) => {
++                self.resolve_approval(thread_id, &notification.request_id.to_string())
++            }
++            _ => LiveStateChange::Unchanged,
++        }
++    }
++
++    pub(super) fn reduce_request(
++        &mut self,
++        thread_id: ThreadId,
++        request: &ServerRequest,
++    ) -> LiveStateChange {
++        let item_id = match request {
++            ServerRequest::CommandExecutionRequestApproval { params, .. } => {
++                Some(params.item_id.clone())
++            }
++            ServerRequest::FileChangeRequestApproval { params, .. } => Some(params.item_id.clone()),
++            ServerRequest::McpServerElicitationRequest { .. } => None,
++            ServerRequest::PermissionsRequestApproval { params, .. } => {
++                Some(params.item_id.clone())
++            }
++            ServerRequest::ToolRequestUserInput { .. }
++            | ServerRequest::DynamicToolCall { .. }
++            | ServerRequest::ChatgptAuthTokensRefresh { .. }
++            | ServerRequest::AttestationGenerate { .. }
++            | ServerRequest::CurrentTimeRead { .. }
++            | ServerRequest::ApplyPatchApproval { .. }
++            | ServerRequest::ExecCommandApproval { .. } => return LiveStateChange::Unchanged,
++        };
++        self.mark_waiting_approval(thread_id, request.id().to_string(), item_id)
++    }
++
++    #[cfg(test)]
++    pub(super) fn reduce_summary(
++        &mut self,
++        thread_id: ThreadId,
++        summary: Option<ActivitySummary>,
++    ) -> LiveStateChange {
++        self.reduce_summary_at(thread_id, summary, Instant::now())
++    }
++
++    fn reduce_summary_at(
++        &mut self,
++        thread_id: ThreadId,
++        summary: Option<ActivitySummary>,
++        now: Instant,
++    ) -> LiveStateChange {
++        match summary {
++            Some(ActivitySummary::Work(activity)) => {
++                self.reduce_activity_at(thread_id, activity, now)
++            }
++            Some(ActivitySummary::Other(_)) | None => LiveStateChange::Unchanged,
++        }
++    }
++
++    #[cfg(test)]
++    pub(crate) fn reduce_activity(
++        &mut self,
++        thread_id: ThreadId,
++        activity: WorkActivityInput,
++    ) -> LiveStateChange {
++        self.reduce_activity_at(thread_id, activity, Instant::now())
++    }
++
++    fn reduce_activity_at(
++        &mut self,
++        thread_id: ThreadId,
++        activity: WorkActivityInput,
++        now: Instant,
++    ) -> LiveStateChange {
++        self.telemetry.events_reduced = self.telemetry.events_reduced.saturating_add(1);
++
++        if self.archived_agents.contains(&thread_id) {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
++
++        if self
++            .agents
++            .get(&thread_id)
++            .is_some_and(|agent| agent.lifecycle.is_terminal())
++        {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
++
++        let mut changed = false;
++        let mut duplicate = false;
++        let mut conflict = false;
++        let agent = self.agents.entry(thread_id).or_insert_with(|| {
++            changed = true;
++            LiveAgentState::new(LiveAgentStatus::Running, now)
++        });
++        begin_turn_if_needed(agent, now);
++
++        if let Some(approval) = agent
++            .open_approval
++            .take_if(|approval| approval.item_id.as_deref() == Some(activity.id.as_str()))
++        {
++            if agent.lifecycle == LiveAgentStatus::WaitingApproval {
++                agent.lifecycle = approval.previous_agent_status;
++            }
++            changed = true;
++        }
++
++        if let Some(existing) = agent
++            .recent
++            .iter_mut()
++            .find(|existing| existing.id == activity.id)
++        {
++            if activity_status_is_terminal(existing.status) {
++                if activity_status_is_terminal(activity.status)
++                    && existing.status != activity.status
++                {
++                    conflict = true;
++                } else {
++                    duplicate = true;
++                }
++            } else if *existing == activity {
++                duplicate = true;
++            } else {
++                *existing = activity;
++                changed = true;
++            }
++        } else {
++            if activity.status == ActivityStatus::Running {
++                agent.tool_uses_started = agent.tool_uses_started.saturating_add(1);
++            }
++            if agent.recent.len() == RECENT_ACTIVITY_LIMIT
++                && let Some(evicted) = agent.recent.pop_front()
++                && let Some(approval) = agent.open_approval.as_mut()
++                && approval.item_id.as_deref() == Some(evicted.id.as_str())
++            {
++                approval.previous_activity_status = None;
++            }
++            agent.recent.push_back(activity);
++            changed = true;
++        }
++
++        if agent.open_approval.is_none()
++            && matches!(
++                agent.lifecycle,
++                LiveAgentStatus::Starting
++                    | LiveAgentStatus::Waiting
++                    | LiveAgentStatus::WaitingApproval
++            )
++        {
++            agent.lifecycle = LiveAgentStatus::Running;
++            changed = true;
++        }
++
++        if duplicate {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++        }
++        if conflict {
++            self.telemetry.conflicting_terminal_events =
++                self.telemetry.conflicting_terminal_events.saturating_add(1);
++        }
++        self.finish_change(changed)
++    }
++
++    fn start_turn(&mut self, thread_id: ThreadId, now: Instant) -> LiveStateChange {
++        self.telemetry.events_reduced = self.telemetry.events_reduced.saturating_add(1);
++        self.archived_agents.remove(&thread_id);
++        let Some(agent) = self.agents.get_mut(&thread_id) else {
++            self.agents.insert(
++                thread_id,
++                LiveAgentState::new(LiveAgentStatus::Running, now),
++            );
++            return self.finish_change(true);
++        };
++        match agent.lifecycle {
++            LiveAgentStatus::Starting => {
++                agent.lifecycle = LiveAgentStatus::Running;
++                begin_turn_if_needed(agent, now);
++                agent.terminal_stats = None;
++                return self.finish_change(true);
++            }
++            LiveAgentStatus::Running
++            | LiveAgentStatus::Waiting
++            | LiveAgentStatus::WaitingApproval => {
++                self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++                return LiveStateChange::Unchanged;
++            }
++            LiveAgentStatus::Failed | LiveAgentStatus::Cancelled | LiveAgentStatus::Completed => {}
++        }
++        agent.lifecycle = LiveAgentStatus::Running;
++        agent.recent.clear();
++        agent.open_approval = None;
++        agent.animation_started_at = now;
++        agent.turn_started_at = Some(now);
++        agent.tool_uses_started = 0;
++        agent.tokens_at_turn_start = agent.total_tokens;
++        agent.terminal_stats = None;
++        self.finish_change(true)
++    }
++
++    fn set_total_tokens(
++        &mut self,
++        thread_id: ThreadId,
++        total_tokens: i64,
++        now: Instant,
++    ) -> LiveStateChange {
++        if self.archived_agents.contains(&thread_id) {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
++        let total_tokens = total_tokens.max(0);
++        let agent = self
++            .agents
++            .entry(thread_id)
++            .or_insert_with(|| LiveAgentState::new(LiveAgentStatus::Running, now));
++        let mut changed = agent.total_tokens != total_tokens;
++        agent.total_tokens = total_tokens;
++        let turn_tokens = current_turn_tokens(agent);
++        if let Some(stats) = agent.terminal_stats.as_mut()
++            && stats.tokens != turn_tokens
++        {
++            stats.tokens = turn_tokens;
++            changed = true;
++        }
++        self.finish_change(changed)
++    }
++
++    fn finish_turn(
++        &mut self,
++        thread_id: ThreadId,
++        turn: &codex_app_server_protocol::Turn,
++        now: Instant,
++    ) -> LiveStateChange {
++        if self.archived_agents.contains(&thread_id) {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
++        let status = match turn.status {
++            TurnStatus::Completed => LiveAgentStatus::Completed,
++            TurnStatus::Interrupted => LiveAgentStatus::Cancelled,
++            TurnStatus::Failed => LiveAgentStatus::Failed,
++            TurnStatus::InProgress => {
++                return self.set_agent_status(thread_id, LiveAgentStatus::Running, now);
++            }
++        };
++        let agent = self
++            .agents
++            .entry(thread_id)
++            .or_insert_with(|| LiveAgentState::new(LiveAgentStatus::Running, now));
++        let classified_tool_uses = turn
++            .items
++            .iter()
++            .filter(|item| {
++                matches!(
++                    classify_activity(item, ActivityPhase::Completed),
++                    Some(ActivitySummary::Work(_))
++                )
++            })
++            .count();
++        let stats = LiveAgentStats {
++            tool_uses: if classified_tool_uses == 0 {
++                agent.tool_uses_started
++            } else {
++                classified_tool_uses
++            },
++            tokens: current_turn_tokens(agent),
++            duration: turn
++                .duration_ms
++                .and_then(|duration_ms| u64::try_from(duration_ms).ok())
++                .map(Duration::from_millis)
++                .unwrap_or_else(|| {
++                    now.saturating_duration_since(
++                        agent.turn_started_at.unwrap_or(agent.animation_started_at),
++                    )
++                }),
++        };
++        self.set_terminal(thread_id, status, now, Some(stats))
++    }
++
++    pub(crate) fn set_agent_status(
++        &mut self,
++        thread_id: ThreadId,
++        status: LiveAgentStatus,
++        now: Instant,
++    ) -> LiveStateChange {
++        self.telemetry.events_reduced = self.telemetry.events_reduced.saturating_add(1);
++        if status.is_terminal() {
++            return self.set_terminal(thread_id, status, now, /*stats*/ None);
++        }
++
++        if let Some(agent) = self.agents.get_mut(&thread_id) {
++            if agent.lifecycle.is_terminal() {
++                self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++                return LiveStateChange::Unchanged;
++            }
++            if status != LiveAgentStatus::Starting {
++                begin_turn_if_needed(agent, now);
++            }
++            let changed = if let Some(approval) = agent.open_approval.as_mut() {
++                let changed = approval.previous_agent_status != status;
++                approval.previous_agent_status = status;
++                changed
++            } else if agent.lifecycle != status {
++                agent.lifecycle = status;
++                true
++            } else {
++                self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++                false
++            };
++            return self.finish_change(changed);
++        }
++
++        self.agents
++            .insert(thread_id, LiveAgentState::new(status, now));
++        self.finish_change(true)
++    }
++
++    #[cfg(test)]
++    pub(crate) fn set_terminal_stats_for_test(
++        &mut self,
++        thread_id: ThreadId,
++        status: LiveAgentStatus,
++        now: Instant,
++        stats: LiveAgentStats,
++    ) -> LiveStateChange {
++        self.set_terminal(thread_id, status, now, Some(stats))
++    }
++
++    pub(crate) fn mark_waiting_approval(
++        &mut self,
++        thread_id: ThreadId,
++        request_id: String,
++        item_id: Option<String>,
++    ) -> LiveStateChange {
++        self.telemetry.events_reduced = self.telemetry.events_reduced.saturating_add(1);
++        if self.archived_agents.contains(&thread_id) {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
++        if self
++            .agents
++            .get(&thread_id)
++            .is_some_and(|agent| agent.lifecycle.is_terminal())
++        {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
++
++        let agent = self
++            .agents
++            .entry(thread_id)
++            .or_insert_with(|| LiveAgentState::new(LiveAgentStatus::Running, Instant::now()));
++        if agent.open_approval.as_ref().is_some_and(|approval| {
++            approval.request_id == request_id && approval.item_id == item_id
++        }) {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
++
++        let previous_agent_status = if let Some(previous) = agent.open_approval.take() {
++            restore_approval_activity(agent, &previous);
++            previous.previous_agent_status
++        } else if agent.lifecycle == LiveAgentStatus::WaitingApproval {
++            LiveAgentStatus::Running
++        } else {
++            agent.lifecycle
++        };
++        let previous_activity_status = item_id.as_deref().and_then(|item_id| {
++            let activity = agent.recent.iter_mut().find(|activity| {
++                activity.id == item_id && !activity_status_is_terminal(activity.status)
++            })?;
++            let previous = activity.status;
++            activity.status = ActivityStatus::WaitingApproval;
++            Some(previous)
++        });
++        agent.lifecycle = LiveAgentStatus::WaitingApproval;
++        agent.open_approval = Some(ApprovalRef {
++            request_id,
++            item_id,
++            previous_agent_status,
++            previous_activity_status,
++        });
++        self.finish_change(true)
++    }
++
++    pub(crate) fn resolve_approval(
++        &mut self,
++        thread_id: ThreadId,
++        request_id: &str,
++    ) -> LiveStateChange {
++        self.telemetry.events_reduced = self.telemetry.events_reduced.saturating_add(1);
++        let Some(agent) = self.agents.get_mut(&thread_id) else {
++            return LiveStateChange::Unchanged;
++        };
++        let Some(approval) = agent
++            .open_approval
++            .take_if(|approval| approval.request_id == request_id)
++        else {
++            return LiveStateChange::Unchanged;
++        };
++        if agent.lifecycle == LiveAgentStatus::WaitingApproval {
++            agent.lifecycle = approval.previous_agent_status;
++        }
++        restore_approval_activity(agent, &approval);
++        self.finish_change(true)
++    }
++
++    pub(crate) fn remove_agent(&mut self, thread_id: ThreadId) -> LiveStateChange {
++        self.telemetry.events_reduced = self.telemetry.events_reduced.saturating_add(1);
++        let changed = self.agents.remove(&thread_id).is_some();
++        self.finish_change(changed)
++    }
++
++    /// Authoritative one-shot hydration may begin a new live epoch for a terminal tombstone.
++    #[cfg(test)]
++    pub(crate) fn hydrate_live_agent(
++        &mut self,
++        thread_id: ThreadId,
++        status: LiveAgentStatus,
++    ) -> LiveStateChange {
++        if status.is_terminal() {
++            let changed = self.agents.remove(&thread_id).is_some();
++            return self.finish_change(changed);
++        }
++        self.archived_agents.remove(&thread_id);
++        let changed = hydrate_agent(&mut self.agents, thread_id, status, Instant::now());
++        self.finish_change(changed)
++    }
++
++    /// Reconciles once against authoritative live children; it performs no polling or replay.
++    pub(crate) fn reconcile_live_agents(
++        &mut self,
++        live_agents: impl IntoIterator<Item = (ThreadId, LiveAgentStatus)>,
++    ) -> LiveStateChange {
++        let authoritative = live_agents
++            .into_iter()
++            .filter(|(_, status)| !status.is_terminal())
++            .collect::<HashMap<_, _>>();
++        let original_len = self.agents.len();
++        self.agents
++            .retain(|thread_id, _| authoritative.contains_key(thread_id));
++        let mut changed = self.agents.len() != original_len;
++        let now = Instant::now();
++        for (thread_id, status) in authoritative {
++            self.archived_agents.remove(&thread_id);
++            changed |= hydrate_agent(&mut self.agents, thread_id, status, now);
++        }
++        self.finish_change(changed)
++    }
++
++    pub(crate) fn reset(&mut self) -> LiveStateChange {
++        let changed = !self.agents.is_empty() || !self.archived_agents.is_empty();
++        self.agents.clear();
++        self.archived_agents.clear();
++        self.finish_change(changed)
++    }
++
++    pub(crate) fn take_terminal_batch(&mut self) -> Option<HashMap<ThreadId, LiveAgentState>> {
++        if self.agents.is_empty()
++            || self
++                .agents
++                .values()
++                .any(|agent| !agent.lifecycle.is_terminal())
++        {
++            return None;
++        }
++
++        self.archived_agents.extend(self.agents.keys().copied());
++        self.revision = self.revision.wrapping_add(1);
++        Some(std::mem::take(&mut self.agents))
++    }
++
++    fn set_terminal(
++        &mut self,
++        thread_id: ThreadId,
++        status: LiveAgentStatus,
++        now: Instant,
++        stats: Option<LiveAgentStats>,
++    ) -> LiveStateChange {
++        if self.archived_agents.contains(&thread_id) {
++            self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            return LiveStateChange::Unchanged;
++        }
++        if let Some(agent) = self.agents.get(&thread_id)
++            && agent.lifecycle.is_terminal()
++        {
++            if agent.lifecycle == status {
++                self.telemetry.duplicate_events = self.telemetry.duplicate_events.saturating_add(1);
++            } else {
++                self.telemetry.conflicting_terminal_events =
++                    self.telemetry.conflicting_terminal_events.saturating_add(1);
++            }
++            return LiveStateChange::Unchanged;
++        }
++
++        let agent = self
++            .agents
++            .entry(thread_id)
++            .or_insert_with(|| LiveAgentState::new(status, now));
++        let stats = stats.unwrap_or(LiveAgentStats {
++            tool_uses: agent.tool_uses_started,
++            tokens: current_turn_tokens(agent),
++            duration: now.saturating_duration_since(
++                agent.turn_started_at.unwrap_or(agent.animation_started_at),
++            ),
++        });
++        agent.lifecycle = status;
++        agent.recent.clear();
++        agent.open_approval = None;
++        agent.terminal_stats = Some(stats);
++        self.finish_change(true)
++    }
++
++    fn finish_change(&mut self, changed: bool) -> LiveStateChange {
++        if changed {
++            self.revision = self.revision.wrapping_add(1);
++            LiveStateChange::Changed
++        } else {
++            LiveStateChange::Unchanged
++        }
++    }
++}
++
++fn activity_status_is_terminal(status: ActivityStatus) -> bool {
++    matches!(
++        status,
++        ActivityStatus::Succeeded
++            | ActivityStatus::Failed
++            | ActivityStatus::Declined
++            | ActivityStatus::Cancelled
++    )
++}
++
++fn begin_turn_if_needed(agent: &mut LiveAgentState, now: Instant) {
++    if agent.turn_started_at.is_none() {
++        agent.turn_started_at = Some(now);
++        agent.tokens_at_turn_start = agent.total_tokens;
++        agent.tool_uses_started = 0;
++    }
++}
++
++fn current_turn_tokens(agent: &LiveAgentState) -> i64 {
++    agent
++        .total_tokens
++        .saturating_sub(agent.tokens_at_turn_start)
++        .max(0)
++}
++
++fn restore_approval_activity(agent: &mut LiveAgentState, approval: &ApprovalRef) {
++    let Some(previous_status) = approval.previous_activity_status else {
++        return;
++    };
++    let Some(item_id) = approval.item_id.as_deref() else {
++        return;
++    };
++    if let Some(activity) = agent.recent.iter_mut().find(|activity| {
++        activity.id == item_id && activity.status == ActivityStatus::WaitingApproval
++    }) {
++        activity.status = previous_status;
++    }
++}
++
++fn hydrate_agent(
++    agents: &mut HashMap<ThreadId, LiveAgentState>,
++    thread_id: ThreadId,
++    status: LiveAgentStatus,
++    now: Instant,
++) -> bool {
++    let Some(agent) = agents.get_mut(&thread_id) else {
++        agents.insert(thread_id, LiveAgentState::new(status, now));
++        return true;
++    };
++    let was_terminal = agent.lifecycle.is_terminal();
++    let changed = agent.lifecycle != status || agent.open_approval.is_some();
++    agent.lifecycle = status;
++    agent.open_approval = None;
++    agent.terminal_stats = None;
++    if was_terminal {
++        agent.recent.clear();
++        agent.animation_started_at = now;
++        agent.turn_started_at = None;
++        agent.tool_uses_started = 0;
++        agent.tokens_at_turn_start = agent.total_tokens;
++    }
++    if status != LiveAgentStatus::Starting {
++        begin_turn_if_needed(agent, now);
++    }
++    changed
++}
++
++#[cfg(test)]
++mod tests {
++    use super::super::agent_status_feed::WorkActivityKind;
++    use super::*;
++
++    fn work(id: &str, label: &str, status: ActivityStatus) -> WorkActivityInput {
++        WorkActivityInput {
++            id: id.to_string(),
++            kind: WorkActivityKind::Command,
++            label: label.to_string(),
++            status,
++        }
++    }
++
++    fn ids(state: &SubagentLiveState, thread_id: ThreadId) -> Vec<&str> {
++        state
++            .agent(thread_id)
++            .expect("agent exists")
++            .recent()
++            .iter()
++            .map(|activity| activity.id.as_str())
++            .collect()
++    }
++
++    #[test]
++    fn r01_r04_capacity_is_three_and_order_is_oldest_to_newest() {
++        let thread_id = ThreadId::new();
++        let mut state = SubagentLiveState::default();
++        let mut observed = Vec::new();
++
++        for id in ["1", "2", "3"] {
++            assert_eq!(
++                state.reduce_activity(thread_id, work(id, id, ActivityStatus::Running)),
++                LiveStateChange::Changed
++            );
++            observed.push(
++                ids(&state, thread_id)
++                    .into_iter()
++                    .map(str::to_owned)
++                    .collect::<Vec<_>>(),
++            );
++        }
++        assert_eq!(observed, [vec!["1"], vec!["1", "2"], vec!["1", "2", "3"]]);
++
++        state.reduce_activity(thread_id, work("4", "4", ActivityStatus::Running));
++        assert_eq!(ids(&state, thread_id), ["2", "3", "4"]);
++    }
++
++    #[test]
++    fn r05_r10_same_id_is_monotonic_across_duplicates_and_out_of_order_events() {
++        let thread_id = ThreadId::new();
++        let mut state = SubagentLiveState::default();
++
++        state.reduce_activity(thread_id, work("x", "run x", ActivityStatus::Running));
++        assert_eq!(
++            state.reduce_activity(thread_id, work("x", "run x", ActivityStatus::Running)),
++            LiveStateChange::Unchanged
++        );
++        state.reduce_activity(thread_id, work("x", "run x", ActivityStatus::Succeeded));
++        assert_eq!(ids(&state, thread_id), ["x"]);
++        assert_eq!(
++            state.reduce_activity(thread_id, work("x", "run x", ActivityStatus::Succeeded)),
++            LiveStateChange::Unchanged
++        );
++        assert_eq!(
++            state.reduce_activity(thread_id, work("x", "run x", ActivityStatus::Failed)),
++            LiveStateChange::Unchanged
++        );
++        assert_eq!(
++            state.reduce_activity(thread_id, work("x", "late", ActivityStatus::Running)),
++            LiveStateChange::Unchanged
++        );
++
++        state.reduce_activity(thread_id, work("y", "done first", ActivityStatus::Failed));
++        state.reduce_activity(thread_id, work("y", "late start", ActivityStatus::Running));
++        let y = state
++            .agent(thread_id)
++            .unwrap()
++            .recent()
++            .iter()
++            .find(|activity| activity.id == "y")
++            .unwrap();
++        assert_eq!(y.status, ActivityStatus::Failed);
++        assert_eq!(y.label, "done first");
++        assert_eq!(state.telemetry().duplicate_events, 4);
++        assert_eq!(state.telemetry().conflicting_terminal_events, 1);
++    }
++
++    #[test]
++    fn duplicate_turn_start_does_not_clear_live_activity() {
++        let thread_id = ThreadId::new();
++        let now = Instant::now();
++        let mut state = SubagentLiveState::default();
++
++        assert_eq!(state.start_turn(thread_id, now), LiveStateChange::Changed);
++        state.reduce_activity(thread_id, work("x", "run x", ActivityStatus::Running));
++        assert_eq!(
++            state.start_turn(thread_id, now + Duration::from_secs(1)),
++            LiveStateChange::Unchanged
++        );
++        assert_eq!(ids(&state, thread_id), ["x"]);
++    }
++
++    #[test]
++    fn spawn_start_then_turn_start_transitions_without_resetting_orbit() {
++        let thread_id = ThreadId::new();
++        let spawned_at = Instant::now();
++        let turn_started_at = spawned_at + Duration::from_secs(1);
++        let mut state = SubagentLiveState::default();
++
++        assert_eq!(
++            state.ensure_started(thread_id, spawned_at),
++            LiveStateChange::Changed
++        );
++        let duplicate_events = state.telemetry().duplicate_events;
++        assert_eq!(
++            state.start_turn(thread_id, turn_started_at),
++            LiveStateChange::Changed
++        );
++
++        let agent = state.agent(thread_id).unwrap();
++        assert_eq!(agent.lifecycle, LiveAgentStatus::Running);
++        assert_eq!(agent.animation_started_at, spawned_at);
++        assert_eq!(agent.turn_started_at, Some(turn_started_at));
++        assert!(agent.recent.is_empty());
++        assert_eq!(state.telemetry().duplicate_events, duplicate_events);
++    }
++
++    #[test]
++    fn terminal_stats_are_scoped_to_the_current_turn() {
++        let thread_id = ThreadId::new();
++        let first_started_at = Instant::now();
++        let second_started_at = first_started_at + Duration::from_secs(10);
++        let mut state = SubagentLiveState::default();
++
++        state.start_turn(thread_id, first_started_at);
++        state.set_total_tokens(thread_id, 1_000, first_started_at);
++        state.finish_turn(
++            thread_id,
++            &completed_turn(Some(1_000)),
++            first_started_at + Duration::from_secs(1),
++        );
++
++        state.start_turn(thread_id, second_started_at);
++        state.reduce_activity_at(
++            thread_id,
++            work("a", "cargo check", ActivityStatus::Running),
++            second_started_at,
++        );
++        state.reduce_activity_at(
++            thread_id,
++            work("b", "cargo test", ActivityStatus::Running),
++            second_started_at,
++        );
++        state.set_total_tokens(thread_id, 1_250, second_started_at);
++        state.finish_turn(
++            thread_id,
++            &completed_turn(Some(8_700)),
++            second_started_at + Duration::from_millis(8_700),
++        );
++
++        assert_eq!(
++            state.agent(thread_id).unwrap().terminal_stats,
++            Some(LiveAgentStats {
++                tool_uses: 2,
++                tokens: 250,
++                duration: Duration::from_millis(8_700),
++            })
++        );
++
++        state.set_total_tokens(thread_id, 1_300, second_started_at);
++        assert_eq!(
++            state
++                .agent(thread_id)
++                .unwrap()
++                .terminal_stats
++                .unwrap()
++                .tokens,
++            300
++        );
++    }
++
++    fn completed_turn(duration_ms: Option<i64>) -> codex_app_server_protocol::Turn {
++        codex_app_server_protocol::Turn {
++            id: "turn".to_string(),
++            items: Vec::new(),
++            items_view: Default::default(),
++            status: TurnStatus::Completed,
++            error: None,
++            started_at: None,
++            completed_at: None,
++            duration_ms,
++        }
++    }
++
++    #[test]
++    fn spawn_start_creates_an_empty_starting_row_without_regressing_newer_state() {
++        let thread_id = ThreadId::new();
++        let now = Instant::now();
++        let mut state = SubagentLiveState::default();
++
++        assert_eq!(
++            state.ensure_started(thread_id, now),
++            LiveStateChange::Changed
++        );
++        let agent = state.agent(thread_id).expect("spawn row");
++        assert_eq!(agent.lifecycle(), LiveAgentStatus::Starting);
++        assert!(agent.recent().is_empty());
++
++        state.set_agent_status(thread_id, LiveAgentStatus::Running, now);
++        assert_eq!(
++            state.ensure_started(thread_id, now),
++            LiveStateChange::Unchanged
++        );
++        assert_eq!(
++            state.agent(thread_id).unwrap().lifecycle(),
++            LiveAgentStatus::Running
++        );
++    }
++
++    #[test]
++    fn r11_excluded_summaries_do_not_create_agents_or_consume_slots() {
++        let thread_id = ThreadId::new();
++        let mut state = SubagentLiveState::default();
++
++        assert_eq!(
++            state.reduce_summary(
++                thread_id,
++                Some(ActivitySummary::Other("assistant prose".to_string()))
++            ),
++            LiveStateChange::Unchanged
++        );
++        assert!(state.agent(thread_id).is_none());
++        assert_eq!(state.retained_activity_count(), 0);
++    }
++
++    #[test]
++    fn r12_r14_approval_projection_updates_only_existing_rows_and_never_invents_success() {
++        let thread_id = ThreadId::new();
++        let mut state = SubagentLiveState::default();
++        state.reduce_activity(thread_id, work("x", "run x", ActivityStatus::Running));
++
++        state.mark_waiting_approval(thread_id, "req-1".to_string(), Some("x".to_string()));
++        let agent = state.agent(thread_id).unwrap();
++        assert_eq!(agent.lifecycle(), LiveAgentStatus::WaitingApproval);
++        assert_eq!(agent.recent()[0].status, ActivityStatus::WaitingApproval);
++
++        state.resolve_approval(thread_id, "req-1");
++        let agent = state.agent(thread_id).unwrap();
++        assert_eq!(agent.lifecycle(), LiveAgentStatus::Running);
++        assert_eq!(agent.recent()[0].status, ActivityStatus::Running);
++
++        state.mark_waiting_approval(
++            thread_id,
++            "req-2".to_string(),
++            Some("not-recent".to_string()),
++        );
++        assert_eq!(state.agent(thread_id).unwrap().recent().len(), 1);
++        state.resolve_approval(thread_id, "req-2");
++        assert_eq!(
++            state.agent(thread_id).unwrap().recent()[0].status,
++            ActivityStatus::Running
++        );
++    }
++
++    #[test]
++    fn r15_r16_terminal_rows_remain_until_the_whole_batch_is_archived() {
++        let thread_id = ThreadId::new();
++        let failed_thread_id = ThreadId::new();
++        let now = Instant::now();
++        let mut state = SubagentLiveState::default();
++
++        state.reduce_activity(
++            thread_id,
++            work("test", "cargo test", ActivityStatus::Failed),
++        );
++        assert_eq!(
++            state.agent(thread_id).unwrap().lifecycle(),
++            LiveAgentStatus::Running
++        );
++
++        assert_eq!(
++            state.set_agent_status(thread_id, LiveAgentStatus::Completed, now),
++            LiveStateChange::Changed
++        );
++        assert!(
++            state
++                .agent(thread_id)
++                .unwrap()
++                .is_renderable_at(now + Duration::from_secs(60))
++        );
++        assert!(state.agent(thread_id).unwrap().recent().is_empty());
++        assert!(state.take_terminal_batch().is_some());
++
++        state.ensure_started(thread_id, now);
++        assert_eq!(
++            state.set_agent_status(failed_thread_id, LiveAgentStatus::Failed, now),
++            LiveStateChange::Changed
++        );
++        assert!(state.agent(failed_thread_id).unwrap().is_renderable_at(now));
++        assert!(state.take_terminal_batch().is_none());
++        state.set_agent_status(thread_id, LiveAgentStatus::Completed, now);
++        let batch = state.take_terminal_batch().expect("all terminal batch");
++        assert_eq!(batch.len(), 2);
++        assert!(!state.has_renderable_rows_at(now));
++        assert_eq!(
++            state.set_agent_status(failed_thread_id, LiveAgentStatus::Failed, now),
++            LiveStateChange::Unchanged
++        );
++    }
++
++    #[test]
++    fn r17_r19_identity_is_id_plus_thread_and_changed_text_does_not_reorder() {
++        let a = ThreadId::new();
++        let b = ThreadId::new();
++        let mut state = SubagentLiveState::default();
++
++        state.reduce_activity(a, work("1", "same", ActivityStatus::Running));
++        state.reduce_activity(a, work("2", "same", ActivityStatus::Running));
++        state.reduce_activity(a, work("1", "updated", ActivityStatus::Running));
++        assert_eq!(ids(&state, a), ["1", "2"]);
++        assert_eq!(state.agent(a).unwrap().recent()[0].label, "updated");
++
++        state.reduce_activity(b, work("1", "other thread", ActivityStatus::Failed));
++        assert_eq!(
++            state.agent(a).unwrap().recent()[0].status,
++            ActivityStatus::Running
++        );
++        assert_eq!(
++            state.agent(b).unwrap().recent()[0].status,
++            ActivityStatus::Failed
++        );
++    }
++
++    #[test]
++    fn r20_eight_by_one_hundred_events_retain_at_most_twenty_four_rows() {
++        let threads = (0..8).map(|_| ThreadId::new()).collect::<Vec<_>>();
++        let mut state = SubagentLiveState::default();
++        let started_at = Instant::now();
++
++        for (thread_index, thread_id) in threads.iter().copied().enumerate() {
++            for item_index in 0..25 {
++                let id = format!("{thread_index}-{item_index}");
++                for status in [
++                    ActivityStatus::Running,
++                    ActivityStatus::Running,
++                    ActivityStatus::Succeeded,
++                    ActivityStatus::Running,
++                ] {
++                    state.reduce_activity(thread_id, work(&id, "bounded", status));
++                }
++            }
++            assert_eq!(state.agent(thread_id).unwrap().recent().len(), 3);
++        }
++        let elapsed = started_at.elapsed();
++
++        assert_eq!(state.telemetry().events_reduced, 800);
++        assert_eq!(state.telemetry().duplicate_events, 400);
++        assert_eq!(state.telemetry().conflicting_terminal_events, 0);
++        assert_eq!(state.retained_activity_count(), 24);
++        assert!(
++            elapsed < Duration::from_secs(1),
++            "800 reducer events took {elapsed:?}"
++        );
++    }
++
++    #[test]
++    fn first_agent_terminal_wins_until_authoritative_hydration_starts_a_new_epoch() {
++        let thread_id = ThreadId::new();
++        let now = Instant::now();
++        let mut state = SubagentLiveState::default();
++
++        state.set_agent_status(thread_id, LiveAgentStatus::Cancelled, now);
++        assert_eq!(
++            state.set_agent_status(thread_id, LiveAgentStatus::Failed, now),
++            LiveStateChange::Unchanged
++        );
++        assert_eq!(
++            state.agent(thread_id).unwrap().lifecycle(),
++            LiveAgentStatus::Cancelled
++        );
++        assert_eq!(state.telemetry().conflicting_terminal_events, 1);
++
++        state.hydrate_live_agent(thread_id, LiveAgentStatus::Running);
++        assert_eq!(
++            state.agent(thread_id).unwrap().lifecycle(),
++            LiveAgentStatus::Running
++        );
++    }
++
++    #[test]
++    fn reconciliation_removes_ghosts_and_historical_empty_sessions_stay_empty() {
++        let live = ThreadId::new();
++        let ghost = ThreadId::new();
++        let hydrated = ThreadId::new();
++        let mut state = SubagentLiveState::default();
++        state.reduce_activity(live, work("a", "live", ActivityStatus::Running));
++        state.reduce_activity(ghost, work("b", "ghost", ActivityStatus::Running));
++
++        state.reconcile_live_agents([
++            (live, LiveAgentStatus::Waiting),
++            (hydrated, LiveAgentStatus::Starting),
++        ]);
++        assert_eq!(
++            state.agent(live).unwrap().lifecycle(),
++            LiveAgentStatus::Waiting
++        );
++        assert!(state.agent(ghost).is_none());
++        assert_eq!(
++            state.agent(hydrated).unwrap().lifecycle(),
++            LiveAgentStatus::Starting
++        );
++
++        state.reconcile_live_agents([]);
++        assert!(!state.has_renderable_rows_at(Instant::now()));
++        assert_eq!(state.retained_activity_count(), 0);
++        assert_eq!(state.reset(), LiveStateChange::Unchanged);
++    }
++}
+diff --git a/codex-rs/tui/src/csa_graphics.rs b/codex-rs/tui/src/csa_graphics.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..188172148e96d45621fa97a42afa7d5454b2438f
+--- /dev/null
++++ b/codex-rs/tui/src/csa_graphics.rs
+@@ -0,0 +1,432 @@
++//! Terminal graphics pass for CSA's one-cell sub-agent Orbit.
++
++use std::collections::HashMap;
++use std::io;
++use std::io::Write;
++use std::time::Instant;
++
++use codex_protocol::ThreadId;
++use crossterm::cursor::MoveTo;
++use crossterm::cursor::RestorePosition;
++use crossterm::cursor::SavePosition;
++use crossterm::queue;
++use ratatui::backend::Backend;
++use ratatui::layout::Position;
++use ratatui::layout::Size;
++
++use crate::csa_orbit::CsaOrbitFrame;
++use crate::csa_orbit::CsaOrbitFrameIndex;
++use crate::csa_orbit::csa_orbit_frame_cache;
++use crate::csa_orbit::rasterize_csa_orbit;
++use crate::pets::image_protocol::ImageProtocol;
++
++const CSA_KITTY_IMAGE_ID_START: u32 = 0x4353_4100;
++const CSA_KITTY_FALLBACK_RASTER_SIZE: u16 = 12;
++const CSA_KITTY_OUTER_SPREAD: u16 = 1;
++const CSA_SIXEL_Y_OFFSET: u16 = 2;
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) struct CsaOrbitPlacement {
++    pub(crate) thread_id: ThreadId,
++    pub(crate) x: u16,
++    pub(crate) y: u16,
++    pub(crate) animation_started_at: Instant,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++struct CsaGraphicsKey {
++    protocol: ImageProtocol,
++    width: u16,
++    height: u16,
++    foreground: (u8, u8, u8),
++    background: (u8, u8, u8),
++}
++
++#[derive(Debug)]
++enum CsaEncodedFrame {
++    Kitty(String),
++    Sixel(Vec<u8>),
++}
++
++#[derive(Debug)]
++struct CsaEncodedFrameCache {
++    key: CsaGraphicsKey,
++    warmup: Vec<CsaEncodedFrame>,
++    steady: Vec<CsaEncodedFrame>,
++}
++
++impl CsaEncodedFrameCache {
++    fn new(key: CsaGraphicsKey) -> io::Result<Self> {
++        let source = csa_orbit_frame_cache();
++        Ok(Self {
++            key,
++            warmup: source
++                .warmup()
++                .iter()
++                .map(|frame| encode_csa_frame(key, frame))
++                .collect::<io::Result<_>>()?,
++            steady: source
++                .steady()
++                .iter()
++                .map(|frame| encode_csa_frame(key, frame))
++                .collect::<io::Result<_>>()?,
++        })
++    }
++
++    fn frame_at(&self, started_at: Instant, now: Instant) -> &CsaEncodedFrame {
++        match csa_orbit_frame_cache().frame_index_at(started_at, now) {
++            CsaOrbitFrameIndex::Warmup(index) => &self.warmup[index],
++            CsaOrbitFrameIndex::Steady(index) => &self.steady[index],
++        }
++    }
++}
++
++#[derive(Clone, Debug)]
++struct CsaActivePlacement {
++    protocol: ImageProtocol,
++    image_id: u32,
++    x: u16,
++    y: u16,
++}
++
++#[derive(Debug)]
++pub(crate) struct CsaGraphicsState {
++    protocol: Option<ImageProtocol>,
++    disabled: bool,
++    screen_size: Option<Size>,
++    cell_pixels: Option<(u16, u16)>,
++    cache: Option<CsaEncodedFrameCache>,
++    image_ids: HashMap<ThreadId, u32>,
++    next_image_id: u32,
++    active: Vec<CsaActivePlacement>,
++}
++
++impl Default for CsaGraphicsState {
++    fn default() -> Self {
++        let protocol = match crate::pets::image_protocol::detect_pet_image_support().protocol() {
++            Some(ImageProtocol::Kitty) => Some(ImageProtocol::Kitty),
++            Some(ImageProtocol::Sixel) => Some(ImageProtocol::Sixel),
++            Some(ImageProtocol::KittyLocalFile) | None => None,
++        };
++        Self {
++            protocol,
++            disabled: false,
++            screen_size: None,
++            cell_pixels: None,
++            cache: None,
++            image_ids: HashMap::new(),
++            next_image_id: CSA_KITTY_IMAGE_ID_START,
++            active: Vec::new(),
++        }
++    }
++}
++
++impl CsaGraphicsState {
++    pub(crate) fn active_positions(&self) -> Vec<Position> {
++        self.active
++            .iter()
++            .map(|placement| Position::new(placement.x, placement.y))
++            .collect()
++    }
++
++    pub(crate) fn prepare<B>(&mut self, backend: &mut B, screen_size: Size) -> io::Result<bool>
++    where
++        B: Backend<Error = io::Error>,
++    {
++        if self.disabled {
++            return Ok(false);
++        }
++        let Some(protocol) = self.protocol else {
++            return Ok(false);
++        };
++        let Some(foreground) = crate::terminal_palette::default_fg() else {
++            return Ok(false);
++        };
++        let Some(background) = crate::terminal_palette::default_bg() else {
++            return Ok(false);
++        };
++
++        if self.screen_size != Some(screen_size) {
++            self.screen_size = Some(screen_size);
++            self.cell_pixels = cell_pixels(backend, protocol);
++            self.cache = None;
++        }
++        let Some((width, height)) = self.cell_pixels else {
++            return Ok(false);
++        };
++        let key = CsaGraphicsKey {
++            protocol,
++            width,
++            height,
++            foreground,
++            background,
++        };
++        if self.cache.as_ref().is_none_or(|cache| cache.key != key) {
++            self.cache = Some(CsaEncodedFrameCache::new(key)?);
++        }
++        Ok(true)
++    }
++
++    pub(crate) fn clear(&mut self, writer: &mut impl Write) -> io::Result<()> {
++        if self.active.is_empty() {
++            return Ok(());
++        }
++
++        let needs_cursor = self
++            .active
++            .iter()
++            .any(|placement| placement.protocol == ImageProtocol::Sixel);
++        if needs_cursor {
++            queue!(writer, SavePosition)?;
++        }
++        for placement in &self.active {
++            match placement.protocol {
++                ImageProtocol::Kitty => writer.write_all(
++                    crate::pets::image_protocol::kitty_delete_image(placement.image_id).as_bytes(),
++                )?,
++                ImageProtocol::Sixel => {
++                    queue!(writer, MoveTo(placement.x, placement.y))?;
++                    writer.write_all(b" ")?;
++                }
++                ImageProtocol::KittyLocalFile => {}
++            }
++        }
++        if needs_cursor {
++            queue!(writer, RestorePosition)?;
++        }
++        self.active.clear();
++        writer.flush()
++    }
++
++    pub(crate) fn draw(
++        &mut self,
++        writer: &mut impl Write,
++        placements: &[CsaOrbitPlacement],
++        now: Instant,
++    ) -> io::Result<()> {
++        let Some(cache) = self.cache.as_ref() else {
++            return Ok(());
++        };
++        if placements.is_empty() {
++            return Ok(());
++        }
++
++        queue!(writer, SavePosition)?;
++        let image_ids = &mut self.image_ids;
++        let next_image_id = &mut self.next_image_id;
++        let active = &mut self.active;
++        for placement in placements {
++            let image_id = match image_ids.get(&placement.thread_id).copied() {
++                Some(image_id) => image_id,
++                None => {
++                    let image_id = *next_image_id;
++                    *next_image_id = next_image_id
++                        .checked_add(1)
++                        .ok_or_else(|| io::Error::other("CSA Kitty image IDs exhausted"))?;
++                    image_ids.insert(placement.thread_id, image_id);
++                    image_id
++                }
++            };
++            queue!(writer, MoveTo(placement.x, placement.y))?;
++            match cache.frame_at(placement.animation_started_at, now) {
++                CsaEncodedFrame::Kitty(payload) => writer.write_all(
++                    crate::pets::image_protocol::kitty_transmit_csa_rgba_with_id(
++                        payload,
++                        cache.key.width,
++                        cache.key.height,
++                        image_id,
++                    )
++                    .as_bytes(),
++                )?,
++                CsaEncodedFrame::Sixel(payload) => writer.write_all(payload)?,
++            }
++            active.push(CsaActivePlacement {
++                protocol: cache.key.protocol,
++                image_id,
++                x: placement.x,
++                y: placement.y,
++            });
++        }
++        queue!(writer, RestorePosition)?;
++        writer.flush()
++    }
++
++    pub(crate) fn disable(&mut self) {
++        self.disabled = true;
++        self.cache = None;
++    }
++
++    #[cfg(test)]
++    fn prepared_for_test(key: CsaGraphicsKey) -> Self {
++        Self {
++            protocol: Some(key.protocol),
++            disabled: false,
++            screen_size: Some(Size::new(80, 24)),
++            cell_pixels: Some((key.width, key.height)),
++            cache: Some(CsaEncodedFrameCache::new(key).unwrap()),
++            image_ids: HashMap::new(),
++            next_image_id: CSA_KITTY_IMAGE_ID_START,
++            active: Vec::new(),
++        }
++    }
++}
++
++fn cell_pixels<B>(backend: &mut B, protocol: ImageProtocol) -> Option<(u16, u16)>
++where
++    B: Backend<Error = io::Error>,
++{
++    let measured = backend.window_size().ok().and_then(|window| {
++        let columns = window.columns_rows.width;
++        let rows = window.columns_rows.height;
++        (columns > 0 && rows > 0 && window.pixels.width > 0 && window.pixels.height > 0).then(
++            || {
++                (
++                    (window.pixels.width / columns).max(1),
++                    (window.pixels.height / rows).max(1),
++                )
++            },
++        )
++    });
++    let windows_console = windows_console_cell_pixels();
++    match protocol {
++        ImageProtocol::Kitty => measured.or(Some((
++            CSA_KITTY_FALLBACK_RASTER_SIZE,
++            CSA_KITTY_FALLBACK_RASTER_SIZE,
++        ))),
++        ImageProtocol::Sixel => measured.or(windows_console),
++        ImageProtocol::KittyLocalFile => None,
++    }
++}
++
++#[cfg(windows)]
++fn windows_console_cell_pixels() -> Option<(u16, u16)> {
++    use windows_sys::Win32::Foundation::INVALID_HANDLE_VALUE;
++    use windows_sys::Win32::System::Console::CONSOLE_FONT_INFOEX;
++    use windows_sys::Win32::System::Console::GetCurrentConsoleFontEx;
++    use windows_sys::Win32::System::Console::GetStdHandle;
++    use windows_sys::Win32::System::Console::STD_OUTPUT_HANDLE;
++
++    let output = unsafe { GetStdHandle(STD_OUTPUT_HANDLE) };
++    if output == 0 || output == INVALID_HANDLE_VALUE {
++        return None;
++    }
++    let mut info = unsafe { std::mem::zeroed::<CONSOLE_FONT_INFOEX>() };
++    info.cbSize = std::mem::size_of::<CONSOLE_FONT_INFOEX>() as u32;
++    if unsafe { GetCurrentConsoleFontEx(output, 0, &mut info) } == 0 {
++        return None;
++    }
++    Some((
++        u16::try_from(info.dwFontSize.X)
++            .ok()
++            .filter(|value| *value > 0)?,
++        u16::try_from(info.dwFontSize.Y)
++            .ok()
++            .filter(|value| *value > 0)?,
++    ))
++}
++
++#[cfg(not(windows))]
++fn windows_console_cell_pixels() -> Option<(u16, u16)> {
++    None
++}
++
++fn encode_csa_frame(key: CsaGraphicsKey, frame: &CsaOrbitFrame) -> io::Result<CsaEncodedFrame> {
++    let (outer_spread, shift_up) = match key.protocol {
++        ImageProtocol::Kitty => (CSA_KITTY_OUTER_SPREAD, 0),
++        ImageProtocol::Sixel => (0, CSA_SIXEL_Y_OFFSET),
++        ImageProtocol::KittyLocalFile => (0, 0),
++    };
++    let raster = rasterize_csa_orbit(
++        frame.intensities,
++        key.width,
++        key.height,
++        key.foreground,
++        key.background,
++        outer_spread,
++        shift_up,
++    );
++    match key.protocol {
++        ImageProtocol::Kitty => Ok(CsaEncodedFrame::Kitty(
++            crate::pets::image_protocol::kitty_encode_csa_rgba(&raster.rgba),
++        )),
++        ImageProtocol::Sixel => crate::pets::sixel::encode_rgba(
++            &raster.rgba,
++            u32::from(raster.width),
++            u32::from(raster.height),
++        )
++        .map(CsaEncodedFrame::Sixel)
++        .map_err(io::Error::other),
++        ImageProtocol::KittyLocalFile => Err(io::Error::other(
++            "CSA Orbit does not support Kitty local-file graphics",
++        )),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn test_key(protocol: ImageProtocol) -> CsaGraphicsKey {
++        CsaGraphicsKey {
++            protocol,
++            width: 12,
++            height: 12,
++            foreground: (255, 255, 255),
++            background: (0, 0, 0),
++        }
++    }
++
++    #[test]
++    fn shared_cache_draws_and_clears_multiple_agents() {
++        let mut state = CsaGraphicsState::prepared_for_test(test_key(ImageProtocol::Kitty));
++        let started_at = Instant::now();
++        let placements = [
++            CsaOrbitPlacement {
++                thread_id: ThreadId::new(),
++                x: 0,
++                y: 1,
++                animation_started_at: started_at,
++            },
++            CsaOrbitPlacement {
++                thread_id: ThreadId::new(),
++                x: 0,
++                y: 3,
++                animation_started_at: started_at - std::time::Duration::from_millis(110),
++            },
++            CsaOrbitPlacement {
++                thread_id: ThreadId::new(),
++                x: 0,
++                y: 5,
++                animation_started_at: started_at - std::time::Duration::from_millis(220),
++            },
++        ];
++        let mut output = Vec::new();
++
++        state.draw(&mut output, &placements, started_at).unwrap();
++        assert_eq!(state.active.len(), 3);
++        assert_eq!(
++            state.active_positions(),
++            vec![
++                Position::new(0, 1),
++                Position::new(0, 3),
++                Position::new(0, 5)
++            ]
++        );
++        assert_eq!(state.image_ids.len(), 3);
++        assert_eq!(state.cache.as_ref().unwrap().warmup.len(), 20);
++        assert_eq!(state.cache.as_ref().unwrap().steady.len(), 24);
++
++        state.clear(&mut output).unwrap();
++        assert!(state.active.is_empty());
++        let output = String::from_utf8(output).unwrap();
++        assert_eq!(output.matches("a=d,d=I").count(), 3);
++    }
++
++    #[test]
++    fn sixel_cache_encodes_the_same_shared_samples() {
++        let cache = CsaEncodedFrameCache::new(test_key(ImageProtocol::Sixel)).unwrap();
++        assert_eq!(cache.warmup.len(), csa_orbit_frame_cache().warmup().len());
++        assert_eq!(cache.steady.len(), csa_orbit_frame_cache().steady().len());
++        assert!(matches!(cache.steady[0], CsaEncodedFrame::Sixel(_)));
++    }
++}
+diff --git a/codex-rs/tui/src/csa_orbit.rs b/codex-rs/tui/src/csa_orbit.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..59da3ca4dbef073ef784032f51c579a36cc44ce1
+--- /dev/null
++++ b/codex-rs/tui/src/csa_orbit.rs
+@@ -0,0 +1,269 @@
++//! CSA's one-cell raster form of the existing BeautifulUI Orbit motion model.
++
++use std::sync::OnceLock;
++use std::time::Duration;
++use std::time::Instant;
++
++use crate::motion::ORBIT_DURATION;
++use crate::motion::ORBIT_PIXEL_STAGGER;
++use crate::motion::ORBIT_RENDER_INTERVAL;
++use crate::motion::orbit_intensities_at;
++
++const CSA_ORBIT_WARMUP: Duration = ORBIT_PIXEL_STAGGER.saturating_mul(7);
++
++#[derive(Clone, Debug, PartialEq)]
++pub(crate) struct CsaOrbitFrame {
++    pub(crate) intensities: [f32; 9],
++}
++
++#[derive(Clone, Debug, PartialEq, Eq)]
++pub(crate) struct CsaOrbitRaster {
++    pub(crate) width: u16,
++    pub(crate) height: u16,
++    pub(crate) rgba: Vec<u8>,
++}
++
++#[derive(Debug)]
++pub(crate) struct CsaOrbitFrameCache {
++    warmup: Vec<CsaOrbitFrame>,
++    steady: Vec<CsaOrbitFrame>,
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum CsaOrbitFrameIndex {
++    Warmup(usize),
++    Steady(usize),
++}
++
++impl CsaOrbitFrameCache {
++    fn new() -> Self {
++        let origin = Instant::now();
++        Self {
++            warmup: sampled_frames(origin, CSA_ORBIT_WARMUP, Duration::ZERO),
++            steady: sampled_frames(origin, ORBIT_DURATION, CSA_ORBIT_WARMUP),
++        }
++    }
++
++    pub(crate) fn warmup(&self) -> &[CsaOrbitFrame] {
++        &self.warmup
++    }
++
++    pub(crate) fn steady(&self) -> &[CsaOrbitFrame] {
++        &self.steady
++    }
++
++    pub(crate) fn frame_index_at(&self, started_at: Instant, now: Instant) -> CsaOrbitFrameIndex {
++        let elapsed = now.saturating_duration_since(started_at);
++        if elapsed < CSA_ORBIT_WARMUP {
++            return CsaOrbitFrameIndex::Warmup(sample_index(elapsed, self.warmup.len()));
++        }
++
++        let phase_ms = (elapsed - CSA_ORBIT_WARMUP).as_millis() % ORBIT_DURATION.as_millis();
++        CsaOrbitFrameIndex::Steady(sample_index(
++            Duration::from_millis(phase_ms as u64),
++            self.steady.len(),
++        ))
++    }
++}
++
++pub(crate) fn csa_orbit_frame_cache() -> &'static CsaOrbitFrameCache {
++    static CACHE: OnceLock<CsaOrbitFrameCache> = OnceLock::new();
++    CACHE.get_or_init(CsaOrbitFrameCache::new)
++}
++
++pub(crate) fn rasterize_csa_orbit(
++    intensities: [f32; 9],
++    width: u16,
++    height: u16,
++    foreground: (u8, u8, u8),
++    background: (u8, u8, u8),
++    outer_spread: u16,
++    shift_up: u16,
++) -> CsaOrbitRaster {
++    let width = width.max(1);
++    let height = height.max(1);
++    let mut rgba = vec![0; usize::from(width) * usize::from(height) * 4];
++
++    let side = width.min(height);
++    let x_offset = (width - side) / 2;
++    let y_offset = (height - side) / 2;
++    let point_side = ((side / 5).max(1) | 1).saturating_sub(1).max(1);
++    let point_offset = point_side / 2;
++    for row in 0..3u16 {
++        for column in 0..3u16 {
++            let logical_index = usize::from(row * 3 + column);
++            if logical_index == 4 {
++                continue;
++            }
++            let intensity = intensities[logical_index].clamp(0.0, 1.0);
++            if intensity == 0.0 {
++                continue;
++            }
++            let color = blend_rgb(background, foreground, intensity);
++            let center_x = (x_offset + ((2 * column + 1) * side) / 6)
++                .saturating_add(column * outer_spread)
++                .saturating_sub(outer_spread);
++            let center_y = (y_offset + ((2 * row + 1) * side) / 6)
++                .saturating_add(row * outer_spread)
++                .saturating_sub(outer_spread);
++            let start_x = center_x
++                .saturating_sub(point_offset)
++                .min(width - point_side);
++            let start_y = center_y
++                .saturating_sub(point_offset)
++                .min(height - point_side);
++            for y in start_y..start_y + point_side {
++                for x in start_x..start_x + point_side {
++                    let offset = (usize::from(y) * usize::from(width) + usize::from(x)) * 4;
++                    rgba[offset..offset + 4].copy_from_slice(&[color.0, color.1, color.2, u8::MAX]);
++                }
++            }
++        }
++    }
++
++    let shift_rows = usize::from(shift_up.min(height));
++    if shift_rows > 0 {
++        let row_bytes = usize::from(width) * 4;
++        rgba.copy_within(shift_rows * row_bytes.., 0);
++        rgba[(usize::from(height) - shift_rows) * row_bytes..].fill(0);
++    }
++
++    CsaOrbitRaster {
++        width,
++        height,
++        rgba,
++    }
++}
++
++fn sampled_frames(origin: Instant, duration: Duration, offset: Duration) -> Vec<CsaOrbitFrame> {
++    let count = duration
++        .as_millis()
++        .div_ceil(ORBIT_RENDER_INTERVAL.as_millis()) as usize;
++    (0..count)
++        .map(|index| {
++            let elapsed = offset + ORBIT_RENDER_INTERVAL.saturating_mul(index as u32);
++            CsaOrbitFrame {
++                intensities: orbit_intensities_at(origin, origin + elapsed),
++            }
++        })
++        .collect()
++}
++
++fn sample_index(elapsed: Duration, frame_count: usize) -> usize {
++    ((elapsed.as_millis() / ORBIT_RENDER_INTERVAL.as_millis()) as usize)
++        .min(frame_count.saturating_sub(1))
++}
++
++fn blend_rgb(from: (u8, u8, u8), to: (u8, u8, u8), intensity: f32) -> (u8, u8, u8) {
++    let blend = |from: u8, to: u8| {
++        (f32::from(from) + (f32::from(to) - f32::from(from)) * intensity).round() as u8
++    };
++    (
++        blend(from.0, to.0),
++        blend(from.1, to.1),
++        blend(from.2, to.2),
++    )
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++
++    fn pixel_at(raster: &CsaOrbitRaster, x: u16, y: u16) -> [u8; 4] {
++        let offset = (usize::from(y) * usize::from(raster.width) + usize::from(x)) * 4;
++        raster.rgba[offset..offset + 4].try_into().unwrap()
++    }
++
++    fn logical_pixel(raster: &CsaOrbitRaster, row: u16, column: u16) -> [u8; 4] {
++        let side = raster.width.min(raster.height);
++        let x = (raster.width - side) / 2 + ((2 * column + 1) * side) / 6;
++        let y = (raster.height - side) / 2 + ((2 * row + 1) * side) / 6;
++        pixel_at(raster, x, y)
++    }
++
++    #[test]
++    fn raster_preserves_all_perimeter_inputs_and_blank_center() {
++        let intensities = [0.1, 0.2, 0.3, 0.4, 1.0, 0.5, 0.6, 0.7, 0.8];
++        let raster = rasterize_csa_orbit(intensities, 12, 12, (255, 255, 255), (0, 0, 0), 0, 0);
++
++        for row in 0..3 {
++            for column in 0..3 {
++                let pixel = logical_pixel(&raster, row, column);
++                if (row, column) == (1, 1) {
++                    assert_eq!(pixel, [0, 0, 0, 0]);
++                } else {
++                    let expected =
++                        (intensities[usize::from(row * 3 + column)] * 255.0).round() as u8;
++                    assert_eq!(pixel, [expected, expected, expected, 255]);
++                }
++            }
++        }
++    }
++
++    #[test]
++    fn raster_uses_transparent_square_point_geometry() {
++        let raster = rasterize_csa_orbit([1.0; 9], 12, 12, (255, 255, 255), (0, 0, 0), 0, 0);
++        assert_eq!(pixel_at(&raster, 0, 0), [0, 0, 0, 0]);
++        assert_eq!(pixel_at(&raster, 1, 1), [255, 255, 255, 255]);
++        assert_eq!(pixel_at(&raster, 2, 2), [255, 255, 255, 255]);
++        assert_eq!(pixel_at(&raster, 3, 2), [0, 0, 0, 0]);
++
++        let narrow = rasterize_csa_orbit([1.0; 9], 9, 18, (255, 255, 255), (0, 0, 0), 0, 0);
++        assert_eq!(pixel_at(&narrow, 1, 5), [255, 255, 255, 255]);
++        assert_eq!(pixel_at(&narrow, 2, 5), [0, 0, 0, 0]);
++    }
++
++    #[test]
++    fn raster_applies_protocol_specific_spacing_and_vertical_shift() {
++        let kitty = rasterize_csa_orbit([1.0; 9], 12, 12, (255, 255, 255), (0, 0, 0), 1, 0);
++        assert_eq!(pixel_at(&kitty, 0, 0), [255, 255, 255, 255]);
++        assert_eq!(pixel_at(&kitty, 1, 0), [255, 255, 255, 255]);
++        assert!((2..=4).all(|x| pixel_at(&kitty, x, 0)[3] == 0));
++        assert_eq!(pixel_at(&kitty, 5, 0), [255, 255, 255, 255]);
++        assert_eq!(pixel_at(&kitty, 10, 0), [255, 255, 255, 255]);
++
++        let sixel = rasterize_csa_orbit([1.0; 9], 12, 12, (255, 255, 255), (0, 0, 0), 0, 2);
++        assert_eq!(pixel_at(&sixel, 1, 0), [255, 255, 255, 255]);
++        assert_eq!(pixel_at(&sixel, 1, 1), [0, 0, 0, 0]);
++    }
++
++    #[test]
++    fn raster_keeps_continuous_brightness_levels_distinct() {
++        let raster = rasterize_csa_orbit(
++            [0.2, 0.4, 0.7, 1.0, 0.0, 0.0, 0.0, 0.0, 0.0],
++            12,
++            12,
++            (255, 255, 255),
++            (0, 0, 0),
++            0,
++            0,
++        );
++        assert_eq!(
++            [
++                logical_pixel(&raster, 0, 0)[0],
++                logical_pixel(&raster, 0, 1)[0],
++                logical_pixel(&raster, 0, 2)[0],
++                logical_pixel(&raster, 1, 0)[0],
++            ],
++            [51, 102, 179, 255]
++        );
++        assert_eq!(logical_pixel(&raster, 1, 2), [0, 0, 0, 0]);
++    }
++
++    #[test]
++    fn frame_cache_samples_the_shared_motion_model() {
++        let cache = CsaOrbitFrameCache::new();
++        let origin = Instant::now();
++        assert_eq!(cache.warmup.len(), 20);
++        assert_eq!(cache.steady.len(), 24);
++        for (index, frame) in cache.warmup.iter().enumerate() {
++            assert_eq!(
++                frame.intensities,
++                orbit_intensities_at(
++                    origin,
++                    origin + ORBIT_RENDER_INTERVAL.saturating_mul(index as u32)
++                )
++            );
++        }
++    }
++}
+diff --git a/codex-rs/tui/src/subagent_live_panel.rs b/codex-rs/tui/src/subagent_live_panel.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..95f2f4dc480d6986a2481ebf4d73410d41b8000d
+--- /dev/null
++++ b/codex-rs/tui/src/subagent_live_panel.rs
+@@ -0,0 +1,1340 @@
++//! Resident rendering and final-history formatting for the App-owned sub-agent projection.
++
++use crate::app::ActivityStatus;
++use crate::app::LiveAgentState;
++use crate::app::LiveAgentStatus;
++use crate::csa_graphics::CsaOrbitPlacement;
++use crate::history_cell::sanitize_user_text;
++use crate::line_truncation::truncate_line_with_ellipsis_if_overflow;
++use crate::render::renderable::Renderable;
++use codex_protocol::ThreadId;
++use ratatui::buffer::Buffer;
++use ratatui::buffer::CellDiffOption;
++use ratatui::layout::Rect;
++use ratatui::layout::Size;
++use ratatui::style::Stylize;
++use ratatui::text::Line;
++use ratatui::text::Span;
++use ratatui::widgets::Clear;
++use ratatui::widgets::Widget;
++use std::borrow::Cow;
++use std::cell::RefCell;
++
++const MIN_CONVERSATION_HEIGHT: u16 = 8;
++const PANEL_HARD_CAP: u16 = 12;
++const FULL_MODE_MIN_WIDTH: u16 = 96;
++const COMPACT_MODE_MIN_WIDTH: u16 = 72;
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++pub(crate) enum LivePanelMode {
++    Full,
++    Compact,
++    Minimal,
++}
++
++pub(crate) struct LivePanelAgent<'a> {
++    thread_id: ThreadId,
++    label: String,
++    state: &'a LiveAgentState,
++}
++
++impl<'a> LivePanelAgent<'a> {
++    pub(crate) fn new(thread_id: ThreadId, label: String, state: &'a LiveAgentState) -> Self {
++        Self {
++            thread_id,
++            label,
++            state,
++        }
++    }
++
++    pub(crate) fn is_animating(&self) -> bool {
++        matches!(
++            self.state.lifecycle(),
++            LiveAgentStatus::Starting | LiveAgentStatus::Running
++        )
++    }
++}
++
++pub(crate) struct LivePanelSnapshot<'a> {
++    state_revision: u64,
++    agents: Vec<LivePanelAgent<'a>>,
++}
++
++impl<'a> LivePanelSnapshot<'a> {
++    pub(crate) fn new(state_revision: u64, agents: Vec<LivePanelAgent<'a>>) -> Self {
++        Self {
++            state_revision,
++            agents,
++        }
++    }
++
++    pub(crate) fn is_empty(&self) -> bool {
++        self.agents.is_empty()
++    }
++}
++
++pub(crate) fn terminal_history_lines(
++    agents: &[LivePanelAgent<'_>],
++    color_enabled: bool,
++) -> Vec<Line<'static>> {
++    agents
++        .iter()
++        .flat_map(|agent| {
++            std::iter::once(agent_header_line(
++                agent,
++                color_enabled,
++                /*use_csa_graphics*/ false,
++            ))
++            .chain(terminal_line(agent.state, color_enabled))
++        })
++        .collect()
++}
++
++#[derive(Clone, Debug, Eq, PartialEq)]
++pub(crate) struct LiveAgentHitRegion {
++    pub(crate) thread_id: ThreadId,
++    pub(crate) rect: Rect,
++    pub(crate) render_revision: u64,
++    pub(crate) state_revision: u64,
++}
++
++#[derive(Debug, Default)]
++pub(crate) struct LivePanelFrame {
++    render_revision: u64,
++    state_revision: u64,
++    screen_size: Option<Size>,
++    panel_rect: Option<Rect>,
++    mode: Option<LivePanelMode>,
++    hidden_count: usize,
++    hit_regions: Vec<LiveAgentHitRegion>,
++    csa_orbit_placements: Vec<CsaOrbitPlacement>,
++}
++
++#[allow(dead_code)] // TUI-06 consumes revisioned hit testing; TUI-05 verifies the contract.
++impl LivePanelFrame {
++    pub(crate) fn render_revision(&self) -> u64 {
++        self.render_revision
++    }
++
++    pub(crate) fn state_revision(&self) -> u64 {
++        self.state_revision
++    }
++
++    pub(crate) fn panel_rect(&self) -> Option<Rect> {
++        self.panel_rect
++    }
++
++    pub(crate) fn mode(&self) -> Option<LivePanelMode> {
++        self.mode
++    }
++
++    pub(crate) fn hidden_count(&self) -> usize {
++        self.hidden_count
++    }
++
++    pub(crate) fn hit_regions(&self) -> &[LiveAgentHitRegion] {
++        &self.hit_regions
++    }
++
++    pub(crate) fn csa_orbit_placements(&self) -> &[CsaOrbitPlacement] {
++        &self.csa_orbit_placements
++    }
++
++    pub(crate) fn prepare_resize(&mut self, screen_size: Size) {
++        if self.screen_size != Some(screen_size) {
++            self.clear_visible_frame();
++            self.screen_size = Some(screen_size);
++        }
++    }
++
++    pub(crate) fn clear(&mut self) {
++        self.clear_visible_frame();
++        self.screen_size = None;
++    }
++
++    pub(crate) fn hit_test(
++        &self,
++        x: u16,
++        y: u16,
++        expected_render_revision: u64,
++    ) -> Option<ThreadId> {
++        if expected_render_revision != self.render_revision {
++            return None;
++        }
++        self.hit_regions
++            .iter()
++            .find(|region| {
++                x >= region.rect.x
++                    && x < region.rect.right()
++                    && y >= region.rect.y
++                    && y < region.rect.bottom()
++            })
++            .map(|region| region.thread_id)
++    }
++
++    fn clear_visible_frame(&mut self) {
++        if self.panel_rect.is_some()
++            || !self.hit_regions.is_empty()
++            || !self.csa_orbit_placements.is_empty()
++        {
++            self.render_revision = self.render_revision.wrapping_add(1);
++        }
++        self.state_revision = 0;
++        self.panel_rect = None;
++        self.mode = None;
++        self.hidden_count = 0;
++        self.hit_regions.clear();
++        self.csa_orbit_placements.clear();
++    }
++
++    #[allow(clippy::too_many_arguments)]
++    fn publish(
++        &mut self,
++        screen_size: Size,
++        state_revision: u64,
++        panel_rect: Rect,
++        mode: LivePanelMode,
++        hidden_count: usize,
++        regions: Vec<(ThreadId, Rect)>,
++        csa_orbit_placements: Vec<CsaOrbitPlacement>,
++    ) {
++        self.render_revision = self.render_revision.wrapping_add(1);
++        self.state_revision = state_revision;
++        self.screen_size = Some(screen_size);
++        self.panel_rect = Some(panel_rect);
++        self.mode = Some(mode);
++        self.hidden_count = hidden_count;
++        self.hit_regions = regions
++            .into_iter()
++            .map(|(thread_id, rect)| LiveAgentHitRegion {
++                thread_id,
++                rect,
++                render_revision: self.render_revision,
++                state_revision,
++            })
++            .collect();
++        self.csa_orbit_placements = csa_orbit_placements;
++    }
++}
++
++pub(crate) struct SubagentLivePanelRenderable<'a> {
++    snapshot: LivePanelSnapshot<'a>,
++    screen_size: Size,
++    bottom_pane_height: u16,
++    color_enabled: bool,
++    animations_enabled: bool,
++    csa_graphics_enabled: bool,
++    frame: &'a RefCell<LivePanelFrame>,
++}
++
++impl<'a> SubagentLivePanelRenderable<'a> {
++    pub(crate) fn new(
++        snapshot: LivePanelSnapshot<'a>,
++        screen_size: Size,
++        bottom_pane_height: u16,
++        color_enabled: bool,
++        animations_enabled: bool,
++        csa_graphics_enabled: bool,
++        frame: &'a RefCell<LivePanelFrame>,
++    ) -> Self {
++        Self {
++            snapshot,
++            screen_size,
++            bottom_pane_height,
++            color_enabled,
++            animations_enabled,
++            csa_graphics_enabled,
++            frame,
++        }
++    }
++
++    fn panel_cap(&self) -> u16 {
++        let hard_cap = PANEL_HARD_CAP.min(self.screen_size.height / 3);
++        let safe_cap = self
++            .screen_size
++            .height
++            .saturating_sub(self.bottom_pane_height)
++            .saturating_sub(MIN_CONVERSATION_HEIGHT);
++        hard_cap.min(safe_cap)
++    }
++
++    fn plan(&self, width: u16) -> Option<PanelPlan> {
++        let panel_cap = self.panel_cap();
++        if panel_cap == 0 || self.snapshot.agents.is_empty() {
++            return None;
++        }
++
++        let full_height = self.snapshot.agents.iter().fold(0u16, |height, agent| {
++            height.saturating_add(agent_block_height(agent, /*recent_limit*/ 3))
++        });
++        if width >= FULL_MODE_MIN_WIDTH && panel_cap >= 4 && full_height <= panel_cap {
++            return Some(PanelPlan {
++                mode: LivePanelMode::Full,
++                height: full_height,
++                visible_count: self.snapshot.agents.len(),
++                hidden_count: 0,
++                show_footer: false,
++            });
++        }
++
++        if width >= COMPACT_MODE_MIN_WIDTH && panel_cap >= 3 {
++            let mut height = 0u16;
++            let mut visible_count = 0usize;
++            for (index, agent) in self.snapshot.agents.iter().enumerate() {
++                let block_height = agent_block_height(agent, /*recent_limit*/ 1);
++                let footer_height = u16::from(index + 1 < self.snapshot.agents.len());
++                if height
++                    .saturating_add(block_height)
++                    .saturating_add(footer_height)
++                    > panel_cap
++                {
++                    break;
++                }
++                height = height.saturating_add(block_height);
++                visible_count += 1;
++            }
++            let hidden_count = self.snapshot.agents.len().saturating_sub(visible_count);
++            let show_footer = hidden_count > 0 && height < panel_cap;
++            return Some(PanelPlan {
++                mode: LivePanelMode::Compact,
++                height: height.saturating_add(u16::from(show_footer)),
++                visible_count,
++                hidden_count,
++                show_footer,
++            });
++        }
++
++        Some(PanelPlan {
++            mode: LivePanelMode::Minimal,
++            height: 1,
++            visible_count: usize::from(self.snapshot.agents.len() == 1),
++            hidden_count: usize::from(self.snapshot.agents.len() != 1) * self.snapshot.agents.len(),
++            show_footer: false,
++        })
++    }
++
++    fn render_line(&self, line: Line<'static>, y: u16, area: Rect, buf: &mut Buffer) {
++        if y >= area.bottom() {
++            return;
++        }
++        let line = truncate_line_with_ellipsis_if_overflow(line, usize::from(area.width));
++        line.render(Rect::new(area.x, y, area.width, 1), buf);
++    }
++
++    fn render_agent_header(
++        &self,
++        agent: &LivePanelAgent<'_>,
++        y: u16,
++        area: Rect,
++        buf: &mut Buffer,
++        placements: &mut Vec<CsaOrbitPlacement>,
++    ) {
++        let use_csa_graphics =
++            self.animations_enabled && self.csa_graphics_enabled && agent.is_animating();
++        self.render_line(
++            agent_header_line(agent, self.color_enabled, use_csa_graphics),
++            y,
++            area,
++            buf,
++        );
++        if use_csa_graphics && area.width > 0 && y < area.bottom() {
++            buf[(area.x, y)].set_diff_option(CellDiffOption::Skip);
++            placements.push(CsaOrbitPlacement {
++                thread_id: agent.thread_id,
++                x: area.x,
++                y,
++                animation_started_at: agent.state.animation_started_at(),
++            });
++        }
++    }
++
++    fn render_full(
++        &self,
++        plan: PanelPlan,
++        area: Rect,
++        buf: &mut Buffer,
++    ) -> (Vec<(ThreadId, Rect)>, Vec<CsaOrbitPlacement>) {
++        let mut y = area.y;
++        let mut regions = Vec::with_capacity(plan.visible_count);
++        let mut placements = Vec::with_capacity(plan.visible_count);
++        for agent in self.snapshot.agents.iter().take(plan.visible_count) {
++            let block_start = y;
++            self.render_agent_header(agent, y, area, buf, &mut placements);
++            y = y.saturating_add(1);
++            if let Some(line) = terminal_line(agent.state, self.color_enabled) {
++                self.render_line(line, y, area, buf);
++                y = y.saturating_add(1);
++            } else {
++                let visible_count = agent.state.recent().len().min(3);
++                for (index, activity) in agent.state.recent().iter().take(visible_count).enumerate()
++                {
++                    self.render_line(
++                        activity_line(
++                            activity,
++                            /*is_last*/ index + 1 == visible_count,
++                            self.color_enabled,
++                        ),
++                        y,
++                        area,
++                        buf,
++                    );
++                    y = y.saturating_add(1);
++                }
++            }
++            regions.push((
++                agent.thread_id,
++                Rect::new(
++                    area.x,
++                    block_start,
++                    area.width,
++                    y.saturating_sub(block_start),
++                ),
++            ));
++        }
++        (regions, placements)
++    }
++
++    fn render_compact(
++        &self,
++        plan: PanelPlan,
++        area: Rect,
++        buf: &mut Buffer,
++    ) -> (Vec<(ThreadId, Rect)>, Vec<CsaOrbitPlacement>) {
++        let mut y = area.y;
++        let mut regions = Vec::with_capacity(plan.visible_count);
++        let mut placements = Vec::with_capacity(plan.visible_count);
++        for agent in self.snapshot.agents.iter().take(plan.visible_count) {
++            let block_start = y;
++            self.render_agent_header(agent, y, area, buf, &mut placements);
++            y = y.saturating_add(1);
++            if let Some(line) = terminal_line(agent.state, self.color_enabled) {
++                self.render_line(line, y, area, buf);
++                y = y.saturating_add(1);
++            } else if let Some(activity) = agent.state.recent().back() {
++                self.render_line(
++                    activity_line(activity, /*is_last*/ true, self.color_enabled),
++                    y,
++                    area,
++                    buf,
++                );
++                y = y.saturating_add(1);
++            }
++            regions.push((
++                agent.thread_id,
++                Rect::new(
++                    area.x,
++                    block_start,
++                    area.width,
++                    y.saturating_sub(block_start),
++                ),
++            ));
++        }
++        if plan.show_footer {
++            self.render_line(
++                overflow_line(
++                    plan.hidden_count,
++                    waiting_approval_count(&self.snapshot.agents),
++                ),
++                y,
++                area,
++                buf,
++            );
++        }
++        (regions, placements)
++    }
++
++    fn render_minimal(&self, area: Rect, buf: &mut Buffer) -> Vec<(ThreadId, Rect)> {
++        self.render_line(minimal_line(&self.snapshot.agents), area.y, area, buf);
++        if self.snapshot.agents.len() == 1 {
++            vec![(
++                self.snapshot.agents[0].thread_id,
++                Rect::new(area.x, area.y, area.width, 1),
++            )]
++        } else {
++            Vec::new()
++        }
++    }
++}
++
++impl Renderable for SubagentLivePanelRenderable<'_> {
++    fn render(&self, area: Rect, buf: &mut Buffer) {
++        let Some(plan) = self.plan(area.width) else {
++            self.frame.borrow_mut().clear();
++            return;
++        };
++        if area.is_empty() {
++            self.frame.borrow_mut().clear();
++            return;
++        }
++
++        let panel_rect = Rect::new(area.x, area.y, area.width, area.height.min(plan.height));
++        Clear.render(panel_rect, buf);
++        let (regions, csa_orbit_placements) = match plan.mode {
++            LivePanelMode::Full => self.render_full(plan, panel_rect, buf),
++            LivePanelMode::Compact => self.render_compact(plan, panel_rect, buf),
++            LivePanelMode::Minimal => (self.render_minimal(panel_rect, buf), Vec::new()),
++        };
++        self.frame.borrow_mut().publish(
++            self.screen_size,
++            self.snapshot.state_revision,
++            panel_rect,
++            plan.mode,
++            plan.hidden_count,
++            regions,
++            csa_orbit_placements,
++        );
++    }
++
++    fn desired_height(&self, width: u16) -> u16 {
++        self.plan(width).map_or(0, |plan| plan.height)
++    }
++}
++
++#[derive(Clone, Copy, Debug, Eq, PartialEq)]
++struct PanelPlan {
++    mode: LivePanelMode,
++    height: u16,
++    visible_count: usize,
++    hidden_count: usize,
++    show_footer: bool,
++}
++
++fn agent_block_height(agent: &LivePanelAgent<'_>, recent_limit: usize) -> u16 {
++    let details = if matches!(
++        agent.state.lifecycle(),
++        LiveAgentStatus::Failed | LiveAgentStatus::Cancelled | LiveAgentStatus::Completed
++    ) {
++        1
++    } else {
++        agent.state.recent().len().min(recent_limit)
++    };
++    1u16.saturating_add(u16::try_from(details).unwrap_or(u16::MAX))
++}
++
++fn agent_header_line(
++    agent: &LivePanelAgent<'_>,
++    color_enabled: bool,
++    use_csa_graphics: bool,
++) -> Line<'static> {
++    let lifecycle = agent.state.lifecycle();
++    let mut symbol: Span<'static> = if use_csa_graphics {
++        " ".into()
++    } else {
++        match lifecycle {
++            LiveAgentStatus::Starting | LiveAgentStatus::Running => "◌".dim(),
++            LiveAgentStatus::WaitingApproval => "!".into(),
++            LiveAgentStatus::Waiting => "◌".into(),
++            LiveAgentStatus::Failed => "✗".into(),
++            LiveAgentStatus::Cancelled => "×".into(),
++            LiveAgentStatus::Completed => "✓".into(),
++        }
++    };
++    if color_enabled {
++        symbol = match lifecycle {
++            LiveAgentStatus::Starting | LiveAgentStatus::Running | LiveAgentStatus::Completed => {
++                symbol
++            }
++            LiveAgentStatus::WaitingApproval => symbol.bold(),
++            LiveAgentStatus::Waiting => symbol.dim(),
++            LiveAgentStatus::Failed | LiveAgentStatus::Cancelled => symbol.red(),
++        };
++    }
++    let mut spans = vec![
++        symbol,
++        " ".into(),
++        sanitized_single_line(&agent.label).bold(),
++    ];
++    if spans[2].content.is_empty() {
++        spans[2] = "Agent".bold();
++    }
++    if let Some(state_word) = match lifecycle {
++        LiveAgentStatus::WaitingApproval => Some("waiting approval"),
++        LiveAgentStatus::Waiting => Some("waiting"),
++        _ => None,
++    } {
++        spans.push("  ".into());
++        spans.push(status_span(state_word, lifecycle, color_enabled));
++    }
++    Line::from(spans)
++}
++
++fn activity_line(
++    activity: &crate::app::WorkActivityInput,
++    is_last: bool,
++    color_enabled: bool,
++) -> Line<'static> {
++    let label = sanitized_single_line(&activity.label);
++    let (action, detail) = label.split_once(' ').unwrap_or((label.as_str(), ""));
++    let mut spans = vec![
++        if is_last {
++            "└─".dim()
++        } else {
++            "├─".dim()
++        },
++        activity_status_span(
++            activity_status_symbol(activity.status),
++            activity.status,
++            color_enabled,
++        ),
++        " ".into(),
++        action.to_string().bold(),
++    ];
++    if !detail.is_empty() {
++        spans.push(" ".into());
++        spans.push(detail.to_string().dim());
++    }
++    if activity.status == ActivityStatus::WaitingApproval {
++        spans.push("  waiting approval".dim());
++    }
++    Line::from(spans)
++}
++
++fn terminal_line(state: &LiveAgentState, color_enabled: bool) -> Option<Line<'static>> {
++    let label = match state.lifecycle() {
++        LiveAgentStatus::Completed => "Done",
++        LiveAgentStatus::Failed => "Failed",
++        LiveAgentStatus::Cancelled => "Cancelled",
++        _ => return None,
++    };
++    let mut status = Span::raw(label);
++    if color_enabled {
++        status = match state.lifecycle() {
++            LiveAgentStatus::Completed => status.green().bold(),
++            LiveAgentStatus::Failed | LiveAgentStatus::Cancelled => status.red().bold(),
++            _ => status,
++        };
++    }
++    let mut spans = vec!["└─ ".dim(), status];
++    if let Some(stats) = state.terminal_stats() {
++        spans.push(format!(" ({})", format_terminal_stats(stats)).dim());
++    }
++    Some(Line::from(spans))
++}
++
++fn format_terminal_stats(stats: crate::app::LiveAgentStats) -> String {
++    let tool_uses = if stats.tool_uses == 1 {
++        "1 tool use".to_string()
++    } else {
++        format!("{} tool uses", stats.tool_uses)
++    };
++    format!(
++        "{tool_uses} ⋅ {} tokens ⋅ {}",
++        format_tokens(stats.tokens),
++        format_duration(stats.duration)
++    )
++}
++
++fn format_tokens(tokens: i64) -> String {
++    let tokens = tokens.max(0) as f64;
++    if tokens < 1_000.0 {
++        return (tokens as i64).to_string();
++    }
++    if tokens < 1_000_000.0 {
++        return format!("{:.1}k", tokens / 1_000.0);
++    }
++    if tokens < 1_000_000_000.0 {
++        return format!("{:.1}m", tokens / 1_000_000.0);
++    }
++    format!("{:.1}b", tokens / 1_000_000_000.0)
++}
++
++fn format_duration(duration: std::time::Duration) -> String {
++    let tenths = duration.as_millis() / 100;
++    let hours = tenths / 36_000;
++    let minutes = (tenths / 600) % 60;
++    let seconds = (tenths / 10) % 60;
++    let decimal = tenths % 10;
++    if hours > 0 {
++        format!("{hours}h {minutes}m {seconds}.{decimal}s")
++    } else if minutes > 0 {
++        format!("{minutes}m {seconds}.{decimal}s")
++    } else {
++        format!("{seconds}.{decimal}s")
++    }
++}
++
++fn overflow_line(hidden_count: usize, waiting_approval: usize) -> Line<'static> {
++    let waiting = if waiting_approval == 0 {
++        String::new()
++    } else {
++        format!(" · {waiting_approval} waiting approval")
++    };
++    format!("… +{hidden_count} more{waiting} · /subagents")
++        .dim()
++        .into()
++}
++
++fn minimal_line(agents: &[LivePanelAgent<'_>]) -> Line<'static> {
++    let waiting = waiting_approval_count(agents);
++    let failed = agents
++        .iter()
++        .filter(|agent| agent.state.lifecycle() == LiveAgentStatus::Failed)
++        .count();
++    let cancelled = agents
++        .iter()
++        .filter(|agent| agent.state.lifecycle() == LiveAgentStatus::Cancelled)
++        .count();
++    let symbol = if waiting > 0 {
++        "!"
++    } else if failed > 0 {
++        "✗"
++    } else if cancelled > 0 {
++        "×"
++    } else {
++        "●"
++    };
++    let noun = if agents.len() == 1 {
++        "subagent"
++    } else {
++        "subagents"
++    };
++    let mut text = format!("{symbol} {} {noun}", agents.len());
++    if waiting > 0 {
++        text.push_str(&format!(" · {waiting} waiting approval"));
++    }
++    if failed > 0 {
++        text.push_str(&format!(" · {failed} failed"));
++    }
++    if cancelled > 0 {
++        text.push_str(&format!(" · {cancelled} cancelled"));
++    }
++    text.push_str(" · /subagents");
++    text.into()
++}
++
++fn waiting_approval_count(agents: &[LivePanelAgent<'_>]) -> usize {
++    agents
++        .iter()
++        .filter(|agent| agent.state.lifecycle() == LiveAgentStatus::WaitingApproval)
++        .count()
++}
++
++fn sanitized_single_line(value: &str) -> String {
++    sanitize_user_text(Cow::Borrowed(value))
++        .split_whitespace()
++        .collect::<Vec<_>>()
++        .join(" ")
++}
++
++fn activity_status_symbol(status: ActivityStatus) -> &'static str {
++    match status {
++        ActivityStatus::Running => "›",
++        ActivityStatus::WaitingApproval => "!",
++        ActivityStatus::Succeeded => "✓",
++        ActivityStatus::Failed => "✗",
++        ActivityStatus::Declined | ActivityStatus::Cancelled => "×",
++    }
++}
++
++fn status_span(text: &'static str, status: LiveAgentStatus, color_enabled: bool) -> Span<'static> {
++    let span = Span::raw(text);
++    if !color_enabled {
++        return span;
++    }
++    match status {
++        LiveAgentStatus::Starting | LiveAgentStatus::Waiting => span.dim(),
++        LiveAgentStatus::Running | LiveAgentStatus::Completed => span.green(),
++        LiveAgentStatus::WaitingApproval => span.bold(),
++        LiveAgentStatus::Failed | LiveAgentStatus::Cancelled => span.red(),
++    }
++}
++
++fn activity_status_span(
++    text: &'static str,
++    status: ActivityStatus,
++    color_enabled: bool,
++) -> Span<'static> {
++    let span = Span::raw(text);
++    if !color_enabled {
++        return span;
++    }
++    match status {
++        ActivityStatus::Running | ActivityStatus::Succeeded => span.green(),
++        ActivityStatus::WaitingApproval => span.bold(),
++        ActivityStatus::Failed | ActivityStatus::Declined | ActivityStatus::Cancelled => span.red(),
++    }
++}
++
++#[cfg(test)]
++mod tests {
++    use super::*;
++    use crate::app::SubagentLiveState;
++    use crate::app::WorkActivityInput;
++    use crate::app::WorkActivityKind;
++    use pretty_assertions::assert_eq;
++    use std::time::Instant;
++
++    struct Fixture {
++        state: SubagentLiveState,
++        agents: Vec<(ThreadId, String)>,
++    }
++
++    struct Rendered {
++        text: String,
++        buffer: Buffer,
++        frame: LivePanelFrame,
++        desired_height: u16,
++    }
++
++    impl Fixture {
++        fn new() -> Self {
++            Self {
++                state: SubagentLiveState::default(),
++                agents: Vec::new(),
++            }
++        }
++
++        fn add_agent(&mut self, label: &str, status: LiveAgentStatus) -> ThreadId {
++            let index = self.agents.len() + 1;
++            let thread_id = ThreadId::from_string(&format!("00000000-0000-0000-0000-{index:012}"))
++                .expect("fixed thread id");
++            let _ = self.state.set_agent_status(
++                thread_id,
++                status,
++                Instant::now() - std::time::Duration::from_secs(1),
++            );
++            self.agents.push((thread_id, label.to_string()));
++            thread_id
++        }
++
++        fn add_activity(
++            &mut self,
++            thread_id: ThreadId,
++            id: &str,
++            label: &str,
++            status: ActivityStatus,
++        ) {
++            let _ = self.state.reduce_activity(
++                thread_id,
++                WorkActivityInput {
++                    id: id.to_string(),
++                    kind: WorkActivityKind::Command,
++                    label: label.to_string(),
++                    status,
++                },
++            );
++        }
++
++        fn set_status(&mut self, thread_id: ThreadId, status: LiveAgentStatus) {
++            let _ = self
++                .state
++                .set_agent_status(thread_id, status, Instant::now());
++        }
++
++        fn complete_with_stats(&mut self, thread_id: ThreadId, stats: crate::app::LiveAgentStats) {
++            let _ = self.state.set_terminal_stats_for_test(
++                thread_id,
++                LiveAgentStatus::Completed,
++                Instant::now(),
++                stats,
++            );
++        }
++
++        fn render(
++            &self,
++            screen_size: Size,
++            bottom_pane_height: u16,
++            color_enabled: bool,
++        ) -> Rendered {
++            self.render_with_animations(
++                screen_size,
++                bottom_pane_height,
++                color_enabled,
++                /*animations_enabled*/ false,
++            )
++        }
++
++        fn render_animated(
++            &self,
++            screen_size: Size,
++            bottom_pane_height: u16,
++            color_enabled: bool,
++        ) -> Rendered {
++            self.render_with_animations(
++                screen_size,
++                bottom_pane_height,
++                color_enabled,
++                /*animations_enabled*/ true,
++            )
++        }
++
++        fn render_with_animations(
++            &self,
++            screen_size: Size,
++            bottom_pane_height: u16,
++            color_enabled: bool,
++            animations_enabled: bool,
++        ) -> Rendered {
++            self.render_with_options(
++                screen_size,
++                bottom_pane_height,
++                color_enabled,
++                animations_enabled,
++                /*csa_graphics_enabled*/ animations_enabled,
++            )
++        }
++
++        fn render_with_options(
++            &self,
++            screen_size: Size,
++            bottom_pane_height: u16,
++            color_enabled: bool,
++            animations_enabled: bool,
++            csa_graphics_enabled: bool,
++        ) -> Rendered {
++            let frame = RefCell::new(LivePanelFrame::default());
++            let (text, buffer, desired_height) = self.render_with_frame_and_animations(
++                screen_size,
++                bottom_pane_height,
++                color_enabled,
++                animations_enabled,
++                csa_graphics_enabled,
++                &frame,
++            );
++            Rendered {
++                text,
++                buffer,
++                frame: frame.into_inner(),
++                desired_height,
++            }
++        }
++
++        fn render_with_frame_and_animations(
++            &self,
++            screen_size: Size,
++            bottom_pane_height: u16,
++            color_enabled: bool,
++            animations_enabled: bool,
++            csa_graphics_enabled: bool,
++            frame: &RefCell<LivePanelFrame>,
++        ) -> (String, Buffer, u16) {
++            let now = Instant::now();
++            let agents = self
++                .agents
++                .iter()
++                .filter_map(|(thread_id, label)| {
++                    self.state
++                        .agent(*thread_id)
++                        .filter(|state| state.is_renderable_at(now))
++                        .map(|state| LivePanelAgent::new(*thread_id, label.clone(), state))
++                })
++                .collect();
++            let snapshot = LivePanelSnapshot::new(self.state.revision(), agents);
++            let panel = SubagentLivePanelRenderable::new(
++                snapshot,
++                screen_size,
++                bottom_pane_height,
++                color_enabled,
++                animations_enabled,
++                csa_graphics_enabled,
++                frame,
++            );
++            let desired_height = panel.desired_height(screen_size.width);
++            let area = Rect::new(0, 0, screen_size.width, desired_height);
++            let mut buffer = Buffer::empty(area);
++            panel.render(area, &mut buffer);
++            let text = buffer_text(&buffer);
++            (text, buffer, desired_height)
++        }
++    }
++
++    fn buffer_text(buffer: &Buffer) -> String {
++        (0..buffer.area.height)
++            .map(|row| {
++                let mut line = String::new();
++                let mut column = 0;
++                while column < buffer.area.width {
++                    let symbol = buffer[(column, row)].symbol();
++                    line.push_str(symbol);
++                    column = column.saturating_add(
++                        u16::try_from(unicode_width::UnicodeWidthStr::width(symbol).max(1))
++                            .unwrap_or(1),
++                    );
++                }
++                line.trim_end().to_string()
++            })
++            .collect::<Vec<_>>()
++            .join("\n")
++    }
++
++    #[test]
++    fn full_snapshots_cover_zero_one_and_three_activities() {
++        let mut zero = Fixture::new();
++        zero.add_agent("Zero", LiveAgentStatus::Starting);
++        let zero = zero.render(Size::new(120, 40), 4, false);
++
++        let mut one = Fixture::new();
++        let one_id = one.add_agent("One", LiveAgentStatus::Running);
++        one.add_activity(one_id, "one", "cargo check", ActivityStatus::Running);
++        let one = one.render(Size::new(120, 40), 4, false);
++
++        let mut three = Fixture::new();
++        let three_id = three.add_agent("Three", LiveAgentStatus::Running);
++        three.add_activity(three_id, "a", "cargo fmt", ActivityStatus::Succeeded);
++        three.add_activity(three_id, "b", "cargo test", ActivityStatus::Failed);
++        three.add_activity(three_id, "c", "read failure", ActivityStatus::Running);
++        let three = three.render(Size::new(120, 40), 4, false);
++
++        insta::assert_snapshot!(
++            format!("{}\n---\n{}\n---\n{}", zero.text, one.text, three.text),
++            @r"
++        ◌ Zero
++        ---
++        ◌ One
++        └─› cargo check
++        ---
++        ◌ Three
++        ├─✓ cargo fmt
++        ├─✗ cargo test
++        └─› read failure
++        "
++        );
++        assert_eq!(zero.frame.mode(), Some(LivePanelMode::Full));
++        assert_eq!(one.frame.hit_regions()[0].rect, Rect::new(0, 0, 120, 2));
++        assert_eq!(three.frame.hit_regions()[0].rect, Rect::new(0, 0, 120, 4));
++    }
++
++    #[test]
++    fn multi_agent_snapshots_cover_completed_waiting_failed_and_overflow() {
++        let mut lifecycle = Fixture::new();
++        let done = lifecycle.add_agent("Robie（review_task）", LiveAgentStatus::Running);
++        lifecycle.complete_with_stats(
++            done,
++            crate::app::LiveAgentStats {
++                tool_uses: 19,
++                tokens: 32_000,
++                duration: std::time::Duration::from_millis(132_200),
++            },
++        );
++        let waiting = lifecycle.add_agent("Needs approval", LiveAgentStatus::Running);
++        lifecycle.add_activity(
++            waiting,
++            "approval",
++            "Remove cache",
++            ActivityStatus::WaitingApproval,
++        );
++        lifecycle.set_status(waiting, LiveAgentStatus::WaitingApproval);
++        let running = lifecycle.add_agent("Test agent", LiveAgentStatus::Running);
++        lifecycle.add_activity(running, "failed", "cargo test", ActivityStatus::Failed);
++        lifecycle.add_activity(running, "read", "read failure", ActivityStatus::Running);
++        let lifecycle = lifecycle.render(Size::new(120, 40), 4, false);
++
++        let mut three = Fixture::new();
++        three.add_agent("First", LiveAgentStatus::Running);
++        three.add_agent("Second", LiveAgentStatus::Running);
++        three.add_agent("Third", LiveAgentStatus::Running);
++        let three = three.render(Size::new(120, 40), 4, false);
++
++        let mut overflow = Fixture::new();
++        let overflow_ids = [
++            "Agent 1", "Agent 2", "Agent 3", "Agent 4", "Agent 5", "Agent 6",
++        ]
++        .into_iter()
++        .map(|label| overflow.add_agent(label, LiveAgentStatus::Running))
++        .collect::<Vec<_>>();
++        let overflow = overflow.render(Size::new(80, 15), 4, false);
++
++        insta::assert_snapshot!(
++            format!(
++                "{}\n---\n{}\n---\n{}",
++                lifecycle.text, three.text, overflow.text
++            ),
++            @r"
++        ✓ Robie（review_task）
++        └─ Done (19 tool uses ⋅ 32.0k tokens ⋅ 2m 12.2s)
++        ! Needs approval  waiting approval
++        └─! Remove cache  waiting approval
++        ◌ Test agent
++        ├─✗ cargo test
++        └─› read failure
++        ---
++        ◌ First
++        ◌ Second
++        ◌ Third
++        ---
++        ◌ Agent 1
++        ◌ Agent 2
++        … +4 more · /subagents
++        "
++        );
++        assert_eq!(lifecycle.frame.hit_regions().len(), 3);
++        assert_eq!(
++            lifecycle.frame.hit_regions()[2].rect,
++            Rect::new(0, 4, 120, 3)
++        );
++        assert_eq!(overflow.frame.mode(), Some(LivePanelMode::Compact));
++        assert_eq!(overflow.frame.hidden_count(), 4);
++        assert_eq!(overflow.frame.hit_regions().len(), 2);
++        let revision = overflow.frame.render_revision();
++        assert_eq!(
++            overflow.frame.hit_test(0, 0, revision),
++            Some(overflow_ids[0])
++        );
++        assert_eq!(
++            overflow.frame.hit_test(0, 1, revision),
++            Some(overflow_ids[1])
++        );
++        assert_eq!(overflow.frame.hit_test(0, 2, revision), None);
++        assert_eq!(overflow.frame.hit_test(80, 0, revision), None);
++        assert_eq!(overflow.frame.hit_test(0, 3, revision), None);
++    }
++
++    #[test]
++    fn terminal_history_reuses_the_final_live_rows() {
++        let mut fixture = Fixture::new();
++        let done = fixture.add_agent("Robie（review_task）", LiveAgentStatus::Running);
++        fixture.complete_with_stats(
++            done,
++            crate::app::LiveAgentStats {
++                tool_uses: 19,
++                tokens: 32_000,
++                duration: std::time::Duration::from_millis(132_200),
++            },
++        );
++        let agents = fixture
++            .agents
++            .iter()
++            .map(|(thread_id, label)| {
++                LivePanelAgent::new(
++                    *thread_id,
++                    label.clone(),
++                    fixture.state.agent(*thread_id).expect("terminal agent"),
++                )
++            })
++            .collect::<Vec<_>>();
++
++        assert_eq!(
++            terminal_history_lines(&agents, /*color_enabled*/ false)
++                .into_iter()
++                .map(|line| line.to_string())
++                .collect::<Vec<_>>(),
++            [
++                "✓ Robie（review_task）",
++                "└─ Done (19 tool uses ⋅ 32.0k tokens ⋅ 2m 12.2s)",
++            ]
++        );
++    }
++
++    #[test]
++    fn compact_80x24_unicode_long_text_and_no_color_remain_readable() {
++        let mut compact = Fixture::new();
++        let reviewer = compact.add_agent("审查员 [worker]", LiveAgentStatus::Running);
++        compact.add_activity(
++            reviewer,
++            "cjk",
++            "读取 C:\\项目\\源代码\\文件.rs",
++            ActivityStatus::Running,
++        );
++        let emoji = compact.add_agent("emoji-agent", LiveAgentStatus::Running);
++        compact.add_activity(
++            emoji,
++            "emoji",
++            "cargo test --features 你好-👩‍💻-é",
++            ActivityStatus::Succeeded,
++        );
++        let rendered = compact.render(Size::new(80, 24), 4, false);
++
++        insta::assert_snapshot!(rendered.text, @r"
++        ◌ 审查员 [worker]
++        └─› 读取 C:\项目\源代码\文件.rs
++        ◌ emoji-agent
++        └─✓ cargo test --features 你好-👩‍💻-é
++        ");
++        assert_eq!(rendered.frame.mode(), Some(LivePanelMode::Compact));
++        assert!(
++            rendered.buffer.content.iter().all(|cell| {
++                matches!(cell.style().fg, None | Some(ratatui::style::Color::Reset))
++            }),
++            "NO_COLOR rendering must not rely on foreground color"
++        );
++
++        let mut long = Fixture::new();
++        let long_id = long.add_agent(&"nickname-role-".repeat(12), LiveAgentStatus::Running);
++        long.add_activity(
++            long_id,
++            "long",
++            &format!("cargo test {}", "--very-long-argument ".repeat(12)),
++            ActivityStatus::Running,
++        );
++        let long = long.render(Size::new(80, 24), 4, false);
++        assert!(long.text.contains('…'));
++        assert_eq!(long.text.lines().count(), 2);
++    }
++
++    #[test]
++    fn animated_orbit_reserves_one_cell_without_moving_the_label() {
++        let mut fixture = Fixture::new();
++        let id = fixture.add_agent("Orbit agent", LiveAgentStatus::Running);
++        let running = fixture.render_animated(Size::new(120, 40), 4, false);
++
++        assert_eq!(running.desired_height, 1);
++        assert_eq!(running.frame.hit_regions()[0].rect, Rect::new(0, 0, 120, 1));
++        assert_eq!(running.buffer[(2, 0)].symbol(), "O");
++        assert_eq!(running.buffer[(0, 0)].diff_option, CellDiffOption::Skip);
++        assert_eq!(
++            running.frame.csa_orbit_placements(),
++            &[CsaOrbitPlacement {
++                thread_id: id,
++                x: 0,
++                y: 0,
++                animation_started_at: fixture.state.agent(id).unwrap().animation_started_at(),
++            }]
++        );
++
++        fixture.complete_with_stats(
++            id,
++            crate::app::LiveAgentStats {
++                tool_uses: 1,
++                tokens: 1_000,
++                duration: std::time::Duration::from_secs(1),
++            },
++        );
++        let completed = fixture.render_animated(Size::new(120, 40), 4, false);
++        assert_eq!(completed.desired_height, 2);
++        assert_eq!(
++            completed.frame.hit_regions()[0].rect,
++            Rect::new(0, 0, 120, 2)
++        );
++        assert!(completed.frame.csa_orbit_placements().is_empty());
++        assert_ne!(completed.buffer[(0, 0)].diff_option, CellDiffOption::Skip);
++        assert_eq!(completed.buffer[(2, 0)].symbol(), "O");
++        assert!(completed.text.contains("└─ Done"));
++    }
++
++    #[test]
++    fn animated_orbit_uses_one_shared_placement_per_running_agent() {
++        let mut fixture = Fixture::new();
++        fixture.add_agent("A", LiveAgentStatus::Running);
++        fixture.add_agent("B", LiveAgentStatus::Running);
++        fixture.add_agent("C", LiveAgentStatus::Running);
++
++        let rendered = fixture.render_animated(Size::new(120, 40), 4, false);
++        assert_eq!(rendered.desired_height, 3);
++        assert_eq!(rendered.frame.csa_orbit_placements().len(), 3);
++        assert_eq!(
++            rendered
++                .frame
++                .csa_orbit_placements()
++                .iter()
++                .map(|placement| (placement.x, placement.y))
++                .collect::<Vec<_>>(),
++            vec![(0, 0), (0, 1), (0, 2)]
++        );
++    }
++
++    #[test]
++    fn animated_orbit_falls_back_without_terminal_graphics() {
++        let mut fixture = Fixture::new();
++        fixture.add_agent("Fallback", LiveAgentStatus::Running);
++
++        let rendered = fixture.render_with_options(
++            Size::new(120, 40),
++            4,
++            false,
++            /*animations_enabled*/ true,
++            /*csa_graphics_enabled*/ false,
++        );
++        assert_eq!(rendered.text, "◌ Fallback");
++        assert!(rendered.frame.csa_orbit_placements().is_empty());
++        assert_ne!(rendered.buffer[(0, 0)].diff_option, CellDiffOption::Skip);
++    }
++
++    #[test]
++    fn minimal_snapshot_keeps_aggregate_words_and_unambiguous_hit_policy() {
++        let mut fixture = Fixture::new();
++        fixture.add_agent("Running", LiveAgentStatus::Running);
++        fixture.add_agent("Waiting", LiveAgentStatus::WaitingApproval);
++        fixture.add_agent("Failed", LiveAgentStatus::Failed);
++        let rendered = fixture.render(Size::new(60, 24), 4, false);
++
++        insta::assert_snapshot!(rendered.text, @"! 3 subagents · 1 waiting approval · 1 failed · /subagents");
++        assert_eq!(rendered.frame.mode(), Some(LivePanelMode::Minimal));
++        assert!(rendered.frame.hit_regions().is_empty());
++
++        let mut single = Fixture::new();
++        let single_id = single.add_agent("Only", LiveAgentStatus::Running);
++        let single = single.render(Size::new(60, 24), 4, false);
++        let revision = single.frame.render_revision();
++        assert_eq!(single.frame.hit_test(0, 0, revision), Some(single_id));
++    }
++
++    #[test]
++    fn strict_budget_modes_and_zero_safe_rows_follow_the_formula() {
++        let mut fixture = Fixture::new();
++        let id = fixture.add_agent("Budget", LiveAgentStatus::Running);
++        for (index, label) in ["one", "two", "three"].into_iter().enumerate() {
++            fixture.add_activity(id, &index.to_string(), label, ActivityStatus::Running);
++        }
++
++        let full = fixture.render(Size::new(120, 40), 4, false);
++        let compact = fixture.render(Size::new(120, 15), 4, false);
++        let minimal = fixture.render(Size::new(60, 40), 4, false);
++        let hidden = fixture.render(Size::new(120, 10), 2, false);
++
++        assert_eq!(
++            (full.frame.mode(), full.desired_height),
++            (Some(LivePanelMode::Full), 4)
++        );
++        assert_eq!(
++            (compact.frame.mode(), compact.desired_height),
++            (Some(LivePanelMode::Compact), 2)
++        );
++        assert_eq!(
++            (minimal.frame.mode(), minimal.desired_height),
++            (Some(LivePanelMode::Minimal), 1)
++        );
++        assert_eq!(hidden.desired_height, 0);
++        assert_eq!(hidden.frame.panel_rect(), None);
++    }
++
++    #[test]
++    fn frame_revisions_reject_stale_hits_and_resize_clears_geometry() {
++        let mut fixture = Fixture::new();
++        let id = fixture.add_agent("Clickable", LiveAgentStatus::Running);
++        fixture.add_activity(id, "work", "cargo test", ActivityStatus::Running);
++        let frame = RefCell::new(LivePanelFrame::default());
++
++        fixture.render_with_frame_and_animations(
++            Size::new(120, 40),
++            4,
++            false,
++            /*animations_enabled*/ true,
++            /*csa_graphics_enabled*/ true,
++            &frame,
++        );
++        let first_revision = frame.borrow().render_revision();
++        assert_eq!(frame.borrow().hit_test(4, 1, first_revision), Some(id));
++        assert_eq!(frame.borrow().state_revision(), fixture.state.revision());
++        assert_eq!(frame.borrow().csa_orbit_placements().len(), 1);
++
++        fixture.render_with_frame_and_animations(
++            Size::new(120, 40),
++            4,
++            false,
++            /*animations_enabled*/ true,
++            /*csa_graphics_enabled*/ true,
++            &frame,
++        );
++        let second_revision = frame.borrow().render_revision();
++        assert!(second_revision > first_revision);
++        assert_eq!(frame.borrow().hit_test(4, 1, first_revision), None);
++        assert_eq!(frame.borrow().hit_test(4, 1, second_revision), Some(id));
++
++        frame.borrow_mut().prepare_resize(Size::new(80, 24));
++        assert_eq!(frame.borrow().panel_rect(), None);
++        assert_eq!(frame.borrow().hit_test(4, 1, second_revision), None);
++        assert!(frame.borrow().csa_orbit_placements().is_empty());
++
++        fixture.render_with_frame_and_animations(
++            Size::new(80, 24),
++            4,
++            false,
++            /*animations_enabled*/ true,
++            /*csa_graphics_enabled*/ true,
++            &frame,
++        );
++        assert_eq!(frame.borrow().mode(), Some(LivePanelMode::Compact));
++        assert_eq!(frame.borrow().panel_rect(), Some(Rect::new(0, 0, 80, 2)));
++        assert_eq!(frame.borrow().csa_orbit_placements().len(), 1);
++    }
++}
+diff --git a/codex-rs/tui/src/tui/mouse_capture.rs b/codex-rs/tui/src/tui/mouse_capture.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..9688ef0d29b64ee37524cb301ad89aec6df34668
+--- /dev/null
++++ b/codex-rs/tui/src/tui/mouse_capture.rs
+@@ -0,0 +1,101 @@
++use std::io::Result;
++use std::io::Write;
++use std::io::stdout;
++use std::sync::Arc;
++use std::sync::atomic::AtomicBool;
++use std::sync::atomic::Ordering;
++
++use codex_config::types::SubagentLiveMouseMode;
++use codex_terminal_detection::TerminalInfo;
++use codex_terminal_detection::TerminalName;
++use crossterm::event::DisableMouseCapture;
++use crossterm::event::EnableMouseCapture;
++use ratatui::crossterm::execute;
++
++static MOUSE_CAPTURE_INITIALIZED: AtomicBool = AtomicBool::new(false);
++
++#[derive(Clone, Debug, Default)]
++pub(super) struct MouseCapture {
++    active: Arc<AtomicBool>,
++}
++
++impl MouseCapture {
++    pub(super) fn active(&self) -> bool {
++        self.active.load(Ordering::Relaxed)
++    }
++
++    pub(super) fn set(&self, enabled: bool) -> Result<()> {
++        let mut output = stdout();
++        self.set_with_writer(&mut output, enabled)
++    }
++
++    /// Best-effort transition guard: always emit the terminal reset and record the safe state.
++    pub(super) fn force_off(&self) -> Result<()> {
++        let mut output = stdout();
++        self.force_off_with_writer(&mut output)
++    }
++
++    fn force_off_with_writer(&self, output: &mut impl Write) -> Result<()> {
++        self.finish_transition(/*enabled*/ false, disable_unconditionally(output))
++    }
++
++    pub(super) fn set_with_writer(&self, output: &mut impl Write, enabled: bool) -> Result<()> {
++        if self.active() == enabled {
++            return Ok(());
++        }
++        let result = if enabled {
++            let result = execute!(output, EnableMouseCapture);
++            if result.is_ok() {
++                MOUSE_CAPTURE_INITIALIZED.store(true, Ordering::Relaxed);
++            }
++            result
++        } else {
++            disable_unconditionally(output)
++        };
++        self.finish_transition(enabled, result)
++    }
++
++    fn finish_transition(&self, enabled: bool, result: Result<()>) -> Result<()> {
++        if !enabled || result.is_ok() {
++            self.active.store(enabled, Ordering::Relaxed);
++        }
++        result
++    }
++}
++
++pub(super) fn disable_unconditionally(output: &mut impl Write) -> Result<()> {
++    if !should_issue_disable(MOUSE_CAPTURE_INITIALIZED.load(Ordering::Relaxed)) {
++        return Ok(());
++    }
++    execute!(output, DisableMouseCapture)
++}
++
++fn should_issue_disable(initialized: bool) -> bool {
++    !cfg!(windows) || initialized
++}
++
++pub(super) fn should_capture(
++    mode: SubagentLiveMouseMode,
++    terminal: &TerminalInfo,
++    _alt_screen_active: bool,
++    panel_renderable: bool,
++    raw_output_mode: bool,
++) -> bool {
++    if raw_output_mode {
++        return false;
++    }
++    match mode {
++        SubagentLiveMouseMode::Off => false,
++        SubagentLiveMouseMode::On => true,
++        SubagentLiveMouseMode::Auto => auto_supported(terminal) && panel_renderable,
++    }
++}
++
++fn auto_supported(terminal: &TerminalInfo) -> bool {
++    !matches!(terminal.name, TerminalName::Dumb | TerminalName::Unknown)
++        || terminal.multiplexer.is_some()
++}
++
++#[cfg(test)]
++#[path = "mouse_capture_tests.rs"]
++mod tests;
+diff --git a/codex-rs/tui/src/tui/mouse_capture_tests.rs b/codex-rs/tui/src/tui/mouse_capture_tests.rs
+new file mode 100644
+index 0000000000000000000000000000000000000000..861a54605266d17d36c96c74e5fbf2f46e5bf010
+--- /dev/null
++++ b/codex-rs/tui/src/tui/mouse_capture_tests.rs
+@@ -0,0 +1,151 @@
++use super::*;
++use codex_terminal_detection::Multiplexer;
++use crossterm::Command;
++
++fn terminal(name: TerminalName, multiplexer: Option<Multiplexer>) -> TerminalInfo {
++    TerminalInfo {
++        name,
++        term_program: None,
++        version: None,
++        term: None,
++        multiplexer,
++    }
++}
++
++#[test]
++fn capture_policy_is_fail_closed_and_raw_mode_always_wins() {
++    let known = terminal(TerminalName::WindowsTerminal, None);
++    let unknown = terminal(TerminalName::Unknown, None);
++
++    assert!(!should_capture(
++        SubagentLiveMouseMode::Off,
++        &known,
++        /*alt_screen_active*/ true,
++        /*panel_renderable*/ true,
++        /*raw_output_mode*/ false,
++    ));
++    assert!(should_capture(
++        SubagentLiveMouseMode::On,
++        &unknown,
++        /*alt_screen_active*/ false,
++        /*panel_renderable*/ false,
++        /*raw_output_mode*/ false,
++    ));
++    assert!(!should_capture(
++        SubagentLiveMouseMode::On,
++        &known,
++        /*alt_screen_active*/ true,
++        /*panel_renderable*/ true,
++        /*raw_output_mode*/ true,
++    ));
++    assert!(should_capture(
++        SubagentLiveMouseMode::Auto,
++        &known,
++        /*alt_screen_active*/ true,
++        /*panel_renderable*/ true,
++        /*raw_output_mode*/ false,
++    ));
++    assert!(!should_capture(
++        SubagentLiveMouseMode::Auto,
++        &unknown,
++        /*alt_screen_active*/ true,
++        /*panel_renderable*/ true,
++        /*raw_output_mode*/ false,
++    ));
++    assert!(should_capture(
++        SubagentLiveMouseMode::Auto,
++        &known,
++        /*alt_screen_active*/ false,
++        /*panel_renderable*/ true,
++        /*raw_output_mode*/ false,
++    ));
++    assert!(!should_capture(
++        SubagentLiveMouseMode::Auto,
++        &known,
++        /*alt_screen_active*/ true,
++        /*panel_renderable*/ false,
++        /*raw_output_mode*/ false,
++    ));
++}
++
++#[test]
++fn known_multiplexers_are_positive_auto_capabilities() {
++    let tmux = terminal(
++        TerminalName::Unknown,
++        Some(Multiplexer::Tmux { version: None }),
++    );
++    let zellij = terminal(
++        TerminalName::Unknown,
++        Some(Multiplexer::Zellij { version: None }),
++    );
++
++    assert!(auto_supported(&tmux));
++    assert!(auto_supported(&zellij));
++}
++
++#[test]
++fn startup_disable_waits_for_windows_console_initialization() {
++    assert_eq!(should_issue_disable(/*initialized*/ false), !cfg!(windows));
++    assert!(should_issue_disable(/*initialized*/ true));
++}
++
++#[test]
++fn transition_guard_emits_enable_and_disable_and_tracks_safe_state() {
++    let capture = MouseCapture::default();
++    let mut output = Vec::new();
++
++    capture
++        .set_with_writer(&mut output, /*enabled*/ true)
++        .expect("enable capture");
++    assert!(capture.active());
++    capture
++        .force_off_with_writer(&mut output)
++        .expect("force capture off");
++    assert!(!capture.active());
++    capture
++        .set_with_writer(&mut output, /*enabled*/ true)
++        .expect("re-enable capture");
++    capture
++        .set_with_writer(&mut output, /*enabled*/ false)
++        .expect("disable capture");
++
++    assert!(!capture.active());
++    let mut ansi = String::new();
++    EnableMouseCapture
++        .write_ansi(&mut ansi)
++        .expect("enable ANSI");
++    DisableMouseCapture
++        .write_ansi(&mut ansi)
++        .expect("disable ANSI");
++    assert_eq!(
++        ansi,
++        "\u{1b}[?1000h\u{1b}[?1002h\u{1b}[?1003h\u{1b}[?1015h\u{1b}[?1006h\u{1b}[?1006l\u{1b}[?1015l\u{1b}[?1003l\u{1b}[?1002l\u{1b}[?1000l"
++    );
++}
++
++#[test]
++fn failed_transitions_remain_fail_closed() {
++    let capture = MouseCapture::default();
++    assert!(
++        capture
++            .finish_transition(
++                /*enabled*/ true,
++                Err(std::io::Error::other("test enable failure")),
++            )
++            .is_err()
++    );
++    assert!(!capture.active());
++
++    capture
++        .finish_transition(/*enabled*/ true, Ok(()))
++        .expect("enable state");
++    assert!(
++        capture
++            .finish_transition(
++                /*enabled*/ false,
++                Err(std::io::Error::other("test disable failure")),
++            )
++            .is_err()
++    );
++    assert!(!capture.active());
++}

@@ -491,34 +491,36 @@ fn validate_manifest(manifest: &CompatibilityManifest) -> Result<()> {
     validate_relative(&manifest.source_hashes, false)?;
 
     let expected_patch_count = match manifest.patch_set_version {
-        1 => 5,
-        2 => 6,
-        3 => 11,
-        4 => 12,
-        5 => 13,
-        6 => 14,
-        7 => 15,
-        8 => 16,
-        9 => 17,
+        1 => Some(5),
+        2 => Some(6),
+        3 => Some(11),
+        4 => Some(12),
+        5 => Some(13),
+        6 => Some(14),
+        7 => Some(15),
+        8 => Some(16),
+        9 => Some(17),
+        10 => None,
         _ => {
             return Err(ManagerError::new(
                 "unsupported_manifest",
-                "only patch sets 1 through 9 are supported",
+                "only patch sets 1 through 10 are supported",
             ));
         }
     };
-    let patch_count_matches = manifest.patches.len() == expected_patch_count
-        || (manifest.patch_set_version == 9
-            && manifest.patches.len() == 18
-            && manifest
-                .patches
-                .last()
-                .is_some_and(|patch| patch.path == "patches/0018-subagent-history-batches.patch"));
+    let patch_count_matches = expected_patch_count.is_none_or(|count| {
+        manifest.patches.len() == count
+            || (manifest.patch_set_version == 9
+                && manifest.patches.len() == 18
+                && manifest.patches.last().is_some_and(|patch| {
+                    patch.path == "patches/0018-subagent-history-batches.patch"
+                }))
+    }) && !manifest.patches.is_empty();
     if !patch_count_matches {
-        let required = if manifest.patch_set_version == 9 {
-            "17 or 18".to_string()
-        } else {
-            expected_patch_count.to_string()
+        let required = match (manifest.patch_set_version, expected_patch_count) {
+            (9, _) => "17 or 18".to_string(),
+            (_, Some(count)) => count.to_string(),
+            (_, None) => "at least 1".to_string(),
         };
         return Err(ManagerError::new(
             "invalid_patch_set",
@@ -745,36 +747,41 @@ pub struct BuildContract {
 impl TestContract {
     fn validate(&self, manifest: &CompatibilityManifest) -> Result<()> {
         let p2 = manifest.patch_set_version == 2;
-        let p3 = matches!(manifest.patch_set_version, 3..=9);
-        let p3_isolates_background_exit = matches!(manifest.patch_set_version, 6..=9);
+        let p10 = manifest.patch_set_version == 10;
+        let p3 = matches!(manifest.patch_set_version, 3..=10);
+        let p3_isolates_background_exit = matches!(manifest.patch_set_version, 6..=10);
         let p3_tui_offset = usize::from(p3_isolates_background_exit);
         let p3_offset = usize::from(p3);
-        let transport_fallback = matches!(manifest.patch_set_version, 6..=9)
-            && manifest.patches.iter().any(|patch| {
-                patch.path == "patches/0013-subagent-live-polish.patch"
-                    && matches!(
-                        patch.sha256.as_str(),
-                        "37853b54b759412b4f10a942dc036a2ffb18a03091455617ea81cd832ace9ce4"
-                            | "764afeb0d0fb06b58ac42dabce9778c6065ed1b44b2b696d12e396d94affeb9b"
-                    )
-            });
+        let transport_fallback = p10
+            || matches!(manifest.patch_set_version, 6..=9)
+                && manifest.patches.iter().any(|patch| {
+                    patch.path == "patches/0013-subagent-live-polish.patch"
+                        && matches!(
+                            patch.sha256.as_str(),
+                            "37853b54b759412b4f10a942dc036a2ffb18a03091455617ea81cd832ace9ce4"
+                                | "764afeb0d0fb06b58ac42dabce9778c6065ed1b44b2b696d12e396d94affeb9b"
+                        )
+                });
         let transport_fallback_offset = usize::from(transport_fallback);
-        let csa_orbit = matches!(manifest.patch_set_version, 7..=9)
-            && manifest
-                .patches
-                .iter()
-                .any(|patch| patch.path == "patches/0015-csa-1x1-lossless-orbit.patch");
+        let csa_orbit = p10
+            || matches!(manifest.patch_set_version, 7..=9)
+                && manifest
+                    .patches
+                    .iter()
+                    .any(|patch| patch.path == "patches/0015-csa-1x1-lossless-orbit.patch");
         let csa_orbit_offset = usize::from(csa_orbit);
-        let state_db_compat = manifest.patch_set_version == 9
-            && manifest
-                .patches
-                .iter()
-                .any(|patch| patch.path == "patches/0017-codex-state-db-line-endings.patch");
+        let state_db_compat = p10
+            || manifest.patch_set_version == 9
+                && manifest
+                    .patches
+                    .iter()
+                    .any(|patch| patch.path == "patches/0017-codex-state-db-line-endings.patch");
         let batch_join = (p2 || p3)
-            && manifest
-                .patches
-                .iter()
-                .any(|patch| patch.path == "patches/0005-tests-telemetry-batch-join.patch");
+            && (p10
+                || manifest
+                    .patches
+                    .iter()
+                    .any(|patch| patch.path == "patches/0005-tests-telemetry-batch-join.patch"));
         let expected_test_count = match manifest.patch_set_version {
             1 => 7,
             2 if batch_join => 11,
@@ -784,7 +791,7 @@ impl TestContract {
             5 if batch_join => 16,
             6 if batch_join => 17 + transport_fallback_offset,
             7..=8 if batch_join && csa_orbit => 17 + transport_fallback_offset + csa_orbit_offset,
-            9 if batch_join && csa_orbit && state_db_compat => {
+            9..=10 if batch_join && csa_orbit && state_db_compat => {
                 18 + transport_fallback_offset + csa_orbit_offset
             }
             _ => {
@@ -1185,7 +1192,7 @@ impl TestContract {
                     ],
                     &[],
                 ));
-        let overlay_test_matches = !matches!(manifest.patch_set_version, 4..=9)
+        let overlay_test_matches = !matches!(manifest.patch_set_version, 4..=10)
             || step_matches(
                 &self.tests[15 + p3_tui_offset + transport_fallback_offset + csa_orbit_offset],
                 "CSA official runtime overlay",
@@ -1241,7 +1248,7 @@ impl TestContract {
                     ("SOURCE_DATE_EPOCH", "1786063808"),
                 ],
             ),
-            6..=9 => map_matches(
+            6..=10 => map_matches(
                 &self.build.env,
                 &[
                     ("CARGO_BUILD_JOBS", "4"),
