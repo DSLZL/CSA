@@ -46,6 +46,112 @@ pub struct ArtifactEntry {
     pub size: u64,
 }
 
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuntimeArtifact {
+    pub filename: String,
+    pub sha256: String,
+    pub size: u64,
+}
+
+#[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
+#[serde(deny_unknown_fields)]
+pub(crate) struct RuntimeManifest {
+    pub schema: u32,
+    pub compat_id: String,
+    pub codex_version: String,
+    pub build_target: String,
+    pub artifact: RuntimeArtifact,
+}
+
+impl RuntimeManifest {
+    pub(crate) fn new(
+        compat_id: String,
+        codex_version: String,
+        build_target: String,
+        artifact: RuntimeArtifact,
+    ) -> Result<Self> {
+        let manifest = Self {
+            schema: 1,
+            compat_id,
+            codex_version,
+            build_target,
+            artifact,
+        };
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    pub(crate) fn from_compatibility(compatibility: &LoadedCompatibility) -> Result<Self> {
+        let artifact = compatibility.artifact();
+        Self::new(
+            compatibility.manifest.compat_id.clone(),
+            compatibility.manifest.codex_version.clone(),
+            compatibility.selected_target().to_owned(),
+            RuntimeArtifact {
+                filename: artifact.filename.clone(),
+                sha256: artifact.sha256.clone(),
+                size: artifact.size,
+            },
+        )
+    }
+
+    pub(crate) fn load(path: &Path) -> Result<Self> {
+        if !path.is_absolute() {
+            return Err(ManagerError::new(
+                "invalid_runtime_manifest_path",
+                "runtime manifest path must be absolute",
+            ));
+        }
+        let metadata = fs::symlink_metadata(path).map_err(|error| {
+            ManagerError::io(
+                &format!("inspect runtime manifest {}", path.display()),
+                error,
+            )
+        })?;
+        if metadata.file_type().is_symlink() || !metadata.is_file() {
+            return Err(ManagerError::new(
+                "invalid_runtime_manifest_path",
+                "runtime manifest must be a regular file, not a symlink",
+            ));
+        }
+        let bytes = fs::read(path).map_err(|error| {
+            ManagerError::io(&format!("read runtime manifest {}", path.display()), error)
+        })?;
+        let text = std::str::from_utf8(&bytes).map_err(|error| {
+            ManagerError::new(
+                "invalid_runtime_manifest",
+                format!("runtime manifest UTF-8: {error}"),
+            )
+        })?;
+        let manifest: Self = toml::from_str(text).map_err(|error| {
+            ManagerError::new(
+                "invalid_runtime_manifest",
+                format!("runtime manifest TOML: {error}"),
+            )
+        })?;
+        manifest.validate()?;
+        Ok(manifest)
+    }
+
+    fn validate(&self) -> Result<()> {
+        if self.schema != 1
+            || !valid_compat_id(&self.compat_id)
+            || !valid_version(&self.codex_version)
+            || !valid_target(&self.build_target)
+            || !valid_filename(&self.artifact.filename)
+            || !valid_sha(&self.artifact.sha256, 64)
+            || self.artifact.size == 0
+        {
+            return Err(ManagerError::new(
+                "invalid_runtime_manifest",
+                "runtime manifest contains an invalid identity, target, filename, digest, or size",
+            ));
+        }
+        Ok(())
+    }
+}
+
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct PatchFamily {

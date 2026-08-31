@@ -1,9 +1,9 @@
 use crate::BUILD_TARGET;
-use crate::compat::{LoadedCompatibility, validate_relative};
+use crate::compat::{RuntimeArtifact, RuntimeManifest, validate_relative};
 use crate::detect::{detect_official, parse_codex_version};
 use crate::error::{ManagerError, Result};
 use crate::hash::sha256_file;
-use crate::manager::{InstallEvent, OnlineInstallOptions, PrepareOptions};
+use crate::manager::{InstallEvent, OnlineInstallOptions};
 use crate::process::ProcessRunner;
 use crate::state::{ManagerPaths, ensure_managed_directory, remove_managed_tree};
 use serde::Deserialize;
@@ -13,12 +13,23 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
+use std::sync::mpsc;
 use std::time::Duration;
 use ureq::{Agent, ResponseExt};
 
 const OPENAI_REPOSITORY: &str = "openai/codex";
 const CSA_REPOSITORY: &str = "dslzl/CSA";
-const GH_PROXY_ROOT: &str = "https://gh-proxy.com/";
+const GH_PROXY_ROUTES: [(&str, &str); 7] = [
+    ("https://gh-proxy.org/", "gh-proxy.org"),
+    ("https://v4.gh-proxy.org/", "v4.gh-proxy.org"),
+    ("https://v6.gh-proxy.org/", "v6.gh-proxy.org"),
+    ("https://cdn.gh-proxy.org/", "cdn.gh-proxy.org"),
+    ("https://axisnow.gh-proxy.org/", "axisnow.gh-proxy.org"),
+    ("https://gh-proxy.com/", "gh-proxy.com"),
+    ("https://ghfast.top/", "ghfast.top"),
+];
+const GH_PROXY_PROBE_URL: &str =
+    "https://github.com/DSLZL/CSA.git/info/refs?service=git-upload-pack";
 const CLOUDFLARE_TRACE_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
 const ALIBABA_REGION_URL: &str = "https://ip.taobao.com/outGetIpInfo?ip=myip&accessKey=alibaba-inc";
 const RELEASE_DESCRIPTOR: &str = "compatibility-release.json";
@@ -56,14 +67,12 @@ struct SelectedCompatibility {
 }
 
 pub struct OnlineBundle {
-    prepare: PrepareOptions,
+    pub(crate) manager_root: Option<PathBuf>,
+    pub(crate) official: PathBuf,
+    pub(crate) official_native: Option<PathBuf>,
+    pub(crate) runtime: RuntimeManifest,
+    pub(crate) artifact: PathBuf,
     _staging: StagingGuard,
-}
-
-impl OnlineBundle {
-    pub fn prepare_options(&self) -> PrepareOptions {
-        self.prepare.clone()
-    }
 }
 
 struct StagingGuard {
@@ -173,13 +182,8 @@ fn resolve_online_install_inner(
         compat_id: compat_id.clone(),
     });
     let release_tag = selected.release_tag;
-    let csa_commit = client.peel_tag(CSA_REPOSITORY, &release_tag)?;
-    if csa_commit != selected.release_commit {
-        return Err(ManagerError::new(
-            "compatibility_release_changed",
-            "selected compatibility tag changed during installation",
-        ));
-    }
+    let csa_commit = selected.release_commit;
+    progress(InstallEvent::DownloadingReleaseMetadata);
     let selected_path = staging_path.join("selected");
     ensure_managed_directory(&paths.root, &selected_path)?;
     let (descriptor, checksums) = download_release_metadata(&client, &release_tag, &selected_path)?
@@ -201,16 +205,7 @@ fn resolve_online_install_inner(
     }
 
     let upstream_version = stable_release_version(&descriptor.upstream.tag)?;
-    let upstream_commit = client.peel_tag(OPENAI_REPOSITORY, &descriptor.upstream.tag)?;
-    validate_descriptor(
-        &descriptor,
-        &release_tag,
-        &csa_commit,
-        compat_id,
-        &upstream_version,
-        &descriptor.upstream.tag,
-        &upstream_commit,
-    )?;
+    descriptor_artifact(&descriptor, BUILD_TARGET)?;
     if official.version != upstream_version {
         return Err(ManagerError::new(
             "unsupported_official_version",
@@ -221,39 +216,24 @@ fn resolve_online_install_inner(
         ));
     }
 
-    let payload_root = selected_path.join(compat_id);
-    ensure_managed_directory(&paths.root, &payload_root)?;
-    for file in &descriptor.payload {
-        validate_declared_asset(file, &checksums)?;
-        let destination = payload_root.join(&file.path);
-        let parent = destination.parent().ok_or_else(|| {
-            ManagerError::new(
-                "invalid_compatibility_release",
-                "payload path has no parent",
-            )
-        })?;
-        ensure_managed_directory(&paths.root, parent)?;
-        if !client.download_asset(
-            &release_tag,
-            &file.asset,
-            &destination,
-            Some(file.size),
-            Some(&file.sha256),
-            MAX_RELEASE_FILE_BYTES,
-        )? {
-            return Err(ManagerError::new(
-                "invalid_compatibility_release",
-                format!("declared release asset is missing: {}", file.asset),
-            ));
-        }
-    }
     let release_artifact = descriptor_artifact(&descriptor, BUILD_TARGET)?;
     validate_declared_asset(release_artifact, &checksums)?;
+    let runtime = RuntimeManifest::new(
+        compat_id.clone(),
+        upstream_version,
+        BUILD_TARGET.to_owned(),
+        RuntimeArtifact {
+            filename: release_artifact.path.clone(),
+            sha256: release_artifact.sha256.clone(),
+            size: release_artifact.size,
+        },
+    )?;
     let artifact_path = selected_path.join("artifact").join(&release_artifact.path);
     ensure_managed_directory(
         &paths.root,
         artifact_path.parent().expect("artifact path has a parent"),
     )?;
+    progress(InstallEvent::ConnectingArtifact);
     if !client.download_asset_with_progress(
         &release_tag,
         &release_artifact.asset,
@@ -274,19 +254,12 @@ fn resolve_online_install_inner(
         ));
     }
 
-    let manifest_path = payload_root.join("manifest.toml");
-    let compatibility = LoadedCompatibility::load_for_target(&manifest_path, BUILD_TARGET)?;
-    compatibility.test_contract()?;
-    validate_downloaded_compatibility(&compatibility, &descriptor, &upstream_commit)?;
     Ok(OnlineBundle {
-        prepare: PrepareOptions {
-            manager_root: options.manager_root.clone(),
-            official: Some(official.executable.path),
-            official_native: official.native.map(|native| native.path),
-            manifest: manifest_path,
-            artifact: Some(artifact_path),
-            source: None,
-        },
+        manager_root: options.manager_root.clone(),
+        official: official.executable.path,
+        official_native: official.native.map(|native| native.path),
+        runtime,
+        artifact: artifact_path,
         _staging: staging,
     })
 }
@@ -696,12 +669,16 @@ struct GitHubClient {
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GitHubRoute {
     Direct,
-    Proxy,
+    Proxy(usize),
 }
 
 impl GitHubClient {
     fn new() -> Self {
-        Self::with_route(detect_github_route().unwrap_or(GitHubRoute::Direct))
+        let route = match detect_github_route().unwrap_or(GitHubRoute::Direct) {
+            GitHubRoute::Direct => GitHubRoute::Direct,
+            GitHubRoute::Proxy(_) => GitHubRoute::Proxy(select_proxy_index()),
+        };
+        Self::with_route(route)
     }
 
     fn with_route(route: GitHubRoute) -> Self {
@@ -718,10 +695,6 @@ impl GitHubClient {
         }
     }
 
-    fn peel_tag(&self, repository: &str, tag: &str) -> Result<String> {
-        peel_tag_from_refs(&self.repository_refs(repository)?, tag)
-    }
-
     fn repository_refs(&self, repository: &str) -> Result<BTreeMap<String, String>> {
         let url = format!("https://github.com/{repository}.git/info/refs?service=git-upload-pack");
         let mut response = self
@@ -731,6 +704,7 @@ impl GitHubClient {
                 true,
                 &["github.com"],
                 "query GitHub repository refs",
+                false,
             )?
             .ok_or_else(|| {
                 ManagerError::new(
@@ -802,6 +776,7 @@ impl GitHubClient {
                 "release-assets.githubusercontent.com",
             ],
             "download compatibility release asset",
+            asset_name != INSTALL_CATALOG_ASSET,
         )?
         else {
             return Ok(false);
@@ -886,33 +861,91 @@ impl GitHubClient {
         git_protocol: bool,
         direct_hosts: &[&str],
         context: &str,
+        retry_proxy_404: bool,
     ) -> Result<Option<ureq::http::Response<ureq::Body>>> {
         let route = self.route.get();
-        match self.request_on_route(route, direct_url, accept, git_protocol) {
+        if let GitHubRoute::Proxy(index) = route {
+            return self.request_from_proxy_pool(
+                index,
+                direct_url,
+                accept,
+                git_protocol,
+                context,
+                retry_proxy_404,
+            );
+        }
+        match self.request_on_route(GitHubRoute::Direct, direct_url, accept, git_protocol) {
             Ok(response) => {
-                require_route_host(&response, route, direct_hosts)?;
+                require_route_host(&response, GitHubRoute::Direct, direct_hosts)?;
                 Ok(Some(response))
             }
             Err(ureq::Error::StatusCode(404)) => Ok(None),
-            Err(error) if route == GitHubRoute::Direct && should_try_proxy(&error) => {
+            Err(error) if should_try_proxy(&error) => {
                 let direct_error = error.to_string();
-                self.route.set(GitHubRoute::Proxy);
-                match self.request_on_route(GitHubRoute::Proxy, direct_url, accept, git_protocol) {
-                    Ok(response) => {
-                        require_route_host(&response, GitHubRoute::Proxy, direct_hosts)?;
-                        Ok(Some(response))
-                    }
-                    Err(ureq::Error::StatusCode(404)) => Ok(None),
-                    Err(proxy_error) => Err(ManagerError::new(
+                let index = select_proxy_index();
+                self.route.set(GitHubRoute::Proxy(index));
+                self.request_from_proxy_pool(
+                    index,
+                    direct_url,
+                    accept,
+                    git_protocol,
+                    context,
+                    retry_proxy_404,
+                )
+                .map_err(|proxy_error| {
+                    ManagerError::new(
                         "network_error",
                         format!(
-                            "{context}: GitHub direct failed ({direct_error}); gh-proxy.com failed ({proxy_error})"
+                            "{context}: GitHub direct failed ({direct_error}); proxy pool failed ({proxy_error})"
                         ),
-                    )),
-                }
+                    )
+                })
             }
             Err(error) => Err(network_error(context, error)),
         }
+    }
+
+    fn request_from_proxy_pool(
+        &self,
+        first: usize,
+        direct_url: &str,
+        accept: &str,
+        git_protocol: bool,
+        context: &str,
+        retry_404: bool,
+    ) -> Result<Option<ureq::http::Response<ureq::Body>>> {
+        let mut failures = Vec::new();
+        let mut not_found = 0;
+        for offset in 0..GH_PROXY_ROUTES.len() {
+            let index = (first + offset) % GH_PROXY_ROUTES.len();
+            let route = GitHubRoute::Proxy(index);
+            match self.request_on_route(route, direct_url, accept, git_protocol) {
+                Ok(response) => {
+                    require_route_host(&response, route, &[])?;
+                    self.route.set(route);
+                    return Ok(Some(response));
+                }
+                Err(ureq::Error::StatusCode(404)) if !retry_404 => {
+                    self.route.set(route);
+                    return Ok(None);
+                }
+                Err(ureq::Error::StatusCode(404)) => {
+                    not_found += 1;
+                    failures.push(format!("{}: 404", GH_PROXY_ROUTES[index].1));
+                }
+                Err(error) => failures.push(format!("{}: {error}", GH_PROXY_ROUTES[index].1)),
+            }
+        }
+        if not_found == GH_PROXY_ROUTES.len() {
+            return Ok(None);
+        }
+        Err(ManagerError::new(
+            "network_error",
+            format!(
+                "{context}: all proxy nodes failed ({})",
+                failures.join("; ")
+            ),
+        ))
     }
 
     fn request_on_route(
@@ -1028,7 +1061,7 @@ fn country_code_is_cn(country: &str) -> Option<bool> {
 
 fn route_from_region_probes(probes: [Option<bool>; 2]) -> Option<GitHubRoute> {
     if probes.contains(&Some(true)) {
-        Some(GitHubRoute::Proxy)
+        Some(GitHubRoute::Proxy(0))
     } else if probes.iter().any(Option::is_some) {
         Some(GitHubRoute::Direct)
     } else {
@@ -1039,8 +1072,42 @@ fn route_from_region_probes(probes: [Option<bool>; 2]) -> Option<GitHubRoute> {
 fn routed_url(route: GitHubRoute, direct_url: &str) -> String {
     match route {
         GitHubRoute::Direct => direct_url.to_owned(),
-        GitHubRoute::Proxy => format!("{GH_PROXY_ROOT}{direct_url}"),
+        GitHubRoute::Proxy(index) => format!("{}{direct_url}", GH_PROXY_ROUTES[index].0),
     }
+}
+
+fn select_proxy_index() -> usize {
+    let (sender, receiver) = mpsc::channel();
+    for index in 0..GH_PROXY_ROUTES.len() {
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            if proxy_responds(index) {
+                let _ = sender.send(index);
+            }
+        });
+    }
+    drop(sender);
+    receiver.recv_timeout(Duration::from_secs(4)).unwrap_or(0)
+}
+
+fn proxy_responds(index: usize) -> bool {
+    let config = Agent::config_builder()
+        .https_only(true)
+        .max_redirects(2)
+        .timeout_global(Some(Duration::from_secs(4)))
+        .timeout_connect(Some(Duration::from_secs(3)))
+        .timeout_recv_response(Some(Duration::from_secs(3)))
+        .build();
+    let agent = Agent::new_with_config(config);
+    let response = agent
+        .get(&routed_url(GitHubRoute::Proxy(index), GH_PROXY_PROBE_URL))
+        .header("Accept", "application/x-git-upload-pack-advertisement")
+        .header("Git-Protocol", "version=1")
+        .header("User-Agent", concat!("csa/", env!("CARGO_PKG_VERSION")))
+        .call();
+    response
+        .as_ref()
+        .is_ok_and(|response| require_route_host(response, GitHubRoute::Proxy(index), &[]).is_ok())
 }
 
 fn release_asset_url(release_tag: &str, asset_name: &str) -> String {
@@ -1065,10 +1132,9 @@ fn require_route_host(
     route: GitHubRoute,
     direct_hosts: &[&str],
 ) -> Result<()> {
-    if route == GitHubRoute::Proxy {
-        require_response_host(response, &["gh-proxy.com"])
-    } else {
-        require_response_host(response, direct_hosts)
+    match route {
+        GitHubRoute::Direct => require_response_host(response, direct_hosts),
+        GitHubRoute::Proxy(index) => require_response_host(response, &[GH_PROXY_ROUTES[index].1]),
     }
 }
 
@@ -1419,29 +1485,6 @@ fn validate_catalog_descriptor(
     Ok(())
 }
 
-fn validate_descriptor(
-    descriptor: &CompatibilityRelease,
-    release_tag: &str,
-    csa_commit: &str,
-    compat_id: &str,
-    upstream_version: &str,
-    upstream_tag: &str,
-    upstream_commit: &str,
-) -> Result<()> {
-    validate_catalog_descriptor(descriptor, release_tag, csa_commit, compat_id)?;
-    descriptor_artifact(descriptor, BUILD_TARGET)?;
-    if descriptor.upstream.version != upstream_version
-        || descriptor.upstream.tag != upstream_tag
-        || descriptor.upstream.commit != upstream_commit
-    {
-        return Err(ManagerError::new(
-            "invalid_compatibility_release",
-            "compatibility provenance differs from the exact release, source commit, upstream, or target",
-        ));
-    }
-    Ok(())
-}
-
 fn descriptor_assets(descriptor: &CompatibilityRelease) -> Result<BTreeMap<String, &ReleaseFile>> {
     let mut assets = BTreeMap::new();
     let mut paths = BTreeSet::new();
@@ -1498,44 +1541,6 @@ fn validate_declared_asset(file: &ReleaseFile, checksums: &BTreeMap<String, Stri
         return Err(ManagerError::new(
             "invalid_compatibility_release",
             format!("release checksum differs for asset: {}", file.asset),
-        ));
-    }
-    Ok(())
-}
-
-fn validate_downloaded_compatibility(
-    compatibility: &LoadedCompatibility,
-    descriptor: &CompatibilityRelease,
-    upstream_commit: &str,
-) -> Result<()> {
-    let manifest = &compatibility.manifest;
-    let manifest_artifact = compatibility.artifact();
-    let release_artifact = descriptor_artifact(descriptor, compatibility.selected_target())?;
-    if manifest.compat_id != descriptor.compat_id
-        || manifest.codex_version != descriptor.upstream.version
-        || manifest.upstream_tag != descriptor.upstream.tag
-        || manifest.upstream_commit != upstream_commit
-        || compatibility.selected_target() != BUILD_TARGET
-        || manifest_artifact.filename != release_artifact.path
-        || manifest_artifact.size != release_artifact.size
-        || manifest_artifact.sha256 != release_artifact.sha256
-    {
-        return Err(ManagerError::new(
-            "invalid_compatibility_release",
-            "downloaded manifest differs from the release provenance or artifact",
-        ));
-    }
-    let expected_paths: BTreeSet<_> = compatibility.payload_files()?.into_keys().collect();
-    let actual_paths: BTreeSet<_> = descriptor
-        .payload
-        .iter()
-        .map(|file| file.path.clone())
-        .collect();
-    if expected_paths != actual_paths || release_artifact.path != compatibility.artifact().filename
-    {
-        return Err(ManagerError::new(
-            "invalid_compatibility_release",
-            "release payload files do not exactly match the manifest",
         ));
     }
     Ok(())
@@ -1611,14 +1616,15 @@ fn network_error(context: &str, error: impl std::fmt::Display) -> ManagerError {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUILD_TARGET, CSA_REPOSITORY, CompatibilityRelease, GitHubClient, GitHubRoute,
-        InstallCandidate, InstallCatalog, InstallCatalogEntry, MAX_ARTIFACT_BYTES,
-        OPENAI_REPOSITORY, ProgressReader, ReleaseFile, UpstreamRelease, compatibility_tags,
-        country_from_alibaba_region, country_from_cloudflare_trace, descriptor_assets,
-        install_candidates, parse_checksums, parse_git_refs, patch_revision, peel_tag_from_refs,
-        release_asset_url, require_uri_host, route_from_region_probes, routed_url,
-        select_automatic, should_try_proxy, stable_release_version, take_selected_candidate,
-        valid_recorded_on, validate_declared_asset, validate_descriptor, validate_install_catalog,
+        BUILD_TARGET, CSA_REPOSITORY, CompatibilityRelease, GH_PROXY_PROBE_URL, GH_PROXY_ROUTES,
+        GitHubClient, GitHubRoute, InstallCandidate, InstallCatalog, InstallCatalogEntry,
+        MAX_ARTIFACT_BYTES, OPENAI_REPOSITORY, ProgressReader, ReleaseFile, UpstreamRelease,
+        compatibility_tags, country_from_alibaba_region, country_from_cloudflare_trace,
+        descriptor_artifact, descriptor_assets, install_candidates, parse_checksums,
+        parse_git_refs, patch_revision, peel_tag_from_refs, release_asset_url, require_uri_host,
+        route_from_region_probes, routed_url, select_automatic, should_try_proxy,
+        stable_release_version, take_selected_candidate, valid_recorded_on,
+        validate_catalog_descriptor, validate_declared_asset, validate_install_catalog,
     };
     use crate::manager::InstallEvent;
     use std::collections::BTreeMap;
@@ -1865,27 +1871,22 @@ mod tests {
             artifacts: BTreeMap::new(),
         };
         assert!(
-            validate_descriptor(
+            validate_catalog_descriptor(
                 &descriptor,
                 "compat-rust-v1.2.3-native-join-p1",
                 &csa_commit,
                 "rust-v1.2.3-native-join-p1",
-                "1.2.3",
-                "rust-v1.2.3",
-                &commit,
             )
             .is_ok()
         );
-        descriptor.upstream.commit = "d".repeat(40);
+        assert!(descriptor_artifact(&descriptor, BUILD_TARGET).is_ok());
+        descriptor.upstream.tag = "rust-v9.9.9".to_owned();
         assert!(
-            validate_descriptor(
+            validate_catalog_descriptor(
                 &descriptor,
                 "compat-rust-v1.2.3-native-join-p1",
                 &csa_commit,
                 "rust-v1.2.3-native-join-p1",
-                "1.2.3",
-                "rust-v1.2.3",
-                &commit,
             )
             .is_err()
         );
@@ -1924,8 +1925,25 @@ mod tests {
         let direct = release_asset_url(tag, "SHA256SUMS");
         assert_eq!(routed_url(GitHubRoute::Direct, &direct), direct);
         assert_eq!(
-            routed_url(GitHubRoute::Proxy, &direct),
-            format!("https://gh-proxy.com/{direct}")
+            routed_url(GitHubRoute::Proxy(0), &direct),
+            format!("https://gh-proxy.org/{direct}")
+        );
+        assert_eq!(
+            routed_url(GitHubRoute::Proxy(6), &direct),
+            format!("https://ghfast.top/{direct}")
+        );
+        assert_eq!(
+            GH_PROXY_PROBE_URL,
+            "https://github.com/DSLZL/CSA.git/info/refs?service=git-upload-pack"
+        );
+        assert_eq!(GH_PROXY_ROUTES.len(), 7);
+        assert_eq!(
+            GH_PROXY_ROUTES
+                .iter()
+                .map(|(_, host)| *host)
+                .collect::<std::collections::BTreeSet<_>>()
+                .len(),
+            GH_PROXY_ROUTES.len()
         );
         assert_eq!(country_from_cloudflare_trace(b"loc=CN\n"), Some(true));
         assert_eq!(country_from_cloudflare_trace(b"loc=US\n"), Some(false));
@@ -1946,11 +1964,11 @@ mod tests {
         );
         assert_eq!(
             route_from_region_probes([Some(false), Some(true)]),
-            Some(GitHubRoute::Proxy)
+            Some(GitHubRoute::Proxy(0))
         );
         assert_eq!(
             route_from_region_probes([Some(true), Some(false)]),
-            Some(GitHubRoute::Proxy)
+            Some(GitHubRoute::Proxy(0))
         );
         assert_eq!(
             route_from_region_probes([Some(false), None]),

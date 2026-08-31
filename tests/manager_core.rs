@@ -488,6 +488,18 @@ fn prebuilt_prepare_status_and_isolated_exec_are_fail_closed() {
             .manifest_path
             .starts_with(manager_root.canonicalize().unwrap().join("manifests"))
     );
+    assert_eq!(
+        report
+            .state
+            .manifest_path
+            .parent()
+            .and_then(Path::parent)
+            .and_then(Path::file_name),
+        Some(std::ffi::OsStr::new("_runtime"))
+    );
+    let cached_payload = manager_root.join("manifests").join(&report.state.compat_id);
+    assert!(cached_payload.exists());
+    fs::remove_dir_all(cached_payload).unwrap();
     fs::remove_dir_all(fixture.manifest.parent().unwrap()).unwrap();
     assert_eq!(fs::read(&fixture.official).unwrap(), b"official-launcher");
     assert_eq!(
@@ -501,7 +513,7 @@ fn prebuilt_prepare_status_and_isolated_exec_are_fail_closed() {
     let record = isolation_root.join("evidence/exec.json");
     let outcome = exec(
         ExecOptions {
-            manager_root: Some(manager_root),
+            manager_root: Some(manager_root.clone()),
             isolation: IsolationRequest {
                 codex_home: isolation_root.join("home"),
                 cwd: cwd.clone(),
@@ -584,6 +596,11 @@ fn prebuilt_prepare_status_and_isolated_exec_are_fail_closed() {
                 .exists()
         );
     }
+
+    fs::write(&report.state.manifest_path, b"invalid runtime manifest").unwrap();
+    let invalid = status(Some(manager_root), &runner).unwrap();
+    assert_eq!(invalid.status, "invalidated");
+    assert!(invalid.reason.unwrap().contains("invalid_runtime_manifest"));
 }
 
 #[test]

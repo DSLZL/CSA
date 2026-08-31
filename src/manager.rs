@@ -3,7 +3,9 @@ use crate::activation::{
     ActivationReport, CommandResolution, PlugReport, inspect as inspect_activation,
     inspect_command_resolution, plug, purge, recover as recover_activation, unplug,
 };
-use crate::compat::{ArtifactEntry, ContractStep, LoadedCompatibility, TestContract};
+use crate::compat::{
+    ArtifactEntry, ContractStep, LoadedCompatibility, RuntimeManifest, TestContract,
+};
 use crate::detect::{
     FileFingerprint, OfficialCodex, detect_official, find_executable, fingerprint, fingerprint_file,
 };
@@ -11,18 +13,21 @@ use crate::error::{ManagerError, Result};
 use crate::hash::sha256_bytes;
 use crate::isolation::{IsolationPlan, IsolationRequest};
 use crate::online::{
-    InstallSelector, resolve_online_install_with_progress, resolve_online_install_with_selector,
+    InstallSelector, OnlineBundle, resolve_online_install_with_progress,
+    resolve_online_install_with_selector,
 };
 use crate::process::{CommandResult, CommandSpec, ProcessRunner};
 use crate::state::{
     Clock, ManagerPaths, PrepareLock, PreparedState, StateStore, ensure_managed_directory,
-    remove_managed_tree, write_record,
+    remove_managed_tree, write_new_synced, write_record,
 };
 use serde::Serialize;
 use std::collections::BTreeMap;
 use std::ffi::{OsStr, OsString};
 use std::fs;
 use std::path::{Path, PathBuf};
+
+const RUNTIME_MANIFEST_DIR: &str = "_runtime";
 
 #[derive(Clone, Debug)]
 pub struct DoctorOptions {
@@ -84,6 +89,8 @@ pub enum InstallEvent {
     SelectedCompatibility {
         compat_id: String,
     },
+    DownloadingReleaseMetadata,
+    ConnectingArtifact,
     ArtifactProgress {
         downloaded_bytes: u64,
         total_bytes: u64,
@@ -259,15 +266,14 @@ pub fn prepare(
     compatibility.test_contract()?;
     let paths = ManagerPaths::resolve(options.manager_root)?;
     let _lock = PrepareLock::acquire(&paths)?;
-    let store = StateStore::new(&paths);
-    store.recover()?;
+    StateStore::new(&paths).recover()?;
     let official_before = detect_official(
         runner,
         options.official.as_deref(),
         options.official_native.as_deref(),
         std::slice::from_ref(&paths.root),
     )?;
-    require_compatible_official(&compatibility, &official_before)?;
+    require_compatible_official(&compatibility.manifest.codex_version, &official_before)?;
 
     if let Some(source_artifact) = options.artifact.as_deref() {
         reject_same_file(source_artifact, &official_before)?;
@@ -281,47 +287,23 @@ pub fn prepare(
             .expect("exclusive prepare source checked")
     };
     let artifact_path = publish_artifact(
-        &compatibility,
+        &compatibility.manifest.compat_id,
+        compatibility.artifact(),
         &paths,
         &candidate,
         &official_before,
         provider,
     )?;
-    let official_after = detect_official(
-        runner,
-        Some(&official_before.executable.path),
-        official_before
-            .native
-            .as_ref()
-            .map(|native| native.path.as_path()),
-        std::slice::from_ref(&paths.root),
-    )?;
-    if official_before != official_after {
-        return Err(ManagerError::new(
-            "official_changed",
-            "official Codex fingerprint changed during prepare",
-        ));
-    }
-    let artifact = fingerprint(&artifact_path)?;
     let compatibility = publish_compatibility(&compatibility, &paths)?;
-    let state = PreparedState {
-        schema: 2,
-        compat_id: compatibility.manifest.compat_id.clone(),
-        manifest_path: compatibility.manifest_path.clone(),
-        build_target: compatibility.selected_target().to_owned(),
-        artifact_path: artifact.path,
-        artifact_sha256: artifact.sha256,
-        artifact_size: artifact.size,
-        official: official_after,
-        prepared_at_unix_seconds: clock.unix_seconds()?,
-    };
-    store.save(&state)?;
-    Ok(PrepareReport {
-        schema: 1,
-        status: "prepared",
-        state,
-        official_unchanged: true,
-    })
+    let runtime = RuntimeManifest::from_compatibility(&compatibility)?;
+    finalize_prepared_state(
+        &runtime,
+        &paths,
+        official_before,
+        artifact_path,
+        runner,
+        clock,
+    )
 }
 
 pub fn install(
@@ -384,8 +366,8 @@ pub fn install_with_progress_and_selector(
             } else {
                 resolve_online_install_with_progress(&options, runner, progress)?
             };
-            install_local(
-                bundle.prepare_options(),
+            install_online(
+                bundle,
                 runner,
                 clock,
                 provider,
@@ -407,6 +389,45 @@ fn install_local(
     let manager_root = options.manager_root.clone();
     progress(InstallEvent::Preparing);
     let prepare = prepare(options, runner, clock, provider)?;
+    finish_install(
+        manager_root,
+        prepare,
+        runner,
+        clock,
+        manager_executable,
+        progress,
+    )
+}
+
+fn install_online(
+    bundle: OnlineBundle,
+    runner: &dyn ProcessRunner,
+    clock: &dyn Clock,
+    provider: &dyn ArtifactProvider,
+    manager_executable: &Path,
+    progress: &mut dyn FnMut(InstallEvent),
+) -> Result<InstallReport> {
+    let manager_root = bundle.manager_root.clone();
+    progress(InstallEvent::Preparing);
+    let prepare = prepare_online(&bundle, runner, clock, provider)?;
+    finish_install(
+        manager_root,
+        prepare,
+        runner,
+        clock,
+        manager_executable,
+        progress,
+    )
+}
+
+fn finish_install(
+    manager_root: Option<PathBuf>,
+    prepare: PrepareReport,
+    runner: &dyn ProcessRunner,
+    clock: &dyn Clock,
+    manager_executable: &Path,
+    progress: &mut dyn FnMut(InstallEvent),
+) -> Result<InstallReport> {
     progress(InstallEvent::Activating);
     let activation = match plug(manager_root.clone(), runner, clock, manager_executable) {
         Ok(report) => report,
@@ -427,6 +448,85 @@ fn install_local(
         status: "installed",
         prepare,
         activation,
+    })
+}
+
+fn prepare_online(
+    bundle: &OnlineBundle,
+    runner: &dyn ProcessRunner,
+    clock: &dyn Clock,
+    provider: &dyn ArtifactProvider,
+) -> Result<PrepareReport> {
+    let paths = ManagerPaths::resolve(bundle.manager_root.clone())?;
+    let _lock = PrepareLock::acquire(&paths)?;
+    StateStore::new(&paths).recover()?;
+    let official_before = detect_official(
+        runner,
+        Some(&bundle.official),
+        bundle.official_native.as_deref(),
+        std::slice::from_ref(&paths.root),
+    )?;
+    require_compatible_official(&bundle.runtime.codex_version, &official_before)?;
+    reject_same_file(&bundle.artifact, &official_before)?;
+
+    let entry = ArtifactEntry {
+        url: "artifact://verified-release".to_owned(),
+        filename: bundle.runtime.artifact.filename.clone(),
+        sha256: bundle.runtime.artifact.sha256.clone(),
+        size: bundle.runtime.artifact.size,
+    };
+    let artifact_path = publish_artifact(
+        &bundle.runtime.compat_id,
+        &entry,
+        &paths,
+        &bundle.artifact,
+        &official_before,
+        provider,
+    )?;
+    finalize_prepared_state(
+        &bundle.runtime,
+        &paths,
+        official_before,
+        artifact_path,
+        runner,
+        clock,
+    )
+}
+
+fn finalize_prepared_state(
+    runtime: &RuntimeManifest,
+    paths: &ManagerPaths,
+    official_before: OfficialCodex,
+    artifact_path: PathBuf,
+    runner: &dyn ProcessRunner,
+    clock: &dyn Clock,
+) -> Result<PrepareReport> {
+    let official_after = redetect(&official_before, paths, runner)?;
+    if official_before != official_after {
+        return Err(ManagerError::new(
+            "official_changed",
+            "official Codex fingerprint changed during prepare",
+        ));
+    }
+    let artifact = fingerprint(&artifact_path)?;
+    let runtime_manifest_path = publish_runtime_manifest(runtime, paths)?;
+    let state = PreparedState {
+        schema: 2,
+        compat_id: runtime.compat_id.clone(),
+        manifest_path: runtime_manifest_path,
+        build_target: runtime.build_target.clone(),
+        artifact_path: artifact.path,
+        artifact_sha256: artifact.sha256,
+        artifact_size: artifact.size,
+        official: official_after,
+        prepared_at_unix_seconds: clock.unix_seconds()?,
+    };
+    StateStore::new(paths).save(&state)?;
+    Ok(PrepareReport {
+        schema: 1,
+        status: "prepared",
+        state,
+        official_unchanged: true,
     })
 }
 
@@ -522,6 +622,58 @@ fn compare_payload_files(
         }
     }
     Ok(())
+}
+
+fn publish_runtime_manifest(runtime: &RuntimeManifest, paths: &ManagerPaths) -> Result<PathBuf> {
+    let directory = paths
+        .manifests
+        .join(RUNTIME_MANIFEST_DIR)
+        .join(&runtime.compat_id);
+    ensure_managed_directory(&paths.root, &directory)?;
+    let final_path = directory.join(format!("{}.toml", runtime.build_target));
+    if final_path.exists() {
+        let existing = RuntimeManifest::load(&final_path)?;
+        if existing != *runtime {
+            return Err(ManagerError::new(
+                "runtime_manifest_mismatch",
+                "cached runtime manifest differs from the verified release",
+            ));
+        }
+        return final_path.canonicalize().map_err(|error| {
+            ManagerError::io(
+                &format!("canonicalize runtime manifest {}", final_path.display()),
+                error,
+            )
+        });
+    }
+
+    let staged = directory.join(format!(
+        ".{}.staging-{}.toml",
+        runtime.build_target,
+        std::process::id()
+    ));
+    remove_staged_file(&staged)?;
+    let bytes = toml::to_string(runtime)
+        .map_err(|error| ManagerError::new("invalid_runtime_manifest", error.to_string()))?;
+    write_new_synced(&staged, bytes.as_bytes())?;
+    let staged_runtime = RuntimeManifest::load(&staged)?;
+    if staged_runtime != *runtime {
+        let _ = fs::remove_file(&staged);
+        return Err(ManagerError::new(
+            "runtime_manifest_mismatch",
+            "staged runtime manifest differs from the verified release",
+        ));
+    }
+    if let Err(error) = fs::rename(&staged, &final_path) {
+        let _ = fs::remove_file(&staged);
+        return Err(ManagerError::io("publish runtime manifest", error));
+    }
+    final_path.canonicalize().map_err(|error| {
+        ManagerError::io(
+            &format!("canonicalize runtime manifest {}", final_path.display()),
+            error,
+        )
+    })
 }
 
 pub fn uninstall(manager_root: Option<PathBuf>) -> Result<UninstallReport> {
@@ -756,16 +908,13 @@ struct RecordedOutcome {
     error: Option<String>,
 }
 
-fn require_compatible_official(
-    compatibility: &LoadedCompatibility,
-    official: &OfficialCodex,
-) -> Result<()> {
-    if official.version != compatibility.manifest.codex_version {
+fn require_compatible_official(codex_version: &str, official: &OfficialCodex) -> Result<()> {
+    if official.version != codex_version {
         return Err(ManagerError::new(
             "unsupported_official_version",
             format!(
                 "payload requires {}, official Codex is {}",
-                compatibility.manifest.codex_version, official.version
+                codex_version, official.version
             ),
         ));
     }
@@ -790,12 +939,12 @@ pub(crate) fn validate_prepared_state(
             "prepared state predates official runtime binding; run csa install again",
         ));
     }
-    let compatibility =
-        LoadedCompatibility::load_for_target(&state.manifest_path, &state.build_target)?;
-    if state.compat_id != compatibility.manifest.compat_id
-        || state.build_target != compatibility.selected_target()
-        || state.artifact_sha256 != compatibility.artifact().sha256
-        || state.artifact_size != compatibility.artifact().size
+    let runtime = load_prepared_runtime(state, paths)?;
+    if state.compat_id != runtime.compat_id
+        || state.build_target != runtime.build_target
+        || state.official.version != runtime.codex_version
+        || state.artifact_sha256 != runtime.artifact.sha256
+        || state.artifact_size != runtime.artifact.size
     {
         return Err(ManagerError::new(
             "state_manifest_mismatch",
@@ -818,6 +967,46 @@ pub(crate) fn validate_prepared_state(
     }
     reject_same_fingerprint(&artifact, &official)?;
     Ok(official)
+}
+
+fn load_prepared_runtime(state: &PreparedState, paths: &ManagerPaths) -> Result<RuntimeManifest> {
+    let runtime_parent = state
+        .manifest_path
+        .parent()
+        .and_then(Path::parent)
+        .and_then(Path::file_name)
+        .and_then(OsStr::to_str)
+        == Some(RUNTIME_MANIFEST_DIR);
+    if !runtime_parent {
+        let legacy =
+            LoadedCompatibility::load_for_target(&state.manifest_path, &state.build_target)?;
+        return RuntimeManifest::from_compatibility(&legacy);
+    }
+
+    let expected_root = paths
+        .manifests
+        .join(RUNTIME_MANIFEST_DIR)
+        .join(&state.compat_id)
+        .canonicalize()
+        .map_err(|error| ManagerError::io("canonicalize runtime manifest directory", error))?;
+    let manifest_path = state.manifest_path.canonicalize().map_err(|error| {
+        ManagerError::io(
+            &format!(
+                "canonicalize runtime manifest {}",
+                state.manifest_path.display()
+            ),
+            error,
+        )
+    })?;
+    if manifest_path.parent() != Some(expected_root.as_path())
+        || manifest_path.file_name() != Some(OsStr::new(&format!("{}.toml", state.build_target)))
+    {
+        return Err(ManagerError::new(
+            "unsafe_runtime_manifest_path",
+            "runtime manifest must match the prepared compatibility inside the manager root",
+        ));
+    }
+    RuntimeManifest::load(&manifest_path)
 }
 
 fn redetect(
@@ -854,13 +1043,13 @@ fn reject_same_fingerprint(candidate: &FileFingerprint, official: &OfficialCodex
 }
 
 fn publish_artifact(
-    compatibility: &LoadedCompatibility,
+    compat_id: &str,
+    entry: &ArtifactEntry,
     paths: &ManagerPaths,
     source: &Path,
     official: &OfficialCodex,
     provider: &dyn ArtifactProvider,
 ) -> Result<PathBuf> {
-    let entry = compatibility.artifact();
     let candidate = fingerprint(source)?;
     if candidate.sha256 != entry.sha256 || candidate.size != entry.size {
         return Err(ManagerError::new(
@@ -874,7 +1063,7 @@ fn publish_artifact(
     reject_same_fingerprint(&candidate, official)?;
     let directory = paths
         .artifacts
-        .join(&compatibility.manifest.compat_id)
+        .join(compat_id)
         .join(&entry.sha256)
         .join("runtime")
         .join("bin");

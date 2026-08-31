@@ -1453,7 +1453,6 @@ def test_release_stream_contracts() -> None:
         "payload/codex/**",
         "release/**",
         "scripts/**",
-        "validation/**",
     ):
         assert ci_triggers.count(f'      - "{ci_path}"') == 2
     for documentation_path in ("README.md", "README_ZH.md", "docs/**", ".trellis/**"):

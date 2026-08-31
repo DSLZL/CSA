@@ -181,6 +181,20 @@ impl InstallProgress {
                 self.language
                     .text("Selected compatibility", "已选择兼容版本")
             ),
+            InstallEvent::DownloadingReleaseMetadata => writeln!(
+                writer,
+                "{}",
+                self.language
+                    .text("Verifying release metadata...", "正在验证发布信息……")
+            ),
+            InstallEvent::ConnectingArtifact => writeln!(
+                writer,
+                "{}",
+                self.language.text(
+                    "Connecting to the patched Codex download...",
+                    "正在连接补丁版 Codex 下载……"
+                )
+            ),
             InstallEvent::VerifyingArtifact => writeln!(
                 writer,
                 "{}",
@@ -2197,6 +2211,12 @@ mod tests {
             .write_event_to(&mut output, InstallEvent::DetectingOfficial, start)
             .unwrap();
         progress
+            .write_event_to(&mut output, InstallEvent::DownloadingReleaseMetadata, start)
+            .unwrap();
+        progress
+            .write_event_to(&mut output, InstallEvent::ConnectingArtifact, start)
+            .unwrap();
+        progress
             .write_event_to(
                 &mut output,
                 InstallEvent::ArtifactProgress {
@@ -2237,6 +2257,8 @@ mod tests {
         assert_eq!(output.matches("Downloading patched Codex").count(), 2);
         assert!(output.contains(" 50%"));
         assert!(output.contains("100%"));
+        assert!(output.contains("Verifying release metadata..."));
+        assert!(output.contains("Connecting to the patched Codex download..."));
         assert!(output.contains("Verifying downloaded artifact..."));
 
         let mut progress = InstallProgress::new(OutputMode::Json, false);
@@ -2286,6 +2308,9 @@ mod tests {
             .write_event_to(&mut output, InstallEvent::DetectingOfficial, start)
             .unwrap();
         progress
+            .write_event_to(&mut output, InstallEvent::DownloadingReleaseMetadata, start)
+            .unwrap();
+        progress
             .write_event_to(
                 &mut output,
                 InstallEvent::ArtifactProgress {
@@ -2297,6 +2322,7 @@ mod tests {
             .unwrap();
         let output = String::from_utf8(output).unwrap();
         assert!(output.contains("正在检测官方 Codex……"));
+        assert!(output.contains("正在验证发布信息……"));
         assert!(output.contains("正在下载补丁版 Codex"));
     }
 }

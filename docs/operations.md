@@ -119,7 +119,7 @@ When stdin, stdout, and stderr are terminals, bare `csa install` opens a fixed f
 
 `csa install --yes`, `--json`, and any non-interactive stream skip the picker and auto-select the same unique greatest revision. An unresolved greatest-revision tie fails closed. Exact `--compat` also skips the picker and does not consult the display catalog; local `--manifest` mode rejects `--yes` and remains local.
 
-After a choice, CSA re-enters the existing exact verification path. The selected Release is checked against its peeled tag, CSA commit, upstream Codex tag and commit, manifest, descriptor/checksum coverage, file sizes, and SHA-256 values. A mismatch stops the install. Interactive terminals then show artifact download progress; `--json` and redirected output emit only the final JSON document.
+After a choice, CSA checks the selected Release against the commit from the already validated Git refs snapshot, the descriptor's complete checksum inventory, declared upstream identity, current target, file size, and SHA-256. It downloads only `SHA256SUMS`, `compatibility-release.json`, and the current-platform executable. Patch files, source hashes, the test contract, and the source manifest remain available in the Release for build/audit use but are not downloaded or stored by online install. A mismatch stops the install. Interactive terminals show metadata verification, download connection, byte progress, and final artifact verification; `--json` and redirected output emit only the final JSON document.
 
 To pin an older exact matching Release, select its full ID explicitly:
 
@@ -127,7 +127,7 @@ To pin an older exact matching Release, select its full ID explicitly:
 csa install --compat rust-v0.150.1-native-join-p8
 ```
 
-No GitHub login or token is required. Before the first GitHub request, CSA runs five-second bounded country probes against Cloudflare's fixed trace endpoint and Alibaba's Taobao IP service in parallel. If either one reports mainland China (`CN`), CSA starts with the same GitHub URL prefixed by `https://gh-proxy.com/`; without a `CN` result, it starts with GitHub directly. If both checks are unavailable, CSA still switches the rest of that installation to the mirror after a connection, timeout, throttling, or transient server failure. Country results are not logged or stored. Redirect hosts remain restricted and every downloaded file still has to pass the Release size and SHA-256 checks.
+No GitHub login or token is required. Before the first GitHub request, CSA runs five-second bounded country probes against Cloudflare's fixed trace endpoint and Alibaba's Taobao IP service in parallel. If either one reports mainland China (`CN`), CSA probes the fixed `gh-proxy.org`, `v4`, `v6`, `cdn`, `axisnow`, legacy `gh-proxy.com`, and `ghfast.top` hosts in parallel and starts with the first valid response. A failed node rotates to the remaining fixed hosts. Without a `CN` result, CSA starts with GitHub directly; qualifying direct network failures switch the rest of that installation to the same pool. Country and node results are not logged or stored. Redirect hosts remain restricted and every downloaded file still has to pass the Release size and SHA-256 checks.
 
 ## Install an exact local payload
 
@@ -160,7 +160,7 @@ The compatibility directory name must equal the manifest `compat_id`. Source pre
 
 ## Activate the shim
 
-On Windows, `install` prepares the payload, publishes `<manager-root>/bin/codex.exe`, moves that managed directory to the front of the current user's persistent `PATH`, and silently verifies the result with the system `where.exe`. It does not overwrite the official Codex launcher or modify the system `PATH`.
+On Windows, `install` publishes the verified executable and minimal runtime manifest, creates `<manager-root>/bin/codex.exe`, moves that managed directory to the front of the current user's persistent `PATH`, and silently verifies the result with the system `where.exe`. It does not overwrite the official Codex launcher or modify the system `PATH`.
 
 An already-running VS Code window keeps its inherited environment. To use the freshly installed shim immediately in the current PowerShell process:
 
