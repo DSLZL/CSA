@@ -1703,6 +1703,34 @@ mod tests {
     }
 
     #[test]
+    fn schema_two_install_catalog_deserializes_and_selects_current_target() {
+        let source_tag = "compat-rust-v0.10.0-native-join-p10";
+        let source_commit = "a".repeat(40);
+        let catalog: InstallCatalog = serde_json::from_value(serde_json::json!({
+            "schema": 2,
+            "repository": "DSLZL/CSA",
+            "source_release_tag": source_tag,
+            "source_commit": source_commit,
+            "entries": [{
+                "compat_id": "rust-v0.10.0-native-join-p10",
+                "release_tag": source_tag,
+                "release_commit": source_commit,
+                "codex_version": "0.10.0",
+                "build_targets": [BUILD_TARGET],
+                "patch_revision": 10,
+                "recorded_on": "2026-08-29"
+            }]
+        }))
+        .unwrap();
+        let refs = BTreeMap::from([(format!("refs/tags/{source_tag}"), source_commit.to_owned())]);
+
+        validate_install_catalog(&catalog, &refs, Some(source_tag)).unwrap();
+        let candidates = install_candidates(catalog, "0.10.0").unwrap();
+        assert_eq!(candidates.len(), 1);
+        assert_eq!(candidates[0].build_target, BUILD_TARGET);
+    }
+
+    #[test]
     fn bundled_install_catalog_is_valid_against_its_reviewed_refs() {
         let catalog: InstallCatalog =
             serde_json::from_str(super::INSTALL_CATALOG_BOOTSTRAP).unwrap();
