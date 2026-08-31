@@ -161,7 +161,6 @@ jobs:
 
       - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
         with:
-          toolchain: ${{ steps.resolve.outputs.rust_toolchain }}
           targets: ${{ steps.resolve.outputs.build_target }}
           components: rustfmt, clippy
 
@@ -175,10 +174,14 @@ jobs:
         shell: pwsh
         run: |
           $ErrorActionPreference = 'Stop'
-          if (-not (Test-Path -LiteralPath $env:SCCACHE_PATH -PathType Leaf)) {
-            throw "sccache executable is missing: $env:SCCACHE_PATH"
+          $sccache = $env:SCCACHE_PATH
+          if (-not (Test-Path -LiteralPath $sccache -PathType Leaf) -and (Test-Path -LiteralPath "$sccache.exe" -PathType Leaf)) {
+            $sccache = "$sccache.exe"
           }
-          $sccacheVersion = (& $env:SCCACHE_PATH --version).Trim()
+          if (-not (Test-Path -LiteralPath $sccache -PathType Leaf)) {
+            throw "sccache executable is missing: $sccache"
+          }
+          $sccacheVersion = (& $sccache --version).Trim()
           if ($LASTEXITCODE -ne 0 -or $sccacheVersion -ne 'sccache ${{ steps.resolve.outputs.sccache_version }}') {
             throw "sccache identity mismatch: $sccacheVersion"
           }
@@ -186,10 +189,11 @@ jobs:
           if ($LASTEXITCODE -ne 0 -or -not $rustcIdentity.Contains('commit-hash: ${{ steps.resolve.outputs.rustc_commit }}')) {
             throw 'Rust compiler commit does not match the compatibility manifest.'
           }
-          "RUSTC_WRAPPER=$env:SCCACHE_PATH" >> $env:GITHUB_ENV
-          & $env:SCCACHE_PATH --start-server
+          "SCCACHE_PATH=$sccache" >> $env:GITHUB_ENV
+          "RUSTC_WRAPPER=$sccache" >> $env:GITHUB_ENV
+          & $sccache --start-server
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          & $env:SCCACHE_PATH --zero-stats
+          & $sccache --zero-stats
 
       - name: Verify exact official runtime archive
         shell: pwsh

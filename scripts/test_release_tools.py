@@ -1160,6 +1160,7 @@ def test_release_stream_contracts() -> None:
     assert "runs-on: ubuntu-24.04" not in validation_workflow
     assert "shell: bash" not in validation_workflow
     assert "dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582" in validation_workflow
+    assert "toolchain: ${{ steps.resolve.outputs.rust_toolchain }}" not in validation_workflow
     assert "components: rustfmt, clippy" in validation_workflow
     assert "setup-msvc-env.ps1" in validation_workflow
     assert "python scripts/run_patch_contract.py" in validation_workflow
@@ -1169,6 +1170,8 @@ def test_release_stream_contracts() -> None:
     assert "Invoke-WebRequest" in validation_workflow
     assert "[Security.Cryptography.SHA512]::Create()" in validation_workflow
     assert "tar -tzf $archive" in validation_workflow
+    assert 'Test-Path -LiteralPath "$sccache.exe" -PathType Leaf' in validation_workflow
+    assert '"SCCACHE_PATH=$sccache" >> $env:GITHUB_ENV' in validation_workflow
     assert "llvm-toolchain-noble-21" in build_profile
     assert "6084F3CF814B57C1CF12EFD515CF4D18AF4F7421" in build_profile
     assert "/usr/lib/llvm-$LLVM_MAJOR/bin" in shared_build
