@@ -34,7 +34,7 @@ Compatibility facts belong in the catalog, manifest, build profile, runtime lock
 
 ## Toolchains and prerequisites
 
-The Manager crate declares Rust `1.89` as its minimum supported toolchain. Current CI, Manager release builds, patched Codex `0.150.1` p9, and the `0.151.0` p10 candidate are pinned to Rust `1.95.0`.
+The Manager crate declares Rust `1.89` as its minimum supported toolchain. Current CI, Manager release builds, and patched Codex `0.151.0` p10 are pinned to Rust `1.95.0`.
 
 Local work also uses:
 
@@ -173,8 +173,8 @@ The Windows distribution harness runs in disposable directories. It installs loc
 $TempRoot = Join-Path $env:TEMP ("csa-e2e-" + [Guid]::NewGuid().ToString('N'))
 
 powershell -NoProfile -File .\scripts\test_npm_distribution_windows.ps1 `
-  -MetaTarball C:\absolute\dslzl-csa-0.1.5.tgz `
-  -PlatformTarball C:\absolute\dslzl-csa-win32-x64-0.1.5.tgz `
+  -MetaTarball C:\absolute\dslzl-csa-0.1.6.tgz `
+  -PlatformTarball C:\absolute\dslzl-csa-win32-x64-0.1.6.tgz `
   -TempRoot $TempRoot `
   -OutputPath C:\absolute\trellis-e2e.json `
   -Official C:\absolute\official\codex.exe `
@@ -188,28 +188,28 @@ The parent process `PATH`, default `CODEX_HOME`, npm state, profile, and officia
 
 ## Current runtime evidence
 
-The accepted Windows x64 record for `rust-v0.150.1-native-join-p9` binds:
+The accepted Windows x64 record for `rust-v0.151.0-native-join-p10` binds:
 
 | Field | Accepted value |
 | --- | --- |
-| Codex version | `0.150.1` |
-| Artifact SHA-256 | `ce3cfe861f974c37b2217c0625c2e41574a5cfb48373b499f76c1108e1a86e76` |
-| Artifact size | `311046656` bytes |
-| Patch Validation run | `33236190927` |
-| Candidate build run | `33238015308` |
+| Codex version | `0.151.0` |
+| Candidate artifact SHA-256 | `67bdf36f6ac50a79c80b88e39506b2a32200ea5e8bc0d2af76eb34abfe656633` |
+| Candidate artifact size | `314201088` bytes |
+| Patch Validation run | `33316162397` |
+| Candidate build run | `33316173523` |
 
 Recorded acceptance passed:
 
-- checksum and absolute `codex-cli 0.150.1` execution;
-- binding to the complete official Bun runtime with six verified files;
+- exact candidate identity, checksum, and `codex-cli 0.151.0` execution;
+- isolated state database initialization;
 - an authenticated single-child Native Join with one Join call and the expected terminal sentinel;
-- unchanged official runtime fingerprints.
-- repair of legacy p8 database migration checksums without losing existing state;
-- unchanged database and successful official startup after running p9.
+- unchanged official runtime fingerprints;
+- unchanged real configuration and authentication files.
 
 The record does not verify:
 
 - multi-child Native Join;
+- database roundtrip;
 - Ultra runtime behavior;
 - interactive TUI acceptance.
 

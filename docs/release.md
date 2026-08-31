@@ -11,24 +11,24 @@ GitHub Actions is the release authority for both domains. Publishing a formal Ma
 
 ## Current release snapshot
 
-The current published Manager release is [`v0.1.5`](https://github.com/DSLZL/CSA/releases/tag/v0.1.5). The npm meta package is [`@dslzl/csa@0.1.5`](https://www.npmjs.com/package/@dslzl/csa).
+The current published Manager release is [`v0.1.6`](https://github.com/DSLZL/CSA/releases/tag/v0.1.6). The npm meta package is [`@dslzl/csa@0.1.6`](https://www.npmjs.com/package/@dslzl/csa).
 
-The current formal patched release is [`compat-rust-v0.150.1-native-join-p9`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.150.1-native-join-p9):
+The current formal patched release is [`compat-rust-v0.151.0-native-join-p10`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.151.0-native-join-p10):
 
 | Field | Value |
 | --- | --- |
-| Compatibility ID | `rust-v0.150.1-native-join-p9` |
-| Codex version | `0.150.1` |
-| Upstream tag | `rust-v0.150.1` |
-| Upstream commit | `90854393966b21e9ebfd21b122334eb09a20c93d` |
-| Patch-set version | `9` |
-| Patch count | `17` |
+| Compatibility ID | `rust-v0.151.0-native-join-p10` |
+| Codex version | `0.151.0` |
+| Upstream tag | `rust-v0.151.0` |
+| Upstream commit | `78c290807ce710180111df227df3b7a4fe845452` |
+| Patch-set version | `10` |
+| Patch count | `5` |
 | Rust toolchain | `1.95.0` |
-| Target | `x86_64-pc-windows-msvc` |
-| Production executable SHA-256 | `ce3cfe861f974c37b2217c0625c2e41574a5cfb48373b499f76c1108e1a86e76` |
-| Production executable size | `311046656` bytes |
+| Release targets | Windows x64/arm64, Linux x64/arm64 musl, macOS x64/arm64 |
+| Windows x64 production SHA-256 | `587cb1ea4753cf32919519b5d12b68001d059e828ce16c9a69b6347ff57cc54b` |
+| Windows x64 production size | `314201088` bytes |
 
-The accepted record is [`release/acceptance/rust-v0.150.1-native-join-p9/x86_64-pc-windows-msvc.json`](../release/acceptance/rust-v0.150.1-native-join-p9/x86_64-pc-windows-msvc.json). It references Patch Validation run [`33236190927`](https://github.com/DSLZL/CSA/actions/runs/33236190927) and candidate build run [`33238015308`](https://github.com/DSLZL/CSA/actions/runs/33238015308).
+The accepted Windows x64 record is [`release/acceptance/rust-v0.151.0-native-join-p10/x86_64-pc-windows-msvc.json`](../release/acceptance/rust-v0.151.0-native-join-p10/x86_64-pc-windows-msvc.json). It references Patch Validation run [`33316162397`](https://github.com/DSLZL/CSA/actions/runs/33316162397) and candidate build run [`33316173523`](https://github.com/DSLZL/CSA/actions/runs/33316173523).
 
 The committed candidate manifest intentionally contains placeholder artifact size and hash fields. The formal workflow finalizes a temporary manifest copy from its own production executable. The published manifest and Release descriptor, not the committed placeholder, describe the production asset.
 
@@ -123,7 +123,7 @@ Commit and push the reviewed version change to the default branch before dispatc
 Run `Release CSA` from the default branch with:
 
 ```text
-version=0.1.5
+version=0.1.6
 ```
 
 The workflow:
@@ -138,20 +138,20 @@ The workflow:
 8. creates an annotated `vX.Y.Z` tag and immutable GitHub Release;
 9. dispatches npm Trusted Publishing for that exact tag.
 
-The `v0.1.5` asset pattern is:
+The `v0.1.6` asset pattern is:
 
 ```text
-csa-v0.1.5-windows-x86_64.zip
-csa-v0.1.5-linux-x86_64.tar.gz
-csa-v0.1.5-linux-aarch64.tar.gz
-csa-v0.1.5-macos-x86_64.tar.gz
-csa-v0.1.5-macos-aarch64.tar.gz
-dslzl-csa-0.1.5.tgz
-dslzl-csa-win32-x64-0.1.5.tgz
-dslzl-csa-linux-x64-0.1.5.tgz
-dslzl-csa-linux-arm64-0.1.5.tgz
-dslzl-csa-darwin-x64-0.1.5.tgz
-dslzl-csa-darwin-arm64-0.1.5.tgz
+csa-v0.1.6-windows-x86_64.zip
+csa-v0.1.6-linux-x86_64.tar.gz
+csa-v0.1.6-linux-aarch64.tar.gz
+csa-v0.1.6-macos-x86_64.tar.gz
+csa-v0.1.6-macos-aarch64.tar.gz
+dslzl-csa-0.1.6.tgz
+dslzl-csa-win32-x64-0.1.6.tgz
+dslzl-csa-linux-x64-0.1.6.tgz
+dslzl-csa-linux-arm64-0.1.6.tgz
+dslzl-csa-darwin-x64-0.1.6.tgz
+dslzl-csa-darwin-arm64-0.1.6.tgz
 SHA256SUMS
 ```
 
@@ -177,14 +177,14 @@ Current package manifests bind `repository.url` to `https://github.com/DSLZL/CSA
 To publish an existing formal Release that predates the workflow, or to resume a partial run:
 
 ```powershell
-gh workflow run publish-npm.yml --ref main -f tag=v0.1.5
+gh workflow run publish-npm.yml --ref main -f tag=v0.1.6
 ```
 
 Verify the registry and launcher:
 
 ```powershell
 npm view @dslzl/csa version dist-tags.latest --registry=https://registry.npmjs.org
-npx --yes @dslzl/csa@0.1.5 --version
+npx --yes @dslzl/csa@0.1.6 --version
 ```
 
 ## Validate a patched compatibility

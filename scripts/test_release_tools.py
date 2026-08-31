@@ -81,7 +81,7 @@ def package_fixtures(root: Path) -> tuple[Path, Path, Path, Path]:
         "bin": {"csa": "bin/csa.js"},
         "optionalDependencies": optional,
     }
-    meta = root / "dslzl-csa-0.1.5.tgz"
+    meta = root / "dslzl-csa-0.1.6.tgz"
     write_tar(
         meta,
         {
@@ -105,7 +105,7 @@ def package_fixtures(root: Path) -> tuple[Path, Path, Path, Path]:
             "sha256": manager_hash,
         },
     }
-    npm_platform = root / "dslzl-csa-win32-x64-0.1.5.tgz"
+    npm_platform = root / "dslzl-csa-win32-x64-0.1.6.tgz"
     write_tar(
         npm_platform,
         {
@@ -147,7 +147,7 @@ def release_input(
         )
     value = {
         "schema": 1,
-        "release_version": "0.1.5",
+        "release_version": "0.1.6",
         "source": {"revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ref": None, "repository": None},
         "meta_tarball": str(meta),
         "platforms": results,
@@ -184,8 +184,8 @@ def test_assembler(root: Path) -> None:
     provenance = json.loads((first / "provenance.json").read_bytes())
     assert all(not Path(asset["path"]).is_absolute() for asset in provenance["assets"])
     assemble(REPOSITORY, inputs, second)
-    assert digest(first / "source" / "csa-0.1.5.tar.gz") == digest(
-        second / "source" / "csa-0.1.5.tar.gz"
+    assert digest(first / "source" / "csa-0.1.6.tar.gz") == digest(
+        second / "source" / "csa-0.1.6.tar.gz"
     )
 
     corrupt = root / "corrupt-platform.tgz"
@@ -248,7 +248,7 @@ def test_ci_input(root: Path) -> None:
         artifact_root,
         output,
         "a" * 40,
-        "refs/tags/v0.1.5",
+        "refs/tags/v0.1.6",
         "https://example.invalid/csa",
     )
     assert value["platforms"]["win32-x64"]["status"] == "pass"

@@ -8,10 +8,10 @@ CSA has two products with separate release streams:
 
 | Product | Release form | Current scope |
 | --- | --- | --- |
-| Manager | `vX.Y.Z` and `@dslzl/csa` | `0.1.5` on five Manager platforms |
-| Patched Codex | `compat-<compat_id>` | Codex `0.150.1` p9 on Windows x64 |
+| Manager | `vX.Y.Z` and `@dslzl/csa` | `0.1.6` on five Manager platforms |
+| Patched Codex | `compat-<compat_id>` | Codex `0.151.0` p10 with six native artifacts; acceptance on Windows x64 |
 
-The Manager can be installed on Windows x64, Linux x64, Linux arm64 glibc, macOS x64, and macOS arm64. The current patched Codex compatibility is Windows x64 only. A Manager package for an operating system does not imply that a patched compatibility is available there.
+The Manager can be installed on Windows x64, Linux x64, Linux arm64 glibc, macOS x64, and macOS arm64. The current patched Release publishes Windows x64/arm64, Linux x64/arm64 musl, and macOS x64/arm64 binaries. A Manager package for an operating system does not by itself guarantee an exact installable target.
 
 CSA treats these locations as separate identities:
 
@@ -27,14 +27,14 @@ Official Codex paths are read-only. The Manager rejects path overlap with its ow
 The npm distribution requires Node.js 18 or newer:
 
 ```powershell
-npm install --global @dslzl/csa@0.1.5
+npm install --global @dslzl/csa@0.1.6
 csa --version
 ```
 
 For a one-off command, use `npx`:
 
 ```powershell
-npx @dslzl/csa@0.1.5 --version
+npx @dslzl/csa@0.1.6 --version
 ```
 
 `npx --yes` suppresses npm's confirmation before it downloads a missing package. It does not bypass CSA validation or answer the later release picker. `csa install --yes` is the separate CSA option that auto-selects the recommended compatible Release.
@@ -65,7 +65,7 @@ npm view @dslzl/csa version --registry=https://registry.npmjs.org
 If the official registry returns the version but a configured mirror returns 404, use the official registry for this install or wait for the mirror to synchronize:
 
 ```powershell
-npm install --global @dslzl/csa@0.1.5 --registry=https://registry.npmjs.org
+npm install --global @dslzl/csa@0.1.6 --registry=https://registry.npmjs.org
 ```
 
 The same distinction applies to tools such as `bunx` when they are configured to use an npm mirror.
@@ -221,7 +221,7 @@ The nested activation status is:
 
 `activation.effective` is true only when the shim validates and the current process resolves `codex` to that shim. `activation.command_resolution` and `doctor.command_resolution` show the first resolved executable and whether it is the managed shim.
 
-Both official and patched Codex `0.150.1` report `codex-cli 0.150.1`. Version output alone does not prove which executable ran. Use `status`, command resolution, and the reported absolute paths together.
+Both official and patched Codex `0.151.0` report `codex-cli 0.151.0`. Version output alone does not prove which executable ran. Use `status`, command resolution, and the reported absolute paths together.
 
 An official Codex upgrade intentionally invalidates an older prepared binding. Run `status`, then install a CSA compatibility for the new exact version when one is available.
 
@@ -270,7 +270,7 @@ Evidence may contain paths, versions, hashes, timestamps, and exit results. It m
 
 ## Current limitations
 
-- The current formal patched compatibility is Codex `0.150.1` p9 on Windows x64.
-- Its formal acceptance covers an authenticated single-child Native Join. Multi-child Native Join, Ultra runtime behavior, and interactive TUI acceptance are still unverified.
-- Manager archives and npm packages are published for five platforms, but no non-Windows patched compatibility is currently published.
+- The current formal patched release is Codex `0.151.0` p10 with six native artifacts.
+- Its Windows x64 acceptance covers an authenticated single-child Native Join. Multi-child Native Join, database roundtrip, Ultra runtime behavior, and interactive TUI acceptance are still unverified.
+- Manager archives and npm packages are published for five platforms; Windows arm64 has a patched artifact but no Manager package.
 - `purge` intentionally leaves official files, user configuration, authentication, and external package-manager state untouched.

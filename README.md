@@ -7,7 +7,7 @@ A version-pinned, fail-closed manager for running a patched Codex CLI beside the
 [![CI](https://github.com/DSLZL/CSA/actions/workflows/ci.yml/badge.svg)](https://github.com/DSLZL/CSA/actions/workflows/ci.yml)
 [![CSA release](https://img.shields.io/github/v/release/DSLZL/CSA?filter=v%2A&label=CSA)](https://github.com/DSLZL/CSA/releases)
 [![npm](https://img.shields.io/npm/v/%40dslzl%2Fcsa)](https://www.npmjs.com/package/@dslzl/csa)
-[![Patched Codex](https://img.shields.io/badge/patched%20Codex-0.150.1%20accepted-white)](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.150.1-native-join-p9)
+[![Patched Codex](https://img.shields.io/badge/patched%20Codex-0.151.0%20p10-white)](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.151.0-native-join-p10)
 
 [Quick start](#quick-start) · [Current support](#current-support) · [Commands](#command-reference) · [Documentation](#development-and-documentation) · [简体中文](README_ZH.md)
 
@@ -16,7 +16,7 @@ A version-pinned, fail-closed manager for running a patched Codex CLI beside the
 CSA adds native subagent joins and a live subagent view to Codex without replacing the official CLI. The Manager verifies the installed official runtime, downloads one exact patched compatibility from a formal GitHub Release, and keeps every managed file in a separate directory.
 
 > [!IMPORTANT]
-> CSA Manager `0.1.5` is published as `@dslzl/csa` and as the `v0.1.5` GitHub Release. The current formal patched compatibility is Codex `0.150.1` p9 for Windows x64.
+> CSA Manager `0.1.6` is published as `@dslzl/csa` and as the `v0.1.6` GitHub Release. The current formal patched release is Codex `0.151.0` p10 with six native artifacts; accepted runtime evidence covers Windows x64.
 
 ## Why CSA
 
@@ -34,8 +34,8 @@ The Manager does not overwrite official Codex files, copy the default `CODEX_HOM
 
 | Product | Current release | Platforms |
 | --- | --- | --- |
-| CSA Manager | `0.1.5` | Windows x64, Linux x64, Linux arm64 glibc, macOS x64, macOS arm64 |
-| Patched Codex CLI | [`rust-v0.150.1-native-join-p9`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.150.1-native-join-p9) | Windows x64 |
+| CSA Manager | `0.1.6` | Windows x64, Linux x64, Linux arm64 glibc, macOS x64, macOS arm64 |
+| Patched Codex CLI | [`rust-v0.151.0-native-join-p10`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.151.0-native-join-p10) | Windows x64/arm64, Linux x64/arm64 musl, macOS x64/arm64; acceptance: Windows x64 |
 
 Manager availability on a platform does not imply that a patched Codex compatibility exists for that platform. The [compatibility index](release/compatibility-index.json) is authoritative for repository payloads, while normal installation discovers published `compat-*` Releases.
 
@@ -48,23 +48,23 @@ Online installation is exact-match only. A release is selectable only when its t
 You need Node.js 18 or newer and a working official Codex CLI installation.
 
 ```powershell
-npm install --global @dslzl/csa@0.1.5
+npm install --global @dslzl/csa@0.1.6
 csa --version
 ```
 
 You can also run the CLI without a global install:
 
 ```powershell
-npx @dslzl/csa@0.1.5 --version
+npx @dslzl/csa@0.1.6 --version
 ```
 
 Adding `--yes` to `npx` only suppresses npm's package-install confirmation. It does not choose a patched Codex release for you:
 
 ```powershell
-npx --yes @dslzl/csa@0.1.5 --version
+npx --yes @dslzl/csa@0.1.6 --version
 ```
 
-Prebuilt Manager archives and `SHA256SUMS` are available from the [`v0.1.5` Release](https://github.com/DSLZL/CSA/releases/tag/v0.1.5).
+Prebuilt Manager archives and `SHA256SUMS` are available from the [`v0.1.6` Release](https://github.com/DSLZL/CSA/releases/tag/v0.1.6).
 
 > [!NOTE]
 > Installing the npm package exposes only `csa`. It does not replace `codex`, download a patched build, or activate a shim during package installation.
