@@ -21,6 +21,11 @@ on:
         required: true
         default: true
         type: boolean
+      replace_published:
+        description: Replace assets on one existing published compatibility Release
+        required: true
+        default: false
+        type: boolean
 
 concurrency:
   group: csa-patched-codex-release-${{ inputs.compat_selector || github.ref_name }}
@@ -48,8 +53,10 @@ jobs:
       manifest_path: ${{ steps.resolve.outputs.manifest_path }}
       matrix: ${{ steps.matrix.outputs.matrix }}
       publish_requested: ${{ steps.mode.outputs.publish_requested }}
+      release_source_commit: ${{ steps.authority.outputs.release_source_commit }}
       release_enabled: ${{ steps.resolve.outputs.release_enabled }}
       release_tag: ${{ steps.resolve.outputs.release_tag }}
+      replace_published: ${{ steps.authority.outputs.replace_published }}
       rust_toolchain: ${{ steps.resolve.outputs.rust_toolchain }}
       source_commit: ${{ steps.mode.outputs.source_commit }}
       upstream_commit: ${{ steps.resolve.outputs.upstream_commit }}
@@ -71,6 +78,7 @@ jobs:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           REQUESTED_COMPAT_SELECTOR: ${{ inputs.compat_selector }}
           REQUESTED_PUBLISH: ${{ inputs.publish }}
+          REQUESTED_REPLACE_PUBLISHED: ${{ inputs.replace_published }}
           REQUESTED_TARGET: ${{ inputs.target }}
         run: |
           set -euo pipefail
@@ -91,6 +99,7 @@ jobs:
               selector="${GITHUB_REF_NAME#compat-}"
               target=x86_64-pc-windows-msvc
               publish=true
+              replace_published=false
               ;;
             workflow_dispatch)
               [[ "$GITHUB_REF_NAME" == "$DEFAULT_BRANCH" ]] || {
@@ -100,12 +109,14 @@ jobs:
               selector="$REQUESTED_COMPAT_SELECTOR"
               target="$REQUESTED_TARGET"
               publish="$REQUESTED_PUBLISH"
+              replace_published="$REQUESTED_REPLACE_PUBLISHED"
               ;;
             *) exit 2 ;;
           esac
           {
             echo "compat_selector=$selector"
             echo "publish_requested=$publish"
+            echo "replace_published=$replace_published"
             echo "source_commit=$source_commit"
             echo "target=$target"
           } >> "$GITHUB_OUTPUT"
@@ -131,6 +142,66 @@ jobs:
             --output "$RUNNER_TEMP/resolution.json" \
             --github-output "$GITHUB_OUTPUT"
           python scripts/compat_catalog.py validate --repository .
+
+      - id: authority
+        name: Resolve published release repair authority
+        shell: bash
+        env:
+          DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
+          GH_TOKEN: ${{ github.token }}
+          MANIFEST_PATH: ${{ steps.resolve.outputs.manifest_path }}
+          RELEASE_TAG: ${{ steps.resolve.outputs.release_tag }}
+          REPLACE_PUBLISHED: ${{ steps.mode.outputs.replace_published }}
+          REQUESTED_COMPAT_SELECTOR: ${{ steps.mode.outputs.compat_selector }}
+          PUBLISH_REQUESTED: ${{ steps.mode.outputs.publish_requested }}
+          RESOLVED_COMPAT_ID: ${{ steps.resolve.outputs.compat_id }}
+          WORKFLOW_COMMIT: ${{ steps.mode.outputs.source_commit }}
+        run: |
+          set -euo pipefail
+          release_source_commit="$WORKFLOW_COMMIT"
+          replace_published=false
+          if [[ "$REPLACE_PUBLISHED" == "true" ]]; then
+            [[ "$GITHUB_EVENT_NAME" == "workflow_dispatch" ]] || exit 2
+            [[ "$PUBLISH_REQUESTED" == "true" ]] || {
+              echo "Published release repair requires publish=true." >&2
+              exit 2
+            }
+            [[ "$REQUESTED_COMPAT_SELECTOR" == "$RESOLVED_COMPAT_ID" ]] || {
+              echo "Published release repair requires one exact compatibility ID." >&2
+              exit 2
+            }
+            state="$(gh release view "$RELEASE_TAG" --repo "$GITHUB_REPOSITORY" \
+              --json isDraft,isPrerelease --jq '[.isDraft, .isPrerelease] | @tsv')"
+            [[ "$state" == $'false\tfalse' || "$state" == $'true\tfalse' ]] || {
+              echo "Published release repair requires an existing non-prerelease Release." >&2
+              exit 2
+            }
+            git fetch --force --tags origin
+            [[ "$(git cat-file -t "refs/tags/$RELEASE_TAG")" == tag ]] || {
+              echo "Published compatibility tags must remain annotated." >&2
+              exit 2
+            }
+            release_source_commit="$(git rev-parse "$RELEASE_TAG^{commit}")"
+            git fetch --no-tags origin "+refs/heads/$DEFAULT_BRANCH:refs/remotes/origin/$DEFAULT_BRANCH"
+            git merge-base --is-ancestor "$release_source_commit" "origin/$DEFAULT_BRANCH" || {
+              echo "Published compatibility tags must point to a commit on '$DEFAULT_BRANCH'." >&2
+              exit 2
+            }
+            if [[ "$MANIFEST_PATH" == */bindings/* ]]; then
+              payload_root="${MANIFEST_PATH%%/bindings/*}"
+            else
+              payload_root="${MANIFEST_PATH%/*}"
+            fi
+            git diff --quiet "$release_source_commit" "$WORKFLOW_COMMIT" -- "$payload_root" || {
+              echo "Published release repair refused because its patch payload changed." >&2
+              exit 2
+            }
+            replace_published=true
+          fi
+          {
+            echo "release_source_commit=$release_source_commit"
+            echo "replace_published=$replace_published"
+          } >> "$GITHUB_OUTPUT"
 
       - name: Verify formal tag identity
         if: github.event_name == 'push'
@@ -159,6 +230,7 @@ jobs:
       compat_selector: ${{ needs.plan.outputs.compat_id }}
       source_commit: ${{ needs.plan.outputs.source_commit }}
       target: ${{ needs.plan.outputs.build_target }}
+      retention_days: 1
 
   build:
     name: Build ${{ matrix.target }}
@@ -178,6 +250,7 @@ jobs:
       rust_toolchain: ${{ needs.plan.outputs.rust_toolchain }}
       source_commit: ${{ needs.plan.outputs.source_commit }}
       target: ${{ matrix.target }}
+      retention_days: 1
       upstream_commit: ${{ needs.plan.outputs.upstream_commit }}
       upstream_tag: ${{ needs.plan.outputs.upstream_tag }}
 
@@ -192,8 +265,10 @@ jobs:
       codex_version: ${{ needs.plan.outputs.codex_version }}
       compat_id: ${{ needs.plan.outputs.compat_id }}
       publish_requested: ${{ needs.plan.outputs.publish_requested }}
+      release_source_commit: ${{ needs.plan.outputs.release_source_commit }}
       release_enabled: ${{ needs.plan.outputs.release_enabled }}
       release_tag: ${{ needs.plan.outputs.release_tag }}
+      replace_published: ${{ needs.plan.outputs.replace_published }}
       source_commit: ${{ needs.plan.outputs.source_commit }}
       upstream_commit: ${{ needs.plan.outputs.upstream_commit }}
       upstream_tag: ${{ needs.plan.outputs.upstream_tag }}
@@ -323,7 +398,7 @@ jobs:
             pack+=(--artifact "$artifact")
           done
           "${finalize[@]}"
-          "${pack[@]}" --source-commit '${{ needs.plan.outputs.source_commit }}' --output "$RUNNER_TEMP/release-assets"
+          "${pack[@]}" --source-commit '${{ needs.plan.outputs.release_source_commit }}' --output "$RUNNER_TEMP/release-assets"
           python scripts/verify_release_asset_set.py local --root "$RUNNER_TEMP/release-assets"
 
       - name: Upload formal release assets
@@ -342,6 +417,7 @@ jobs:
     if: needs.bundle.outputs.publish_requested == 'true' && needs.bundle.outputs.release_enabled == 'true'
     runs-on: ubuntu-24.04
     permissions:
+      actions: write
       contents: write
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
@@ -362,7 +438,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.bundle.outputs.release_tag }}
-          SOURCE_COMMIT: ${{ needs.bundle.outputs.source_commit }}
+          SOURCE_COMMIT: ${{ needs.bundle.outputs.release_source_commit }}
         run: |
           set -euo pipefail
           git fetch --force --tags origin
@@ -386,7 +462,7 @@ jobs:
         env:
           GH_TOKEN: ${{ github.token }}
           TAG: ${{ needs.bundle.outputs.release_tag }}
-          RELEASE_SHA: ${{ needs.bundle.outputs.source_commit }}
+          RELEASE_SHA: ${{ needs.bundle.outputs.release_source_commit }}
         run: |
           set -euo pipefail
           create_tag_object() {
@@ -424,7 +500,8 @@ jobs:
           UPSTREAM_COMMIT: ${{ needs.bundle.outputs.upstream_commit }}
           COMPAT_ID: ${{ needs.bundle.outputs.compat_id }}
           TARGET: ${{ needs.bundle.outputs.build_target }}
-          SOURCE_COMMIT: ${{ needs.bundle.outputs.source_commit }}
+          SOURCE_COMMIT: ${{ needs.bundle.outputs.release_source_commit }}
+          REPLACE_PUBLISHED: ${{ needs.bundle.outputs.replace_published }}
           PRODUCTION_CODEX_SHA256: ${{ needs.bundle.outputs.artifact_sha256 }}
         run: |
           set -euo pipefail
@@ -437,11 +514,17 @@ jobs:
             gh api "repos/$GITHUB_REPOSITORY/releases/$release_id" > "$remote"
           }
           release_exists=false
+          repairing_published=false
           if load_release; then
             existing_draft="$(python -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["draft"]).lower())' "$remote")"
             existing_prerelease="$(python -c 'import json,sys; print(str(json.load(open(sys.argv[1]))["prerelease"]).lower())' "$remote")"
             [[ "$existing_prerelease" == false ]] || exit 2
-            if [[ "$existing_draft" == false ]]; then
+            if [[ "$REPLACE_PUBLISHED" == true ]]; then
+              if [[ "$existing_draft" == false ]]; then
+                gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft
+              fi
+              repairing_published=true
+            elif [[ "$existing_draft" == false ]]; then
               python scripts/verify_release_asset_set.py remote \
                 --root "$root" --release-json "$remote" --require-install-catalog
               exit 0
@@ -449,18 +532,25 @@ jobs:
             release_exists=true
           fi
 
-          python scripts/generate_release_notes.py \
-            --repository . --stream compat --current-ref "$SOURCE_COMMIT" \
-            --compat-id "$COMPAT_ID" --codex-version "$CODEX_VERSION" \
-            --upstream-tag "$UPSTREAM_TAG" --upstream-commit "$UPSTREAM_COMMIT" \
-            --target "$TARGET" --artifact-sha256 "$PRODUCTION_CODEX_SHA256" --output "$notes"
+          [[ "$REPLACE_PUBLISHED" != true || "$release_exists" == true ]] || {
+            echo "Published release repair requires an existing Release." >&2
+            exit 2
+          }
 
-          if [[ "$release_exists" == true ]]; then
-            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft \
-              --title "CSA patched Codex CLI ${CODEX_VERSION}" --notes-file "$notes"
-          else
-            gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
-              --title "CSA patched Codex CLI ${CODEX_VERSION}" --notes-file "$notes"
+          if [[ "$repairing_published" != true ]]; then
+            python scripts/generate_release_notes.py \
+              --repository . --stream compat --current-ref "$SOURCE_COMMIT" \
+              --compat-id "$COMPAT_ID" --codex-version "$CODEX_VERSION" \
+              --upstream-tag "$UPSTREAM_TAG" --upstream-commit "$UPSTREAM_COMMIT" \
+              --target "$TARGET" --artifact-sha256 "$PRODUCTION_CODEX_SHA256" --output "$notes"
+
+            if [[ "$release_exists" == true ]]; then
+              gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft \
+                --title "CSA patched Codex CLI ${CODEX_VERSION}" --notes-file "$notes"
+            else
+              gh release create "$TAG" --repo "$GITHUB_REPOSITORY" --verify-tag --draft \
+                --title "CSA patched Codex CLI ${CODEX_VERSION}" --notes-file "$notes"
+            fi
           fi
 
           mapfile -t assets < <(find "$root" -maxdepth 1 -type f -print | sort)
@@ -494,5 +584,20 @@ jobs:
             sleep 5
           done
           [[ "$verified" == true ]] || exit 2
-          gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false \
-            --title "CSA patched Codex CLI ${CODEX_VERSION}" --notes-file "$notes"
+          if [[ "$repairing_published" == true ]]; then
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false
+          else
+            gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft=false --latest=false \
+              --title "CSA patched Codex CLI ${CODEX_VERSION}" --notes-file "$notes"
+          fi
+
+      - name: Delete transient workflow artifacts
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -euo pipefail
+          gh api --paginate "repos/$GITHUB_REPOSITORY/actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" \
+            --jq '.artifacts[].id' |
+            while read -r artifact_id; do
+              gh api --method DELETE "repos/$GITHUB_REPOSITORY/actions/artifacts/$artifact_id"
+            done

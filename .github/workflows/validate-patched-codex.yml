@@ -6,6 +6,10 @@ on:
       compat_selector:
         required: true
         type: string
+      retention_days:
+        required: false
+        default: 14
+        type: number
       target:
         required: true
         type: string
@@ -40,6 +44,7 @@ env:
   GIT_CONFIG_KEY_0: core.autocrlf
   GIT_CONFIG_VALUE_0: "false"
   SCCACHE_GHA_ENABLED: "on"
+  SCCACHE_GHA_RW_MODE: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && 'READ_WRITE' || 'READ_ONLY' }}
   SCCACHE_GHA_VERSION: csa-patched-codex-v1
 
 jobs:
@@ -237,4 +242,4 @@ jobs:
           name: patched-codex-validation-${{ steps.resolve.outputs.compat_id }}
           path: ${{ runner.temp }}/csa-patched-codex-validation/evidence
           if-no-files-found: error
-          retention-days: 14
+          retention-days: ${{ inputs.retention_days || 14 }}

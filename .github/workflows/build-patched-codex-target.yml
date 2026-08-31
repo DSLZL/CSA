@@ -12,6 +12,10 @@ on:
       manifest_path:
         required: true
         type: string
+      retention_days:
+        required: false
+        default: 14
+        type: number
       runner:
         required: true
         type: string
@@ -38,9 +42,10 @@ env:
   GIT_CONFIG_COUNT: 1
   GIT_CONFIG_KEY_0: core.autocrlf
   GIT_CONFIG_VALUE_0: "false"
-  RUSTC_WRAPPER: sccache
   SCCACHE_GHA_ENABLED: "on"
+  SCCACHE_GHA_RW_MODE: ${{ github.ref == format('refs/heads/{0}', github.event.repository.default_branch) && 'READ_WRITE' || 'READ_ONLY' }}
   SCCACHE_GHA_VERSION: csa-patched-codex-v1
+  SCCACHE_IDLE_TIMEOUT: "0"
 
 jobs:
   build:
@@ -68,6 +73,8 @@ jobs:
             echo "SOURCE_ROOT=$root/source"
             echo "CARGO_TARGET_DIR=$root/cargo-target"
             echo "TARGET_BUNDLE=$root/bundle"
+            echo "SCCACHE_DIR=$RUNNER_TEMP/csa-patched-codex-cache/sccache"
+            echo "SCCACHE_STATS=$root/sccache-stats.json"
           } >> "$GITHUB_ENV"
           mkdir -p "$root"
 
@@ -105,6 +112,15 @@ jobs:
       - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
         with:
           version: v0.16.0
+
+      - name: Configure shared sccache
+        shell: bash
+        run: |
+          set -euo pipefail
+          test -x "$SCCACHE_PATH"
+          echo "RUSTC_WRAPPER=$SCCACHE_PATH" >> "$GITHUB_ENV"
+          "$SCCACHE_PATH" --start-server
+          "$SCCACHE_PATH" --zero-stats
 
       - name: Install Zig for musl
         if: contains(inputs.target, 'linux-musl')
@@ -191,6 +207,25 @@ jobs:
             export LIBSQLITE3_FLAGS=SQLITE_DISABLE_INTRINSIC
           fi
           cargo build --target "$TARGET" --release --timings --bin codex
+          if [[ "$TARGET" == *-unknown-linux-musl ]]; then
+            codex="$CARGO_TARGET_DIR/$TARGET/release/codex"
+            before_size="$(stat -c %s "$codex")"
+            strip --strip-debug --strip-unneeded "$codex"
+            after_size="$(stat -c %s "$codex")"
+            echo "Stripped Linux Codex CLI: ${before_size} -> ${after_size} bytes"
+          fi
+
+      - name: Verify shared sccache use
+        shell: bash
+        run: |
+          set -euo pipefail
+          "$SCCACHE_PATH" --show-stats --stats-format json > "$SCCACHE_STATS" || true
+          python scripts/check_sccache_stats.py \
+            --stats "$SCCACHE_STATS" \
+            --profile release \
+            --github-step-summary "$GITHUB_STEP_SUMMARY" \
+            --require-requests
+          "$SCCACHE_PATH" --show-stats || true
 
       - name: Stage exact target artifact
         shell: bash
@@ -234,11 +269,6 @@ jobs:
           )
           PY
 
-      - name: Show shared sccache statistics
-        if: always()
-        shell: bash
-        run: sccache --show-stats || true
-
       - name: Upload target artifact
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
         with:
@@ -246,4 +276,4 @@ jobs:
           path: ${{ env.TARGET_BUNDLE }}
           if-no-files-found: error
           compression-level: 0
-          retention-days: 14
+          retention-days: ${{ inputs.retention_days }}

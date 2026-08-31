@@ -36,6 +36,7 @@ CSA_REPOSITORY = "dslzl/CSA"
 BUILD_TARGET = "x86_64-pc-windows-msvc"
 DESCRIPTOR_NAME = "compatibility-release.json"
 CHECKSUMS_NAME = "SHA256SUMS"
+MAX_ARTIFACT_BYTES = 1024 * 1024 * 1024
 BLOCKER_LABEL = "upstream-patch-blocked"
 SHA1 = re.compile(r"[0-9a-f]{40}\Z")
 SHA256 = re.compile(r"[0-9a-f]{64}\Z")
@@ -624,7 +625,13 @@ def normalize_artifacts(
     for target, path in values.items():
         if not path.is_absolute():
             raise CompatibilityReleaseError("artifact paths must be absolute")
-        normalized[target] = path.resolve(strict=True)
+        resolved = path.resolve(strict=True)
+        size = resolved.stat().st_size
+        if size == 0 or size > MAX_ARTIFACT_BYTES:
+            raise CompatibilityReleaseError(
+                f"patched artifact size is invalid for {target}: {size}"
+            )
+        normalized[target] = resolved
     return normalized
 
 

@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Display machine-readable sccache statistics without gating a build."""
+"""Report machine-readable sccache statistics and optionally require compiler requests."""
 
 from __future__ import annotations
 
@@ -121,6 +121,7 @@ def main() -> int:
     parser.add_argument("--minimum-rust-hit-rate", type=float)
     parser.add_argument("--profile", choices=("test", "release"), default="unspecified")
     parser.add_argument("--github-step-summary", type=Path)
+    parser.add_argument("--require-requests", action="store_true")
     args = parser.parse_args()
     try:
         if args.minimum_rust_hit_rate is not None and not 0 <= args.minimum_rust_hit_rate <= 100:
@@ -139,6 +140,12 @@ def main() -> int:
         except OSError as error:
             result["warnings"].append(f"cannot write GitHub Step Summary: {error}")
     print(json.dumps(result, indent=2, sort_keys=True))
+    if args.require_requests and (
+        result["result"] != "reported"
+        or result["compile_requests"] == 0
+        or result["rust_requests"] == 0
+    ):
+        return 2
     return 0
 
 

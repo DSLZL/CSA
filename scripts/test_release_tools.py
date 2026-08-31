@@ -807,6 +807,7 @@ def test_sccache_statistics() -> None:
                     "test",
                     "--github-step-summary",
                     str(step_summary),
+                    "--require-requests",
                 ],
             ),
             redirect_stdout(stdout),
@@ -815,6 +816,27 @@ def test_sccache_statistics() -> None:
         assert json.loads(stdout.getvalue())["profile"] == "test"
         assert "### sccache: test" in step_summary.read_text(encoding="utf-8")
         assert "97.00%" in step_summary.read_text(encoding="utf-8")
+
+        zero = Path(directory) / "zero.json"
+        zero_document = json.loads(json.dumps(document))
+        zero_document["stats"].update(
+            {
+                "compile_requests": 0,
+                "cache_hits": metric(0),
+                "cache_misses": metric(0),
+                "cache_errors": metric(0),
+            }
+        )
+        zero.write_text(json.dumps(zero_document), encoding="utf-8")
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["check_sccache_stats.py", "--stats", str(zero), "--require-requests"],
+            ),
+            redirect_stdout(io.StringIO()),
+        ):
+            assert sccache_stats_main() == 2
 
         malformed = Path(directory) / "stats.json"
         malformed.write_text("not json", encoding="utf-8")
@@ -825,6 +847,15 @@ def test_sccache_statistics() -> None:
         ):
             assert sccache_stats_main() == 0
         assert json.loads(stdout.getvalue())["result"] == "unavailable"
+        with (
+            patch.object(
+                sys,
+                "argv",
+                ["check_sccache_stats.py", "--stats", str(malformed), "--require-requests"],
+            ),
+            redirect_stdout(io.StringIO()),
+        ):
+            assert sccache_stats_main() == 2
 
 
 def test_release_stream_contracts() -> None:
@@ -855,6 +886,11 @@ def test_release_stream_contracts() -> None:
     assert validation_workflow.count("Codex source must not live inside the CSA repository") == 1
     assert "Patched Codex validation must be dispatched from" in validation_workflow
     assert "default: current" in patched_workflow
+    repair_input = patched_workflow.split("      replace_published:", 1)[1].split(
+        "\n\nconcurrency:", 1
+    )[0]
+    assert "default: false" in repair_input
+    assert "Replace assets on one existing published compatibility Release" in repair_input
     assert "scripts/compat_catalog.py resolve" in patched_workflow
     assert "--require-acceptance" not in patched_workflow
     assert "--require-release" in patched_workflow
@@ -965,8 +1001,57 @@ def test_release_stream_contracts() -> None:
     sccache_action = (
         "mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c"
     )
+    workflow_root = REPOSITORY / ".github" / "workflows"
+    workflow_sources = {
+        path.name: path.read_text(encoding="utf-8")
+        for pattern in ("*.yml", "*.yaml")
+        for path in sorted(workflow_root.glob(pattern))
+    }
+    expected_cache_owners = {
+        "build-patched-codex-target.yml",
+        "validate-patched-codex.yml",
+    }
+    direct_patched_builders = {
+        name
+        for name, workflow in workflow_sources.items()
+        if 'cargo build --target "$TARGET" --release --timings --bin codex' in workflow
+        or "bash scripts/build_patched_codex_bundle.sh" in workflow
+    }
+    patched_cache_owners = {
+        name for name, workflow in workflow_sources.items() if sccache_action in workflow
+    }
+    patched_cache_config_owners = {
+        name
+        for name, workflow in workflow_sources.items()
+        if any(
+            key in workflow
+            for key in ("SCCACHE_GHA_ENABLED", "SCCACHE_GHA_RW_MODE", "SCCACHE_GHA_VERSION")
+        )
+    }
+    target_callers = {
+        name
+        for name, workflow in workflow_sources.items()
+        if "uses: ./.github/workflows/build-patched-codex-target.yml" in workflow
+    }
+    validation_callers = {
+        name
+        for name, workflow in workflow_sources.items()
+        if "uses: ./.github/workflows/validate-patched-codex.yml" in workflow
+    }
+    assert direct_patched_builders == expected_cache_owners
+    assert patched_cache_owners == expected_cache_owners
+    assert patched_cache_config_owners == expected_cache_owners
+    assert target_callers == {
+        "build-patched-codex-windows.yml",
+        "release-patched-codex.yml",
+    }
+    assert validation_callers == {"release-patched-codex.yml"}
     for workflow in (target_workflow, validation_workflow):
         assert 'SCCACHE_GHA_ENABLED: "on"' in workflow
+        assert (
+            "SCCACHE_GHA_RW_MODE: ${{ github.ref == format('refs/heads/{0}', "
+            "github.event.repository.default_branch) && 'READ_WRITE' || 'READ_ONLY' }}"
+        ) in workflow
         assert "SCCACHE_GHA_VERSION: csa-patched-codex-v1" in workflow
         assert workflow.count(sccache_action) == 1
         assert "actions/cache/restore@" not in workflow
@@ -983,6 +1068,22 @@ def test_release_stream_contracts() -> None:
         'cargo build --target "$TARGET" --release --timings --bin codex',
     ):
         assert upstream_step in target_workflow
+    codex_build = 'cargo build --target "$TARGET" --release --timings --bin codex'
+    codex_strip = 'strip --strip-debug --strip-unneeded "$codex"'
+    assert 'if [[ "$TARGET" == *-unknown-linux-musl ]]; then' in target_workflow
+    assert 'codex="$CARGO_TARGET_DIR/$TARGET/release/codex"' in target_workflow
+    assert target_workflow.count(codex_strip) == 1
+    assert target_workflow.index(codex_build) < target_workflow.index(codex_strip)
+    assert target_workflow.index(codex_strip) < target_workflow.index(
+        "Stage exact target artifact"
+    )
+    assert "RUSTC_WRAPPER: sccache" not in target_workflow
+    assert 'echo "RUSTC_WRAPPER=$SCCACHE_PATH" >> "$GITHUB_ENV"' in target_workflow
+    assert 'SCCACHE_IDLE_TIMEOUT: "0"' in target_workflow
+    assert '"$SCCACHE_PATH" --start-server' in target_workflow
+    assert '"$SCCACHE_PATH" --zero-stats' in target_workflow
+    assert '"$SCCACHE_PATH" --show-stats --stats-format json' in target_workflow
+    assert "--require-requests" in target_workflow
     assert (
         "group: csa-patched-codex-release-${{ inputs.compat_selector || github.ref_name }}"
         in patched_workflow
@@ -1016,6 +1117,15 @@ def test_release_stream_contracts() -> None:
     mutable_case = tag_step.split('true|"")', 1)[1].split("*)", 1)[0]
     assert "--method PATCH" not in published_case
     assert "--method PATCH" in mutable_case
+    assert "Published release repair requires publish=true." in patched_workflow
+    assert "Published release repair requires one exact compatibility ID." in patched_workflow
+    assert "GH_TOKEN: ${{ github.token }}" in patched_workflow
+    assert '"$state" == $\'false\\tfalse\' || "$state" == $\'true\\tfalse\'' in patched_workflow
+    assert 'git diff --quiet "$release_source_commit" "$WORKFLOW_COMMIT" -- "$payload_root"' in patched_workflow
+    assert "Published release repair refused because its patch payload changed." in patched_workflow
+    assert "release_source_commit: ${{ steps.authority.outputs.release_source_commit }}" in patched_workflow
+    assert "replace_published: ${{ steps.authority.outputs.replace_published }}" in patched_workflow
+    assert "--source-commit '${{ needs.plan.outputs.release_source_commit }}'" in patched_workflow
 
     ci_workflow = (REPOSITORY / ".github" / "workflows" / "ci.yml").read_text(
         encoding="utf-8"
@@ -1124,7 +1234,10 @@ def test_release_stream_contracts() -> None:
     target_steps = (
         "Clone exact reviewed upstream source",
         "Apply exact reviewed patch payload",
+        "Configure shared sccache",
         "Build patched Codex CLI",
+        "Verify shared sccache use",
+        "Stage exact target artifact",
         "Upload target artifact",
     )
     assert list(map(target_workflow.index, target_steps)) == sorted(
@@ -1248,6 +1361,15 @@ def test_release_stream_contracts() -> None:
     assert patched_publish.index('if [[ "$existing_draft" == false ]]') < patched_publish.index(
         "python scripts/generate_release_notes.py"
     )
+    assert 'if [[ "$REPLACE_PUBLISHED" == true ]]' in patched_publish
+    assert 'if [[ "$repairing_published" != true ]]' in patched_publish
+    assert 'if [[ "$repairing_published" == true ]]' in patched_publish
+    assert 'gh release edit "$TAG" --repo "$GITHUB_REPOSITORY" --draft' in patched_publish
+    publish_job = patched_workflow.split("\n  publish:", 1)[1]
+    assert "      actions: write" in publish_job
+    assert "Delete transient workflow artifacts" in publish_job
+    assert "actions/runs/$GITHUB_RUN_ID/artifacts?per_page=100" in publish_job
+    assert 'actions/artifacts/$artifact_id' in publish_job
     for fact in (
         "Production executable SHA-256",
         "Built independently from the reviewed upstream source",
@@ -1340,7 +1462,7 @@ def test_release_stream_contracts() -> None:
     assert "Formal compatibility tags must point to a commit on" in patched_workflow
     assert "Verify formal tag identity" in patched_workflow
     assert "needs: [plan, validate, build]" in patched_workflow
-    assert "RELEASE_SHA: ${{ needs.bundle.outputs.source_commit }}" in patched_workflow
+    assert "RELEASE_SHA: ${{ needs.bundle.outputs.release_source_commit }}" in patched_workflow
     watcher_triggers = watcher.split("\nconcurrency:", 1)[0]
     assert "  schedule:" in watcher_triggers
     assert "  workflow_dispatch:" in watcher_triggers
@@ -1355,11 +1477,15 @@ def test_release_stream_contracts() -> None:
     patched_lines = patched_workflow.splitlines()
     assert patched_lines.count("          retention-days: 1") == 1
     assert patched_lines.count("          retention-days: 14") == 1
-    assert target_workflow.splitlines().count("          retention-days: 14") == 1
+    assert patched_lines.count("      retention_days: 1") == 2
+    assert "          retention-days: ${{ inputs.retention_days }}" in target_workflow
+    assert "        default: 14" in target_workflow
     assert windows_test_workflow.splitlines().count("          retention-days: 14") == 1
     validation_lines = validation_workflow.splitlines()
     assert validation_lines.count("          retention-days: 1") == 0
-    assert validation_lines.count("          retention-days: 14") == 1
+    assert validation_lines.count("          retention-days: 14") == 0
+    assert "          retention-days: ${{ inputs.retention_days || 14 }}" in validation_workflow
+    assert "        default: 14" in validation_workflow
     schema = json.loads(
         (REPOSITORY / "release" / "release-inputs.schema.json").read_bytes()
     )
@@ -1795,6 +1921,15 @@ def test_compatibility_release_tools(root: Path) -> None:
     assert result["compat_id"] == candidate.name
     artifact = root / "codex.exe"
     artifact.write_bytes(b"deterministic patched artifact")
+    manifest_bytes = (candidate / "manifest.toml").read_bytes()
+    with patch("compat_release.MAX_ARTIFACT_BYTES", artifact.stat().st_size - 1):
+        try:
+            finalize((candidate / "manifest.toml").resolve(), artifact.resolve())
+        except CompatibilityReleaseError as error:
+            assert "artifact size is invalid" in str(error)
+        else:
+            raise AssertionError("oversized patched artifact was accepted")
+    assert (candidate / "manifest.toml").read_bytes() == manifest_bytes
     finalized = finalize((candidate / "manifest.toml").resolve(), artifact.resolve())
     assert finalized["artifact"]["sha256"] == hashlib.sha256(artifact.read_bytes()).hexdigest()
 
