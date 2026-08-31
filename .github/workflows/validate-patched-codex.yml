@@ -50,40 +50,45 @@ env:
 jobs:
   validate:
     name: Validate exact patched Codex contract
-    runs-on: ubuntu-24.04
+    runs-on: windows-2025
     timeout-minutes: 120
     permissions:
       actions: write
       contents: read
     steps:
       - name: Configure isolated validation roots
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          root="$RUNNER_TEMP/csa-patched-codex-validation"
-          tmp="$RUNNER_TEMP/csa-tmp"
-          {
-            echo "VALIDATION_ROOT=$root"
-            echo "SOURCE_ROOT=$root/source"
-            echo "CARGO_TARGET_DIR=$root/cargo-target"
-            echo "CARGO_HOME=$root/cache/cargo-home"
-            echo "CSA_TOOL_BIN=$root/tools/bin"
-            echo "CSA_TOOL_CACHE=$root/cache/tools"
-            echo "CSA_RUNTIME_CACHE=$root/cache/official-runtime"
-            echo "RUSTUP_HOME=$root/cache/rustup"
-            echo "SCCACHE_DIR=$RUNNER_TEMP/csa-patched-codex-cache/sccache"
-            echo "XWIN_CACHE_DIR=$RUNNER_TEMP/csa-patched-codex-cache/xwin"
-            echo "TMPDIR=$tmp"
-            echo "HOME=$root/home"
-            echo "CODEX_HOME=$root/codex-home"
-            echo "RESOLUTION_JSON=$root/resolution.json"
-            echo "BUNDLE_ROOT=$root/bundle"
-            echo "SCCACHE_STATS=$root/sccache-stats.json"
-            echo "TEST_REPORT=$root/bundle.tests.json"
-            echo "EVIDENCE_ROOT=$root/evidence"
-          } >> "$GITHUB_ENV"
-          mkdir -p "$root/home" "$root/codex-home" "$tmp" "$root/evidence"
-          chmod 0700 "$tmp"
+          $ErrorActionPreference = 'Stop'
+          $root = Join-Path $env:RUNNER_TEMP 'csa-patched-codex-validation'
+          $tmp = Join-Path $env:RUNNER_TEMP 'csa-tmp'
+          $paths = @{
+            VALIDATION_ROOT = $root
+            SOURCE_ROOT = Join-Path $root 'source'
+            CARGO_TARGET_DIR = Join-Path $root 'cargo-target'
+            CARGO_HOME = Join-Path $root 'cache/cargo-home'
+            CSA_RUNTIME_CACHE = Join-Path $root 'cache/official-runtime'
+            RUSTUP_HOME = Join-Path $root 'cache/rustup'
+            SCCACHE_DIR = Join-Path $env:RUNNER_TEMP 'csa-patched-codex-cache/sccache'
+            TEMP = $tmp
+            TMP = $tmp
+            HOME = Join-Path $root 'home'
+            CODEX_HOME = Join-Path $root 'codex-home'
+            RESOLUTION_JSON = Join-Path $root 'resolution.json'
+            SCCACHE_STATS = Join-Path $root 'sccache-stats.json'
+            TEST_REPORT = Join-Path $root 'bundle.tests.json'
+            EVIDENCE_ROOT = Join-Path $root 'evidence'
+          }
+          foreach ($entry in $paths.GetEnumerator()) {
+            "$($entry.Key)=$($entry.Value)" >> $env:GITHUB_ENV
+          }
+          New-Item -ItemType Directory -Force -Path @(
+            $paths.HOME,
+            $paths.CODEX_HOME,
+            $paths.CSA_RUNTIME_CACHE,
+            $paths.EVIDENCE_ROOT,
+            $tmp
+          ) | Out-Null
 
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
         with:
@@ -101,140 +106,185 @@ jobs:
 
       - id: resolve
         name: Resolve exact validation authority
-        shell: bash
+        shell: pwsh
         env:
           DEFAULT_BRANCH: ${{ github.event.repository.default_branch }}
           REQUESTED_COMPAT_SELECTOR: ${{ inputs.compat_selector || 'current' }}
           REQUESTED_TARGET: ${{ inputs.target || 'x86_64-pc-windows-msvc' }}
         run: |
-          set -euo pipefail
-          test "$(git rev-parse HEAD)" = "$CSA_SOURCE_COMMIT"
-          [[ "$GITHUB_EVENT_NAME" != "workflow_dispatch" || "$GITHUB_REF_NAME" == "$DEFAULT_BRANCH" ]] || {
-            echo "Patched Codex validation must be dispatched from '$DEFAULT_BRANCH'." >&2
-            exit 2
+          $ErrorActionPreference = 'Stop'
+          if ((git rev-parse HEAD).Trim() -ne $env:CSA_SOURCE_COMMIT) {
+            throw 'Checked-out CSA commit differs from the requested source commit.'
           }
-          python scripts/compat_catalog.py resolve \
-            --repository . \
-            --selector "$REQUESTED_COMPAT_SELECTOR" \
-            --target "$REQUESTED_TARGET" \
-            --output "$RESOLUTION_JSON" \
-            --github-output "$GITHUB_OUTPUT"
+          if ($env:GITHUB_EVENT_NAME -eq 'workflow_dispatch' -and $env:GITHUB_REF_NAME -ne $env:DEFAULT_BRANCH) {
+            throw "Patched Codex validation must be dispatched from '$env:DEFAULT_BRANCH'."
+          }
+          python scripts/compat_catalog.py resolve `
+            --repository . `
+            --selector $env:REQUESTED_COMPAT_SELECTOR `
+            --target $env:REQUESTED_TARGET `
+            --output $env:RESOLUTION_JSON `
+            --github-output $env:GITHUB_OUTPUT
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
           python scripts/compat_catalog.py validate --repository .
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Clone exact reviewed upstream source
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          source_root="$(realpath -m "$SOURCE_ROOT")"
-          runner_temp="$(realpath -m "$RUNNER_TEMP")"
-          workspace="$(realpath -m "$GITHUB_WORKSPACE")"
-          case "$source_root/" in
-            "$runner_temp/"*) ;;
-            *)
-              echo "Codex source must live below RUNNER_TEMP: $source_root" >&2
-              exit 2
-              ;;
-          esac
-          case "$source_root/" in
-            "$workspace/"*)
-              echo "Codex source must not live inside the CSA repository: $source_root" >&2
-              exit 2
-              ;;
-          esac
-          for attempt in 1 2 3; do
-            rm -rf "$SOURCE_ROOT"
-            if git clone \
-              --filter=blob:none \
-              --no-checkout \
-              --branch '${{ steps.resolve.outputs.upstream_tag }}' \
-              --single-branch \
-              https://github.com/openai/codex.git \
-              "$SOURCE_ROOT"; then
+          $ErrorActionPreference = 'Stop'
+          $source = [IO.Path]::GetFullPath($env:SOURCE_ROOT)
+          $runner = [IO.Path]::GetFullPath($env:RUNNER_TEMP).TrimEnd('\') + '\'
+          $workspace = [IO.Path]::GetFullPath($env:GITHUB_WORKSPACE).TrimEnd('\') + '\'
+          if (-not ($source + '\').StartsWith($runner, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Codex source must live below RUNNER_TEMP: $source"
+          }
+          if (($source + '\').StartsWith($workspace, [StringComparison]::OrdinalIgnoreCase)) {
+            throw "Codex source must not live inside the CSA repository: $source"
+          }
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            Remove-Item -Recurse -Force -LiteralPath $source -ErrorAction SilentlyContinue
+            git clone --filter=blob:none --no-checkout `
+              --branch '${{ steps.resolve.outputs.upstream_tag }}' --single-branch `
+              https://github.com/openai/codex.git $source
+            if ($LASTEXITCODE -eq 0) { break }
+            if ($attempt -eq 3) { throw "Pinned upstream clone failed after $attempt attempts." }
+            Start-Sleep -Seconds (5 * $attempt)
+          }
+          git -C $source checkout --detach '${{ steps.resolve.outputs.upstream_commit }}'
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $tagCommit = (git -C $source rev-parse 'refs/tags/${{ steps.resolve.outputs.upstream_tag }}^{commit}').Trim()
+          $headCommit = (git -C $source rev-parse HEAD).Trim()
+          if ($tagCommit -ne '${{ steps.resolve.outputs.upstream_commit }}' -or $headCommit -ne $tagCommit) {
+            throw 'Pinned upstream tag and commit identity differ.'
+          }
+
+      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+        with:
+          toolchain: ${{ steps.resolve.outputs.rust_toolchain }}
+          targets: ${{ steps.resolve.outputs.build_target }}
+          components: rustfmt, clippy
+
+      - name: Configure native MSVC environment
+        shell: pwsh
+        env:
+          TARGET: ${{ steps.resolve.outputs.build_target }}
+        run: '& "$env:SOURCE_ROOT/.github/actions/setup-msvc-env/setup-msvc-env.ps1" -Target "$env:TARGET"'
+
+      - name: Configure shared sccache and verify Rust identity
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          if (-not (Test-Path -LiteralPath $env:SCCACHE_PATH -PathType Leaf)) {
+            throw "sccache executable is missing: $env:SCCACHE_PATH"
+          }
+          $sccacheVersion = (& $env:SCCACHE_PATH --version).Trim()
+          if ($LASTEXITCODE -ne 0 -or $sccacheVersion -ne 'sccache ${{ steps.resolve.outputs.sccache_version }}') {
+            throw "sccache identity mismatch: $sccacheVersion"
+          }
+          $rustcIdentity = rustc -Vv | Out-String
+          if ($LASTEXITCODE -ne 0 -or -not $rustcIdentity.Contains('commit-hash: ${{ steps.resolve.outputs.rustc_commit }}')) {
+            throw 'Rust compiler commit does not match the compatibility manifest.'
+          }
+          "RUSTC_WRAPPER=$env:SCCACHE_PATH" >> $env:GITHUB_ENV
+          & $env:SCCACHE_PATH --start-server
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          & $env:SCCACHE_PATH --zero-stats
+
+      - name: Verify exact official runtime archive
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $runtime = (Get-Content -Raw -LiteralPath $env:RESOLUTION_JSON | ConvertFrom-Json).runtime
+          $archive = Join-Path $env:CSA_RUNTIME_CACHE 'official-runtime.tgz'
+          for ($attempt = 1; $attempt -le 3; $attempt++) {
+            try {
+              Invoke-WebRequest -Uri $runtime.archive_url -OutFile $archive -MaximumRedirection 5
               break
-            fi
-            if [[ "$attempt" == 3 ]]; then
-              echo "Pinned upstream clone failed after $attempt attempts." >&2
-              exit 1
-            fi
-            sleep $((attempt * 5))
-          done
-          git -C "$SOURCE_ROOT" checkout --detach '${{ steps.resolve.outputs.upstream_commit }}'
-          test "$(git -C "$SOURCE_ROOT" rev-parse 'refs/tags/${{ steps.resolve.outputs.upstream_tag }}^{commit}')" = '${{ steps.resolve.outputs.upstream_commit }}'
-          test "$(git -C "$SOURCE_ROOT" rev-parse HEAD)" = '${{ steps.resolve.outputs.upstream_commit }}'
-
-      - name: Prepare pinned build tools
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/build_patched_codex_bundle.sh tools \
-            "$RESOLUTION_JSON" \
-            "$SOURCE_ROOT" \
-            "$CARGO_TARGET_DIR" \
-            "$BUNDLE_ROOT" \
-            "$SCCACHE_STATS"
-
-      - name: Prepare exact Rust toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/build_patched_codex_bundle.sh rust \
-            "$RESOLUTION_JSON" \
-            "$SOURCE_ROOT" \
-            "$CARGO_TARGET_DIR" \
-            "$BUNDLE_ROOT" \
-            "$SCCACHE_STATS"
-
-      - name: Prepare exact xwin SDK and LLVM toolchain
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/build_patched_codex_bundle.sh xwin \
-            "$RESOLUTION_JSON" \
-            "$SOURCE_ROOT" \
-            "$CARGO_TARGET_DIR" \
-            "$BUNDLE_ROOT" \
-            "$SCCACHE_STATS"
-
-      - name: Prepare official runtime archive
-        shell: bash
-        run: |
-          set -euo pipefail
-          bash scripts/build_patched_codex_bundle.sh runtime \
-            "$RESOLUTION_JSON" \
-            "$SOURCE_ROOT" \
-            "$CARGO_TARGET_DIR" \
-            "$BUNDLE_ROOT" \
-            "$SCCACHE_STATS"
+            } catch {
+              Remove-Item -Force -LiteralPath $archive -ErrorAction SilentlyContinue
+              if ($attempt -eq 3) { throw }
+              Start-Sleep -Seconds (5 * $attempt)
+            }
+          }
+          $integrity = $runtime.integrity -split '-', 2
+          if ($integrity.Count -ne 2 -or $integrity[0] -cne 'sha512') {
+            throw 'Official runtime lock has an unsupported integrity algorithm.'
+          }
+          $stream = [IO.File]::OpenRead($archive)
+          $sha512 = [Security.Cryptography.SHA512]::Create()
+          try {
+            $actual = [Convert]::ToBase64String($sha512.ComputeHash($stream))
+          } finally {
+            $sha512.Dispose()
+            $stream.Dispose()
+          }
+          if ($actual -cne $integrity[1]) {
+            throw 'Official runtime archive integrity differs from the reviewed lock.'
+          }
+          $members = @(tar -tzf $archive)
+          if ($LASTEXITCODE -ne 0) { throw 'Official runtime archive cannot be listed.' }
+          foreach ($required in @($runtime.required_files)) {
+            if ($members -cnotcontains $required) {
+              throw "Official runtime archive is missing reviewed member: $required"
+            }
+          }
 
       - name: Run complete patch generation and contract tests
-        shell: bash
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $manifest = Join-Path $env:GITHUB_WORKSPACE '${{ steps.resolve.outputs.manifest_path }}'
+          python scripts/run_patch_contract.py `
+            --manifest $manifest `
+            --source $env:SOURCE_ROOT `
+            --cargo-target $env:CARGO_TARGET_DIR `
+            --output $env:TEST_REPORT `
+            --portable-evidence `
+            --phase tests
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+
+      - name: Report shared sccache use
+        shell: pwsh
         env:
-          SCCACHE_DIR: ${{ env.SCCACHE_DIR }}
-          CSA_SCCACHE_CACHE_SIZE: 6G
           CSA_SCCACHE_PROFILE: test
           CSA_MINIMUM_RUST_HIT_RATE: 95
         run: |
-          set -euo pipefail
-          bash scripts/build_patched_codex_bundle.sh tests \
-            "$RESOLUTION_JSON" \
-            "$SOURCE_ROOT" \
-            "$CARGO_TARGET_DIR" \
-            "$BUNDLE_ROOT" \
-            "$SCCACHE_STATS"
+          $ErrorActionPreference = 'Continue'
+          $stats = & $env:SCCACHE_PATH --show-stats --stats-format json
+          if ($LASTEXITCODE -eq 0) {
+            [IO.File]::WriteAllLines(
+              $env:SCCACHE_STATS,
+              $stats,
+              [Text.UTF8Encoding]::new($false)
+            )
+            python scripts/check_sccache_stats.py `
+              --stats $env:SCCACHE_STATS `
+              --minimum-rust-hit-rate $env:CSA_MINIMUM_RUST_HIT_RATE `
+              --profile $env:CSA_SCCACHE_PROFILE `
+              --github-step-summary $env:GITHUB_STEP_SUMMARY
+            if ($LASTEXITCODE -ne 0) { Write-Warning 'sccache statistics did not meet the advisory threshold.' }
+          } else {
+            Write-Warning 'sccache statistics are unavailable.'
+          }
+          & $env:SCCACHE_PATH --show-stats
 
       - name: Create exact validation evidence
-        shell: bash
+        shell: pwsh
         run: |
-          set -euo pipefail
-          cp "$TEST_REPORT" "$EVIDENCE_ROOT/test-report.json"
-          python scripts/validation_evidence.py create \
-            --repository . \
-            --resolution "$RESOLUTION_JSON" \
-            --test-report "$EVIDENCE_ROOT/test-report.json" \
-            --csa-commit "$CSA_SOURCE_COMMIT" \
-            --workflow-run-id "$GITHUB_RUN_ID" \
-            --workflow-run-attempt "$GITHUB_RUN_ATTEMPT" \
-            --output "$EVIDENCE_ROOT/validation-result.json"
+          $ErrorActionPreference = 'Stop'
+          $testReport = Join-Path $env:EVIDENCE_ROOT 'test-report.json'
+          $validationResult = Join-Path $env:EVIDENCE_ROOT 'validation-result.json'
+          Copy-Item -LiteralPath $env:TEST_REPORT -Destination $testReport
+          python scripts/validation_evidence.py create `
+            --repository . `
+            --resolution $env:RESOLUTION_JSON `
+            --test-report $testReport `
+            --csa-commit $env:CSA_SOURCE_COMMIT `
+            --workflow-run-id $env:GITHUB_RUN_ID `
+            --workflow-run-attempt $env:GITHUB_RUN_ATTEMPT `
+            --output $validationResult
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload validation evidence
         uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7

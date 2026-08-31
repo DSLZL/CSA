@@ -929,8 +929,8 @@ def test_release_stream_contracts() -> None:
     assert "workflow_call:" in validation_workflow and "workflow_dispatch:" in validation_workflow
     assert "ref: ${{ inputs.source_commit }}" in target_workflow
     assert "ref: ${{ inputs.source_commit || github.sha }}" in validation_workflow
-    assert 'test "$(git rev-parse HEAD)" = "$CSA_SOURCE_COMMIT"' in validation_workflow
-    assert '--csa-commit "$CSA_SOURCE_COMMIT"' in validation_workflow
+    assert "if ((git rev-parse HEAD).Trim() -ne $env:CSA_SOURCE_COMMIT)" in validation_workflow
+    assert "--csa-commit $env:CSA_SOURCE_COMMIT" in validation_workflow
 
     windows_test_triggers = windows_test_workflow.split("\nconcurrency:", 1)[0]
     assert "  workflow_dispatch:" in windows_test_triggers
@@ -1022,6 +1022,7 @@ def test_release_stream_contracts() -> None:
         for name, workflow in workflow_sources.items()
         if 'cargo build --target "$TARGET" --release --timings --bin codex' in workflow
         or "bash scripts/build_patched_codex_bundle.sh" in workflow
+        or "python scripts/run_patch_contract.py" in workflow
     }
     patched_cache_owners = {
         name for name, workflow in workflow_sources.items() if sccache_action in workflow
@@ -1152,22 +1153,29 @@ def test_release_stream_contracts() -> None:
     assert "build_patched_codex_bundle.sh" not in patched_workflow
     assert "build_patched_codex_bundle.sh" not in target_workflow
     assert "build_patched_codex_bundle.sh" not in windows_test_workflow
-    assert validation_workflow.count("bash scripts/build_patched_codex_bundle.sh") == 5
-    for phase in ("tools", "rust", "xwin", "runtime", "tests"):
-        assert f"build_patched_codex_bundle.sh {phase}" in validation_workflow
-    for phase in ("build", "release"):
-        assert f"build_patched_codex_bundle.sh {phase}" not in validation_workflow
+    assert "build_patched_codex_bundle.sh" not in validation_workflow
     assert patched_workflow.count("runs-on: ubuntu-24.04") == 3
     assert "runs-on: ubuntu-26.04" not in patched_workflow
-    assert "bash scripts/build_patched_codex_bundle.sh" in validation_workflow
+    assert "runs-on: windows-2025" in validation_workflow
+    assert "runs-on: ubuntu-24.04" not in validation_workflow
+    assert "shell: bash" not in validation_workflow
+    assert "dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582" in validation_workflow
+    assert "components: rustfmt, clippy" in validation_workflow
+    assert "setup-msvc-env.ps1" in validation_workflow
+    assert "python scripts/run_patch_contract.py" in validation_workflow
+    assert "--portable-evidence" in validation_workflow
+    assert "--phase tests" in validation_workflow
+    assert "--cross-windows-msvc" not in validation_workflow
+    assert "Invoke-WebRequest" in validation_workflow
+    assert "[Security.Cryptography.SHA512]::Create()" in validation_workflow
+    assert "tar -tzf $archive" in validation_workflow
     assert "llvm-toolchain-noble-21" in build_profile
     assert "6084F3CF814B57C1CF12EFD515CF4D18AF4F7421" in build_profile
     assert "/usr/lib/llvm-$LLVM_MAJOR/bin" in shared_build
-    assert "CARGO_HOME: ${{ runner.temp }}" not in validation_workflow
-    assert 'echo "CARGO_HOME=$root/cache/cargo-home"' in validation_workflow
-    assert 'tmp="$RUNNER_TEMP/csa-tmp"' in validation_workflow
-    assert 'echo "TMPDIR=$tmp"' in validation_workflow
-    assert 'chmod 0700 "$tmp"' in validation_workflow
+    assert "CARGO_HOME = Join-Path $root 'cache/cargo-home'" in validation_workflow
+    assert "$tmp = Join-Path $env:RUNNER_TEMP 'csa-tmp'" in validation_workflow
+    assert "TEMP = $tmp" in validation_workflow
+    assert "TMP = $tmp" in validation_workflow
     assert "build_patched_codex_bundle.sh" not in ci_workflow
     assert "compat_catalog.py guard-workflows" in ci_workflow
     assert "scripts/test_validation_evidence.py" in ci_workflow
@@ -1225,7 +1233,7 @@ def test_release_stream_contracts() -> None:
         assert f'cp "$official_root/{path}"' not in shared_build
     assert "CSA_SCCACHE_PROFILE: test" in validation_workflow
     assert validation_workflow.count("CSA_MINIMUM_RUST_HIT_RATE: 95") == 1
-    assert 'echo "SCCACHE_STATS=$root/sccache-stats.json"' in validation_workflow
+    assert "SCCACHE_STATS = Join-Path $root 'sccache-stats.json'" in validation_workflow
     release_steps = (
         "Resolve native target matrix",
         "uses: ./.github/workflows/validate-patched-codex.yml",
@@ -1250,11 +1258,11 @@ def test_release_stream_contracts() -> None:
         map(target_workflow.index, target_steps)
     )
     validation_steps = (
-        "Prepare pinned build tools",
-        "Prepare exact Rust toolchain",
-        "Prepare exact xwin SDK and LLVM toolchain",
-        "Prepare official runtime archive",
+        "Configure native MSVC environment",
+        "Configure shared sccache and verify Rust identity",
+        "Verify exact official runtime archive",
         "Run complete patch generation and contract tests",
+        "Report shared sccache use",
         "Create exact validation evidence",
         "Upload validation evidence",
     )
