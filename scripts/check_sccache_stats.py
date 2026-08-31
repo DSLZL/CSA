@@ -19,6 +19,10 @@ def _integer(value: object, label: str) -> int:
     return value
 
 
+def _optional_integer(value: object, label: str) -> int | None:
+    return None if value is None else _integer(value, label)
+
+
 def _sum_integers(value: object) -> int:
     if type(value) is int:
         return max(value, 0)
@@ -51,11 +55,17 @@ def summarize(
     errors = _language_count(stats.get("cache_errors"), "Rust")
     read_errors = _integer(stats.get("cache_read_errors"), "cache_read_errors")
     write_errors = _integer(stats.get("cache_write_errors"), "cache_write_errors")
-    cache_size = _integer(stats_document.get("cache_size"), "cache_size")
-    max_cache_size = _integer(stats_document.get("max_cache_size"), "max_cache_size")
+    cache_size = _optional_integer(stats_document.get("cache_size"), "cache_size")
+    max_cache_size = _optional_integer(
+        stats_document.get("max_cache_size"), "max_cache_size"
+    )
     rust_requests = hits + misses + errors
     hit_rate = hits * 100.0 / (hits + misses) if hits + misses else 0.0
-    cache_utilization = cache_size * 100.0 / max_cache_size if max_cache_size else 0.0
+    cache_utilization = (
+        cache_size * 100.0 / max_cache_size
+        if cache_size is not None and max_cache_size
+        else None
+    )
     warnings = []
     if compile_requests == 0 or rust_requests == 0:
         warnings.append("Rust build recorded zero sccache compile requests")
@@ -65,7 +75,7 @@ def summarize(
         warnings.append(
             f"Rust cache hit rate {hit_rate:.2f}% is below {minimum_rust_hit_rate:.2f}%"
         )
-    if cache_utilization >= 95:
+    if cache_utilization is not None and cache_utilization >= 95:
         warnings.append(
             "sccache is near capacity; eviction or profile thrashing may occur"
         )
@@ -79,7 +89,9 @@ def summarize(
         "rust_hit_rate": round(hit_rate, 2),
         "cache_size_bytes": cache_size,
         "max_cache_size_bytes": max_cache_size,
-        "cache_utilization": round(cache_utilization, 2),
+        "cache_utilization": (
+            round(cache_utilization, 2) if cache_utilization is not None else None
+        ),
         "cache_read_errors": read_errors,
         "cache_write_errors": write_errors,
         "warnings": warnings,
@@ -93,6 +105,15 @@ def _gib(value: int) -> str:
 def append_github_summary(path: Path, profile: str, result: dict[str, Any]) -> None:
     lines = [f"### sccache: {profile}", ""]
     if result["result"] == "reported":
+        cache_size = (
+            "unavailable"
+            if result["cache_utilization"] is None
+            else (
+                f'{_gib(result["cache_size_bytes"])} / '
+                f'{_gib(result["max_cache_size_bytes"])} '
+                f'({result["cache_utilization"]:.2f}%)'
+            )
+        )
         lines.extend(
             [
                 "| Metric | Value |",
@@ -100,11 +121,7 @@ def append_github_summary(path: Path, profile: str, result: dict[str, Any]) -> N
                 f'| Rust hits | {result["rust_hits"]} |',
                 f'| Rust misses | {result["rust_misses"]} |',
                 f'| Rust hit rate | {result["rust_hit_rate"]:.2f}% |',
-                (
-                    f'| Cache size | {_gib(result["cache_size_bytes"])} / '
-                    f'{_gib(result["max_cache_size_bytes"])} '
-                    f'({result["cache_utilization"]:.2f}%) |'
-                ),
+                f"| Cache size | {cache_size} |",
             ]
         )
     else:

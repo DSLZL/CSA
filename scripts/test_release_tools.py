@@ -789,6 +789,12 @@ def test_sccache_statistics() -> None:
     near_capacity = json.loads(json.dumps(document))
     near_capacity["cache_size"] = near_capacity["max_cache_size"]
     assert "near capacity" in summarize_sccache_stats(near_capacity, 95)["warnings"][0]
+    remote_cache = json.loads(json.dumps(document))
+    remote_cache["cache_size"] = None
+    remote_cache["max_cache_size"] = None
+    remote_summary = summarize_sccache_stats(remote_cache, 95)
+    assert remote_summary["result"] == "reported"
+    assert remote_summary["cache_utilization"] is None
 
     with tempfile.TemporaryDirectory(prefix="csa-sccache-stats-") as directory:
         valid = Path(directory) / "valid.json"
