@@ -8,13 +8,13 @@ use crate::process::ProcessRunner;
 use crate::state::{ManagerPaths, ensure_managed_directory, remove_managed_tree};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
 use std::fs::{self, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::Duration;
+use std::time::{Duration, Instant};
 use ureq::{Agent, ResponseExt};
 
 const OPENAI_REPOSITORY: &str = "openai/codex";
@@ -42,6 +42,8 @@ const MAX_GIT_REFS_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RELEASE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_INSTALL_CATALOG_BYTES: u64 = 1024 * 1024;
 const MAX_ARTIFACT_BYTES: u64 = 1024 * 1024 * 1024;
+const GH_PROXY_SAMPLE_BYTES: u64 = 256 * 1024;
+const GH_PROXY_SAMPLE_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_COMPATIBILITY_TAGS: usize = 1_000;
 const MAX_INSTALL_CATALOG_PROBES: usize = 16;
 
@@ -234,6 +236,11 @@ fn resolve_online_install_inner(
         artifact_path.parent().expect("artifact path has a parent"),
     )?;
     progress(InstallEvent::ConnectingArtifact);
+    client.rank_proxy_routes_for_asset(
+        &release_tag,
+        &release_artifact.asset,
+        release_artifact.size,
+    );
     if !client.download_asset_with_progress(
         &release_tag,
         &release_artifact.asset,
@@ -664,6 +671,7 @@ impl<R: Read> Read for ProgressReader<'_, R> {
 struct GitHubClient {
     agent: Agent,
     route: Cell<GitHubRoute>,
+    proxy_order: RefCell<Vec<usize>>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
@@ -689,9 +697,14 @@ impl GitHubClient {
             .timeout_connect(Some(Duration::from_secs(15)))
             .timeout_recv_response(Some(Duration::from_secs(30)))
             .build();
+        let mut proxy_order: Vec<_> = (0..GH_PROXY_ROUTES.len()).collect();
+        if let GitHubRoute::Proxy(index) = route {
+            proxy_order.rotate_left(index);
+        }
         Self {
             agent: Agent::new_with_config(config),
             route: Cell::new(route),
+            proxy_order: RefCell::new(proxy_order),
         }
     }
 
@@ -725,6 +738,23 @@ impl GitHubClient {
             ));
         }
         parse_git_refs(&bytes)
+    }
+
+    fn rank_proxy_routes_for_asset(&self, release_tag: &str, asset_name: &str, expected_size: u64) {
+        if !matches!(self.route.get(), GitHubRoute::Proxy(_)) {
+            return;
+        }
+        let active = self.proxy_order.borrow().clone();
+        if active.len() <= 1 {
+            return;
+        }
+        let direct_url = release_asset_url(release_tag, asset_name);
+        let samples = sample_proxy_routes(&active, &direct_url, expected_size);
+        let ranked = rank_proxy_indices(&active, samples);
+        if let Some(first) = ranked.first().copied() {
+            self.route.set(GitHubRoute::Proxy(first));
+            *self.proxy_order.borrow_mut() = ranked;
+        }
     }
 
     fn download_asset(
@@ -766,92 +796,144 @@ impl GitHubClient {
             validate_sha256(expected)?;
         }
         let url = release_asset_url(release_tag, asset_name);
-        let Some(mut response) = self.get_response(
-            &url,
-            "application/octet-stream",
-            false,
-            &[
-                "github.com",
-                "objects.githubusercontent.com",
-                "release-assets.githubusercontent.com",
-            ],
-            "download compatibility release asset",
-            asset_name != INSTALL_CATALOG_ASSET,
-        )?
-        else {
-            return Ok(false);
-        };
-        if response.body().content_length().is_some_and(|length| {
-            length == 0 || length > max_size || expected_size.is_some_and(|size| size != length)
-        }) {
-            return Err(ManagerError::new(
-                "release_asset_size_mismatch",
-                format!("Content-Length differs for release asset: {asset_name}"),
-            ));
-        }
-        let mut output = OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(destination)
-            .map_err(|error| {
-                ManagerError::io(
-                    &format!("create download destination {}", destination.display()),
-                    error,
-                )
-            })?;
-        let copy_result = {
-            let mut reader = response
-                .body_mut()
-                .with_config()
-                .limit(expected_size.unwrap_or(max_size) + 1)
-                .reader();
-            if let Some(progress) = progress.as_deref_mut() {
-                io::copy(
-                    &mut ProgressReader {
-                        inner: reader,
-                        downloaded_bytes: 0,
-                        total_bytes: expected_size.unwrap_or(max_size),
-                        progress,
-                    },
-                    &mut output,
-                )
-            } else {
-                io::copy(&mut reader, &mut output)
+        loop {
+            let Some(mut response) = self.get_response(
+                &url,
+                "application/octet-stream",
+                false,
+                &[
+                    "github.com",
+                    "objects.githubusercontent.com",
+                    "release-assets.githubusercontent.com",
+                ],
+                "download compatibility release asset",
+                asset_name != INSTALL_CATALOG_ASSET,
+            )?
+            else {
+                return Ok(false);
+            };
+            let route = self.route.get();
+            if response.body().content_length().is_some_and(|length| {
+                length == 0 || length > max_size || expected_size.is_some_and(|size| size != length)
+            }) {
+                let error = ManagerError::new(
+                    "release_asset_size_mismatch",
+                    format!("Content-Length differs for release asset: {asset_name}"),
+                );
+                if self.switch_after_failed_download(route, &mut progress) {
+                    continue;
+                }
+                return Err(error);
             }
-        };
-        let copied = match copy_result.and_then(|size| output.flush().map(|()| size)) {
-            Ok(size) => size,
-            Err(error) => {
+            let mut output = OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .open(destination)
+                .map_err(|error| {
+                    ManagerError::io(
+                        &format!("create download destination {}", destination.display()),
+                        error,
+                    )
+                })?;
+            let copy_result = {
+                let mut reader = response
+                    .body_mut()
+                    .with_config()
+                    .limit(expected_size.unwrap_or(max_size) + 1)
+                    .reader();
+                if let Some(progress) = progress.as_deref_mut() {
+                    io::copy(
+                        &mut ProgressReader {
+                            inner: reader,
+                            downloaded_bytes: 0,
+                            total_bytes: expected_size.unwrap_or(max_size),
+                            progress,
+                        },
+                        &mut output,
+                    )
+                } else {
+                    io::copy(&mut reader, &mut output)
+                }
+            };
+            let copied = match copy_result.and_then(|size| output.flush().map(|()| size)) {
+                Ok(size) => size,
+                Err(error) => {
+                    drop(output);
+                    let _ = fs::remove_file(destination);
+                    let error = ManagerError::io("stream release asset", error);
+                    if self.switch_after_failed_download(route, &mut progress) {
+                        continue;
+                    }
+                    return Err(error);
+                }
+            };
+            if let Err(error) = output.sync_all() {
                 drop(output);
                 let _ = fs::remove_file(destination);
-                return Err(ManagerError::io("stream release asset", error));
+                return Err(ManagerError::io("sync release asset", error));
             }
-        };
-        if let Err(error) = output.sync_all() {
             drop(output);
-            let _ = fs::remove_file(destination);
-            return Err(ManagerError::io("sync release asset", error));
+            if copied == 0 || copied > max_size || expected_size.is_some_and(|size| copied != size)
+            {
+                let _ = fs::remove_file(destination);
+                let error = ManagerError::new(
+                    "release_asset_size_mismatch",
+                    format!("release asset {asset_name} has an unexpected size: {copied} bytes"),
+                );
+                if self.switch_after_failed_download(route, &mut progress) {
+                    continue;
+                }
+                return Err(error);
+            }
+            if let Some(progress) = progress.as_deref_mut() {
+                progress(InstallEvent::VerifyingArtifact);
+            }
+            let (actual, size) = match sha256_file(destination) {
+                Ok(fingerprint) => fingerprint,
+                Err(error) => {
+                    let _ = fs::remove_file(destination);
+                    return Err(error);
+                }
+            };
+            if size != copied || expected_sha256.is_some_and(|expected| actual != expected) {
+                let _ = fs::remove_file(destination);
+                let error = ManagerError::new(
+                    "release_asset_hash_mismatch",
+                    format!("release asset failed SHA-256 verification: {asset_name}"),
+                );
+                if self.switch_after_failed_download(route, &mut progress) {
+                    continue;
+                }
+                return Err(error);
+            }
+            return Ok(true);
         }
-        drop(output);
-        if copied == 0 || copied > max_size || expected_size.is_some_and(|size| copied != size) {
-            let _ = fs::remove_file(destination);
-            return Err(ManagerError::new(
-                "release_asset_size_mismatch",
-                format!("release asset {asset_name} has an unexpected size: {copied} bytes"),
-            ));
+    }
+
+    fn switch_after_failed_download(
+        &self,
+        failed_route: GitHubRoute,
+        progress: &mut Option<&mut dyn FnMut(InstallEvent)>,
+    ) -> bool {
+        let GitHubRoute::Proxy(failed) = failed_route else {
+            return false;
+        };
+        let next = {
+            let mut order = self.proxy_order.borrow_mut();
+            if order.len() <= 1 || !order.contains(&failed) {
+                return false;
+            }
+            order.retain(|index| *index != failed);
+            order.first().copied()
+        };
+        let Some(next) = next else {
+            return false;
+        };
+        self.route.set(GitHubRoute::Proxy(next));
+        if let Some(progress) = progress.as_deref_mut() {
+            progress(InstallEvent::ConnectingArtifact);
         }
-        if let Some(progress) = progress {
-            progress(InstallEvent::VerifyingArtifact);
-        }
-        let (actual, size) = sha256_file(destination)?;
-        if size != copied || expected_sha256.is_some_and(|expected| actual != expected) {
-            let _ = fs::remove_file(destination);
-            return Err(ManagerError::new(
-                "release_asset_hash_mismatch",
-                format!("release asset failed SHA-256 verification: {asset_name}"),
-            ));
-        }
-        Ok(true)
+        true
     }
 
     fn get_response(
@@ -916,8 +998,8 @@ impl GitHubClient {
     ) -> Result<Option<ureq::http::Response<ureq::Body>>> {
         let mut failures = Vec::new();
         let mut not_found = 0;
-        for offset in 0..GH_PROXY_ROUTES.len() {
-            let index = (first + offset) % GH_PROXY_ROUTES.len();
+        let order = proxy_indices_from(&self.proxy_order.borrow(), first);
+        for index in order.iter().copied() {
             let route = GitHubRoute::Proxy(index);
             match self.request_on_route(route, direct_url, accept, git_protocol) {
                 Ok(response) => {
@@ -936,7 +1018,7 @@ impl GitHubClient {
                 Err(error) => failures.push(format!("{}: {error}", GH_PROXY_ROUTES[index].1)),
             }
         }
-        if not_found == GH_PROXY_ROUTES.len() {
+        if !order.is_empty() && not_found == order.len() {
             return Ok(None);
         }
         Err(ManagerError::new(
@@ -1074,6 +1156,118 @@ fn routed_url(route: GitHubRoute, direct_url: &str) -> String {
         GitHubRoute::Direct => direct_url.to_owned(),
         GitHubRoute::Proxy(index) => format!("{}{direct_url}", GH_PROXY_ROUTES[index].0),
     }
+}
+
+fn proxy_indices_from(order: &[usize], first: usize) -> Vec<usize> {
+    let Some(position) = order.iter().position(|index| *index == first) else {
+        return order.to_vec();
+    };
+    order[position..]
+        .iter()
+        .chain(&order[..position])
+        .copied()
+        .collect()
+}
+
+fn sample_proxy_routes(
+    active: &[usize],
+    direct_url: &str,
+    expected_size: u64,
+) -> Vec<(usize, Duration)> {
+    std::thread::scope(|scope| {
+        let handles: Vec<_> = active
+            .iter()
+            .copied()
+            .map(|index| {
+                scope.spawn(move || {
+                    sample_proxy_route(index, direct_url, expected_size)
+                        .map(|elapsed| (index, elapsed))
+                })
+            })
+            .collect();
+        handles
+            .into_iter()
+            .filter_map(|handle| handle.join().ok().flatten())
+            .collect()
+    })
+}
+
+fn sample_proxy_route(index: usize, direct_url: &str, expected_size: u64) -> Option<Duration> {
+    let sample_size = expected_size.min(GH_PROXY_SAMPLE_BYTES);
+    if sample_size == 0 {
+        return None;
+    }
+    let config = Agent::config_builder()
+        .https_only(true)
+        .max_redirects(5)
+        .timeout_global(Some(GH_PROXY_SAMPLE_TIMEOUT))
+        .timeout_connect(Some(Duration::from_secs(2)))
+        .timeout_recv_response(Some(Duration::from_secs(2)))
+        .timeout_recv_body(Some(Duration::from_secs(2)))
+        .build();
+    let agent = Agent::new_with_config(config);
+    let started = Instant::now();
+    let mut response = agent
+        .get(&routed_url(GitHubRoute::Proxy(index), direct_url))
+        .header("Accept", "application/octet-stream")
+        .header("Range", &format!("bytes=0-{}", sample_size - 1))
+        .header("User-Agent", concat!("csa/", env!("CARGO_PKG_VERSION")))
+        .call()
+        .ok()?;
+    if response.status().as_u16() != 206
+        || require_route_host(&response, GitHubRoute::Proxy(index), &[]).is_err()
+        || !response
+            .headers()
+            .get("Content-Range")
+            .and_then(|value| value.to_str().ok())
+            .is_some_and(|value| content_range_matches(value, sample_size, expected_size))
+        || response
+            .body()
+            .content_length()
+            .is_some_and(|length| length != sample_size)
+    {
+        return None;
+    }
+    let mut reader = response
+        .body_mut()
+        .with_config()
+        .limit(sample_size + 1)
+        .reader();
+    let copied = io::copy(&mut reader, &mut io::sink()).ok()?;
+    (copied == sample_size).then(|| started.elapsed())
+}
+
+fn content_range_matches(value: &str, sample_size: u64, expected_size: u64) -> bool {
+    let Some((range, total)) = value
+        .strip_prefix("bytes ")
+        .and_then(|value| value.split_once('/'))
+    else {
+        return false;
+    };
+    let Some((start, end)) = range.split_once('-') else {
+        return false;
+    };
+    start.parse::<u64>() == Ok(0)
+        && end.parse::<u64>().ok().and_then(|end| end.checked_add(1)) == Some(sample_size)
+        && total.parse::<u64>() == Ok(expected_size)
+}
+
+fn rank_proxy_indices(active: &[usize], mut samples: Vec<(usize, Duration)>) -> Vec<usize> {
+    samples.retain(|(index, _)| active.contains(index));
+    samples.sort_by(|left, right| left.1.cmp(&right.1).then_with(|| left.0.cmp(&right.0)));
+    let mut seen = BTreeSet::new();
+    let mut ranked = Vec::with_capacity(active.len());
+    for (index, _) in samples {
+        if seen.insert(index) {
+            ranked.push(index);
+        }
+    }
+    for index in active.iter().copied() {
+        if seen.insert(index) {
+            ranked.push(index);
+        }
+    }
+    ranked
 }
 
 fn select_proxy_index() -> usize {
@@ -1619,12 +1813,13 @@ mod tests {
         BUILD_TARGET, CSA_REPOSITORY, CompatibilityRelease, GH_PROXY_PROBE_URL, GH_PROXY_ROUTES,
         GitHubClient, GitHubRoute, InstallCandidate, InstallCatalog, InstallCatalogEntry,
         MAX_ARTIFACT_BYTES, OPENAI_REPOSITORY, ProgressReader, ReleaseFile, UpstreamRelease,
-        compatibility_tags, country_from_alibaba_region, country_from_cloudflare_trace,
-        descriptor_artifact, descriptor_assets, install_candidates, parse_checksums,
-        parse_git_refs, patch_revision, peel_tag_from_refs, release_asset_url, require_uri_host,
-        route_from_region_probes, routed_url, select_automatic, should_try_proxy,
-        stable_release_version, take_selected_candidate, valid_recorded_on,
-        validate_catalog_descriptor, validate_declared_asset, validate_install_catalog,
+        compatibility_tags, content_range_matches, country_from_alibaba_region,
+        country_from_cloudflare_trace, descriptor_artifact, descriptor_assets, install_candidates,
+        parse_checksums, parse_git_refs, patch_revision, peel_tag_from_refs, proxy_indices_from,
+        rank_proxy_indices, release_asset_url, require_uri_host, route_from_region_probes,
+        routed_url, select_automatic, should_try_proxy, stable_release_version,
+        take_selected_candidate, valid_recorded_on, validate_catalog_descriptor,
+        validate_declared_asset, validate_install_catalog,
     };
     use crate::manager::InstallEvent;
     use std::collections::BTreeMap;
@@ -1905,6 +2100,42 @@ mod tests {
         let rejected = "https://example.invalid/asset".parse().unwrap();
         assert!(require_uri_host(&allowed, &["release-assets.githubusercontent.com"]).is_ok());
         assert!(require_uri_host(&rejected, &["release-assets.githubusercontent.com"]).is_err());
+    }
+
+    #[test]
+    fn proxy_samples_rank_fastest_and_preserve_fallbacks() {
+        let active = [4, 1, 6, 0];
+        assert_eq!(proxy_indices_from(&active, 6), [6, 0, 4, 1]);
+        assert_eq!(
+            rank_proxy_indices(
+                &active,
+                vec![
+                    (1, Duration::from_millis(200)),
+                    (6, Duration::from_millis(50)),
+                    (99, Duration::from_millis(1)),
+                ],
+            ),
+            [6, 1, 4, 0]
+        );
+        assert!(content_range_matches(
+            "bytes 0-262143/1000000",
+            262_144,
+            1_000_000
+        ));
+        for invalid in [
+            "bytes 1-262144/1000000",
+            "bytes 0-262144/1000000",
+            "bytes 0-262143/999999",
+            "0-262143/1000000",
+        ] {
+            assert!(!content_range_matches(invalid, 262_144, 1_000_000));
+        }
+
+        let client = GitHubClient::with_route(GitHubRoute::Proxy(2));
+        let mut progress: Option<&mut dyn FnMut(InstallEvent)> = None;
+        assert!(client.switch_after_failed_download(GitHubRoute::Proxy(2), &mut progress));
+        assert_eq!(client.route.get(), GitHubRoute::Proxy(3));
+        assert!(!client.proxy_order.borrow().contains(&2));
     }
 
     #[test]
