@@ -1975,7 +1975,7 @@ mod tests {
                     release_commit: format!("{revision:040x}"),
                     compat_id,
                     codex_version: "0.10.0".to_owned(),
-                    build_target: Some(BUILD_TARGET.to_owned()),
+                    build_target: Some(compatibility_artifact_target(BUILD_TARGET).to_owned()),
                     build_targets: Vec::new(),
                     patch_revision: revision,
                     recorded_on: "2026-08-29".to_owned(),
