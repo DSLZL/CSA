@@ -14,7 +14,7 @@ CSA has two independent products:
 
 | Product | Release namespace | Current release |
 | --- | --- | --- |
-| CSA Manager | `vX.Y.Z` and `@dslzl/csa` | `0.1.7` |
+| CSA Manager | `vX.Y.Z` and `@dslzl/csa` | `0.1.8` |
 | Patched Codex | `compat-<compat_id>` | Codex `0.151.0` p10 |
 
 The Manager never installs, downgrades, or repairs official Codex. It only accepts a patched Release that already matches the installed runtime.
@@ -24,15 +24,15 @@ The Manager never installs, downgrades, or repairs official Codex. It only accep
 Install the npm meta package globally:
 
 ```powershell
-npm install --global @dslzl/csa@0.1.7
+npm install --global @dslzl/csa@0.1.8
 csa --version
 ```
 
 For one-off use:
 
 ```powershell
-npx @dslzl/csa@0.1.7 --version
-bunx @dslzl/csa@0.1.7 --version
+npx @dslzl/csa@0.1.8 --version
+bunx @dslzl/csa@0.1.8 --version
 ```
 
 `npx --yes` suppresses npm's confirmation before installing a missing package. It does not bypass CSA validation or answer the later version picker. `csa install --yes` is the separate CSA option for automatic compatibility selection.
@@ -63,7 +63,7 @@ npm view @dslzl/csa version --registry=https://registry.npmjs.org
 If the official registry has the version but a mirror returns 404, use the official registry for this installation or wait for synchronization:
 
 ```powershell
-npm install --global @dslzl/csa@0.1.7 --registry=https://registry.npmjs.org
+npm install --global @dslzl/csa@0.1.8 --registry=https://registry.npmjs.org
 ```
 
 The same issue can affect `bunx` when Bun is configured to use an npm mirror.
@@ -125,7 +125,7 @@ The catalog only supplies picker rows. It does not authorize installation.
 
 The picker opens only when stdin, stdout, and stderr are terminals, Human output is active, and neither `--yes` nor `--compat` was supplied.
 
-It displays five rows after filtering to the current Manager target and official Codex version. The unique greatest numeric `-pN` revision starts as `Recommended`. An exact valid prepared state is marked `Installed`.
+It displays five rows after filtering to the resolved artifact target and official Codex version. Linux GNU Manager targets resolve to the corresponding musl artifact target. The unique greatest numeric `-pN` revision starts as `Recommended`. An exact valid prepared state is marked `Installed`.
 
 | Key | Action |
 | --- | --- |
@@ -313,7 +313,7 @@ npm uninstall --global @dslzl/csa
 | --- | --- | --- |
 | `csa` is not recognized | `Get-Command csa -All` and npm global bin | Restart the terminal or use `npx`/`bunx` |
 | npm or Bun mirror returns 404 | `npm config get registry` | Use `registry.npmjs.org` or wait for mirror sync |
-| Picker has no versions | `csa doctor --json` official version and Manager target | Install a matching official Codex version or wait for a formal compatibility |
+| Picker has no versions | `csa doctor --json` official version and Manager target | Install a matching official Codex version or wait for a formal compatibility for the resolved artifact target |
 | Install pauses after selection | Human progress and network route | Wait for bounded metadata and mirror probes; retry if a structured network error appears |
 | `codex` still resolves to official | `csa status` and `Get-Command codex -All` | Close all terminals and fully restart the terminal host |
 | Install reports `path_elevation_failed` | UAC was denied or unavailable | Retry and approve the administrator prompt |

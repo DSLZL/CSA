@@ -185,6 +185,7 @@ fn resolve_online_install_inner(
     });
     let release_tag = selected.release_tag;
     let csa_commit = selected.release_commit;
+    let artifact_target = compatibility_artifact_target(BUILD_TARGET);
     progress(InstallEvent::DownloadingReleaseMetadata);
     let selected_path = staging_path.join("selected");
     ensure_managed_directory(&paths.root, &selected_path)?;
@@ -207,7 +208,7 @@ fn resolve_online_install_inner(
     }
 
     let upstream_version = stable_release_version(&descriptor.upstream.tag)?;
-    descriptor_artifact(&descriptor, BUILD_TARGET)?;
+    descriptor_artifact(&descriptor, artifact_target)?;
     if official.version != upstream_version {
         return Err(ManagerError::new(
             "unsupported_official_version",
@@ -218,12 +219,12 @@ fn resolve_online_install_inner(
         ));
     }
 
-    let release_artifact = descriptor_artifact(&descriptor, BUILD_TARGET)?;
+    let release_artifact = descriptor_artifact(&descriptor, artifact_target)?;
     validate_declared_asset(release_artifact, &checksums)?;
     let runtime = RuntimeManifest::new(
         compat_id.clone(),
         upstream_version,
-        BUILD_TARGET.to_owned(),
+        artifact_target.to_owned(),
         RuntimeArtifact {
             filename: release_artifact.path.clone(),
             sha256: release_artifact.sha256.clone(),
@@ -281,23 +282,25 @@ fn discover_install_candidates(
     let catalog_path = staging_path.join("catalog");
     ensure_managed_directory(manager_root, &catalog_path)?;
     let catalog = load_install_catalog(client, &catalog_path, refs)?;
-    install_candidates(catalog, official_version)
+    install_candidates(catalog, official_version, BUILD_TARGET)
 }
 
 fn install_candidates(
     catalog: InstallCatalog,
     official_version: &str,
+    manager_target: &str,
 ) -> Result<Vec<InstallCandidate>> {
+    let artifact_target = compatibility_artifact_target(manager_target);
     let candidates: Vec<_> = catalog
         .entries
         .into_iter()
         .filter(|entry| {
-            entry.codex_version == official_version && entry.supports_target(BUILD_TARGET)
+            entry.codex_version == official_version && entry.supports_target(artifact_target)
         })
         .map(|entry| InstallCandidate {
             compat_id: entry.compat_id,
             codex_version: entry.codex_version,
-            build_target: BUILD_TARGET.to_owned(),
+            build_target: artifact_target.to_owned(),
             patch_revision: entry.patch_revision,
             recorded_on: entry.recorded_on,
             recommended: false,
@@ -312,6 +315,14 @@ fn install_candidates(
         ));
     }
     Ok(candidates)
+}
+
+fn compatibility_artifact_target(manager_target: &str) -> &str {
+    match manager_target {
+        "x86_64-unknown-linux-gnu" => "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-gnu" => "aarch64-unknown-linux-musl",
+        target => target,
+    }
 }
 
 fn take_selected_candidate(
@@ -1813,13 +1824,13 @@ mod tests {
         BUILD_TARGET, CSA_REPOSITORY, CompatibilityRelease, GH_PROXY_PROBE_URL, GH_PROXY_ROUTES,
         GitHubClient, GitHubRoute, InstallCandidate, InstallCatalog, InstallCatalogEntry,
         MAX_ARTIFACT_BYTES, OPENAI_REPOSITORY, ProgressReader, ReleaseFile, UpstreamRelease,
-        compatibility_tags, content_range_matches, country_from_alibaba_region,
-        country_from_cloudflare_trace, descriptor_artifact, descriptor_assets, install_candidates,
-        parse_checksums, parse_git_refs, patch_revision, peel_tag_from_refs, proxy_indices_from,
-        rank_proxy_indices, release_asset_url, require_uri_host, route_from_region_probes,
-        routed_url, select_automatic, should_try_proxy, stable_release_version,
-        take_selected_candidate, valid_recorded_on, validate_catalog_descriptor,
-        validate_declared_asset, validate_install_catalog,
+        compatibility_artifact_target, compatibility_tags, content_range_matches,
+        country_from_alibaba_region, country_from_cloudflare_trace, descriptor_artifact,
+        descriptor_assets, install_candidates, parse_checksums, parse_git_refs, patch_revision,
+        peel_tag_from_refs, proxy_indices_from, rank_proxy_indices, release_asset_url,
+        require_uri_host, route_from_region_probes, routed_url, select_automatic, should_try_proxy,
+        stable_release_version, take_selected_candidate, valid_recorded_on,
+        validate_catalog_descriptor, validate_declared_asset, validate_install_catalog,
     };
     use crate::manager::InstallEvent;
     use std::collections::BTreeMap;
@@ -1904,7 +1915,7 @@ mod tests {
     }
 
     #[test]
-    fn schema_two_install_catalog_deserializes_and_selects_current_target() {
+    fn schema_two_catalog_maps_linux_gnu_manager_to_musl_artifact() {
         let source_tag = "compat-rust-v0.10.0-native-join-p10";
         let source_commit = "a".repeat(40);
         let catalog: InstallCatalog = serde_json::from_value(serde_json::json!({
@@ -1917,7 +1928,7 @@ mod tests {
                 "release_tag": source_tag,
                 "release_commit": source_commit,
                 "codex_version": "0.10.0",
-                "build_targets": [BUILD_TARGET],
+                "build_targets": ["x86_64-unknown-linux-musl"],
                 "patch_revision": 10,
                 "recorded_on": "2026-08-29"
             }]
@@ -1926,9 +1937,17 @@ mod tests {
         let refs = BTreeMap::from([(format!("refs/tags/{source_tag}"), source_commit.to_owned())]);
 
         validate_install_catalog(&catalog, &refs, Some(source_tag)).unwrap();
-        let candidates = install_candidates(catalog, "0.10.0").unwrap();
+        let candidates = install_candidates(catalog, "0.10.0", "x86_64-unknown-linux-gnu").unwrap();
         assert_eq!(candidates.len(), 1);
-        assert_eq!(candidates[0].build_target, BUILD_TARGET);
+        assert_eq!(candidates[0].build_target, "x86_64-unknown-linux-musl");
+        assert_eq!(
+            compatibility_artifact_target("aarch64-unknown-linux-gnu"),
+            "aarch64-unknown-linux-musl"
+        );
+        assert_eq!(
+            compatibility_artifact_target("x86_64-pc-windows-msvc"),
+            "x86_64-pc-windows-msvc"
+        );
     }
 
     #[test]
@@ -1979,7 +1998,7 @@ mod tests {
             entries,
         };
         validate_install_catalog(&catalog, &refs, None).unwrap();
-        let candidates = install_candidates(catalog, "0.10.0").unwrap();
+        let candidates = install_candidates(catalog, "0.10.0", BUILD_TARGET).unwrap();
         assert_eq!(candidates.len(), 100);
         assert_eq!(
             candidates[select_automatic(&candidates).unwrap()].patch_revision,

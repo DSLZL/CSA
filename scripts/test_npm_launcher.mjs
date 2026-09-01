@@ -21,6 +21,12 @@ const repository = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '.
 const launcher = path.resolve(repository, 'npm', 'meta', 'bin', 'csa.js');
 const meta = JSON.parse(readFileSync(path.resolve(repository, 'npm', 'meta', 'package.json'), 'utf8'));
 const matrix = JSON.parse(readFileSync(path.resolve(repository, 'npm', 'meta', 'platforms.json'), 'utf8'));
+const linuxPlatforms = matrix.platforms.filter((platform) => platform.os === 'linux');
+assert.deepEqual(
+  linuxPlatforms.map((platform) => platform.target),
+  ['x86_64-unknown-linux-musl', 'aarch64-unknown-linux-musl'],
+);
+assert.ok(linuxPlatforms.every((platform) => !Object.hasOwn(platform, 'libc')));
 const selected = matrix.platforms.find(
   (platform) => platform.os === process.platform && platform.arch === process.arch,
 );

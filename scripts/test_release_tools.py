@@ -81,7 +81,7 @@ def package_fixtures(root: Path) -> tuple[Path, Path, Path, Path]:
         "bin": {"csa": "bin/csa.js"},
         "optionalDependencies": optional,
     }
-    meta = root / "dslzl-csa-0.1.7.tgz"
+    meta = root / "dslzl-csa-0.1.8.tgz"
     write_tar(
         meta,
         {
@@ -105,7 +105,7 @@ def package_fixtures(root: Path) -> tuple[Path, Path, Path, Path]:
             "sha256": manager_hash,
         },
     }
-    npm_platform = root / "dslzl-csa-win32-x64-0.1.7.tgz"
+    npm_platform = root / "dslzl-csa-win32-x64-0.1.8.tgz"
     write_tar(
         npm_platform,
         {
@@ -147,7 +147,7 @@ def release_input(
         )
     value = {
         "schema": 1,
-        "release_version": "0.1.7",
+        "release_version": "0.1.8",
         "source": {"revision": "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "ref": None, "repository": None},
         "meta_tarball": str(meta),
         "platforms": results,
@@ -184,8 +184,8 @@ def test_assembler(root: Path) -> None:
     provenance = json.loads((first / "provenance.json").read_bytes())
     assert all(not Path(asset["path"]).is_absolute() for asset in provenance["assets"])
     assemble(REPOSITORY, inputs, second)
-    assert digest(first / "source" / "csa-0.1.7.tar.gz") == digest(
-        second / "source" / "csa-0.1.7.tar.gz"
+    assert digest(first / "source" / "csa-0.1.8.tar.gz") == digest(
+        second / "source" / "csa-0.1.8.tar.gz"
     )
 
     corrupt = root / "corrupt-platform.tgz"
@@ -248,7 +248,7 @@ def test_ci_input(root: Path) -> None:
         artifact_root,
         output,
         "a" * 40,
-        "refs/tags/v0.1.7",
+        "refs/tags/v0.1.8",
         "https://example.invalid/csa",
     )
     assert value["platforms"]["win32-x64"]["status"] == "pass"
@@ -1313,6 +1313,16 @@ def test_release_stream_contracts() -> None:
     assert "Validate exact manager and npm asset set" in manager_workflow
     assert "actions: write" in manager_workflow
     assert "gh workflow run publish-npm.yml" in manager_workflow
+    for target in (
+        "x86_64-unknown-linux-musl",
+        "aarch64-unknown-linux-musl",
+    ):
+        assert target in manager_workflow
+        assert target in ci_workflow
+    for workflow in (manager_workflow, ci_workflow):
+        assert "unknown-linux-gnu" not in workflow
+        assert "targets: ${{ matrix.target }}" in workflow
+        assert "sudo apt-get install --yes musl-tools" in workflow
     assert manager_workflow.index('gh release create "$TAG"') < manager_workflow.index(
         "gh workflow run publish-npm.yml"
     )

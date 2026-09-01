@@ -370,11 +370,11 @@ jobs:
             binary: csa.exe
           - id: linux-x64
             runner: ubuntu-24.04
-            target: x86_64-unknown-linux-gnu
+            target: x86_64-unknown-linux-musl
             binary: csa
           - id: linux-arm64
             runner: ubuntu-24.04-arm
-            target: aarch64-unknown-linux-gnu
+            target: aarch64-unknown-linux-musl
             binary: csa
           - id: darwin-x64
             runner: macos-15-intel
@@ -413,6 +413,13 @@ jobs:
       - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
         with:
           components: clippy
+          targets: ${{ matrix.target }}
+      - name: Install musl build tools
+        if: runner.os == 'Linux'
+        shell: bash
+        run: |
+          sudo apt-get update
+          sudo apt-get install --yes musl-tools
       - name: Set up Cargo downloads and sccache
         uses: ./.github/actions/setup-codex-rust-cache
         with:

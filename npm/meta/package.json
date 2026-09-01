@@ -1,6 +1,6 @@
 {
   "name": "@dslzl/csa",
-  "version": "0.1.7",
+  "version": "0.1.8",
   "description": "Fail-closed manager for a side-by-side CSA build",
   "license": "MIT",
   "repository": {
@@ -21,10 +21,10 @@
     "node": ">=18"
   },
   "optionalDependencies": {
-    "@dslzl/csa-win32-x64": "0.1.7",
-    "@dslzl/csa-linux-x64": "0.1.7",
-    "@dslzl/csa-linux-arm64": "0.1.7",
-    "@dslzl/csa-darwin-x64": "0.1.7",
-    "@dslzl/csa-darwin-arm64": "0.1.7"
+    "@dslzl/csa-win32-x64": "0.1.8",
+    "@dslzl/csa-linux-x64": "0.1.8",
+    "@dslzl/csa-linux-arm64": "0.1.8",
+    "@dslzl/csa-darwin-x64": "0.1.8",
+    "@dslzl/csa-darwin-arm64": "0.1.8"
   }
 }

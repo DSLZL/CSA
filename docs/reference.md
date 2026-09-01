@@ -27,7 +27,7 @@ csa [--json] <command> [options]
 
 ### Install modes
 
-Online mode is selected when `install` has no `--manifest`. It discovers formal compatibility Releases from `DSLZL/CSA` and accepts only an exact match for the installed official Codex version and the Manager build target.
+Online mode is selected when `install` has no `--manifest`. It discovers formal compatibility Releases from `DSLZL/CSA` and accepts only an exact match for the installed official Codex version and the resolved artifact target. Linux GNU Manager targets resolve to the corresponding musl artifact target.
 
 Local mode requires `--manifest` and exactly one of `--artifact` or `--source`. It rejects `--yes` and `--compat`. Local mode is intended for development and acceptance work.
 
@@ -132,17 +132,17 @@ On Windows, explicit `install` and `plug` place the managed `bin` directory firs
 
 ## Platform support
 
-CSA Manager `0.1.7` is published for:
+CSA Manager is built for:
 
 | Platform | Rust target | npm package |
 | --- | --- | --- |
 | Windows x64 | `x86_64-pc-windows-msvc` | `@dslzl/csa-win32-x64` |
-| Linux x64 glibc | `x86_64-unknown-linux-gnu` | `@dslzl/csa-linux-x64` |
-| Linux arm64 glibc | `aarch64-unknown-linux-gnu` | `@dslzl/csa-linux-arm64` |
+| Linux x64 | `x86_64-unknown-linux-musl` | `@dslzl/csa-linux-x64` |
+| Linux arm64 | `aarch64-unknown-linux-musl` | `@dslzl/csa-linux-arm64` |
 | macOS x64 | `x86_64-apple-darwin` | `@dslzl/csa-darwin-x64` |
 | macOS arm64 | `aarch64-apple-darwin` | `@dslzl/csa-darwin-arm64` |
 
-The formal `rust-v0.151.0-native-join-p10` patched Release contains Windows x64/arm64, Linux x64/arm64 musl, and macOS x64/arm64 Codex binaries. Manager support does not guarantee a patched artifact for the same target.
+The Linux npm packages contain static musl Manager binaries and intentionally omit npm's `libc` restriction, so the same package can run on glibc and musl hosts. Online install resolves the Manager target to the reviewed patched-Codex artifact target before filtering catalogs or reading descriptors.
 
 ## Sources of truth
 

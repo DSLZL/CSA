@@ -22,8 +22,9 @@ csa unplug
 csa purge
 ```
 
-Bare `install` detects the official Codex version and Manager target, then installs
-the matching public Release with the greatest numeric terminal `-pN` revision. Use
+Bare `install` detects the official Codex version, resolves the Manager target to the
+published artifact target, then installs the matching public Release with the greatest
+numeric terminal `-pN` revision. Use
 `--compat` only to pin an older exact match, and use absolute paths for local
 compatibility manifests and artifacts/sources. On Windows, a successful install puts
 the verified managed bin first in the user PATH and silently rechecks `where.exe codex`.
