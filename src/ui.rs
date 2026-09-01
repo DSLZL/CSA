@@ -232,8 +232,8 @@ impl InstallProgress {
                     writer,
                     "{}",
                     self.language.text(
-                        "Prioritizing and verifying the codex command...",
-                        "正在提高 codex 命令优先级并进行验证……"
+                        "Prioritizing and verifying the codex command; Windows may request administrator permission...",
+                        "正在提高 codex 命令优先级并进行验证；Windows 可能会请求管理员权限……"
                     )
                 )
             }
@@ -969,9 +969,17 @@ fn recovery_hint(language: Language, operation: Operation, code: &str) -> &'stat
             "Check the network or proxy, then retry the command.",
             "请检查网络或代理，然后重试该命令。",
         ),
+        "path_precedence_conflict" => language.text(
+            "A Windows policy still prevents CSA from taking command priority; ask an administrator to inspect the machine PATH, then run `csa plug` again.",
+            "Windows 策略仍阻止 CSA 取得命令优先级；请让管理员检查系统 PATH，然后重新运行 `csa plug`。",
+        ),
+        "path_elevation_failed" => language.text(
+            "Run the command again and approve the Windows administrator prompt.",
+            "请重新运行该命令，并允许 Windows 管理员权限请求。",
+        ),
         "path_activation_failed" | "path_activation_rollback_failed" => language.text(
-            "Open a new terminal and run `csa doctor --json` before retrying.",
-            "请打开新终端并运行 `csa doctor --json`，然后重试。",
+            "Run `csa doctor --json`, inspect the activation result, then retry.",
+            "请运行 `csa doctor --json` 检查激活结果，然后重试。",
         ),
         "install_rollback_failed" => language.text(
             "Run `csa doctor --json` before retrying installation.",
@@ -1494,8 +1502,8 @@ impl HumanReport for InstallReport {
             writer,
             "{}",
             language.text(
-                "OK Patched Codex installed and activated",
-                "成功：补丁版 Codex 已安装并激活",
+                "OK Patched Codex installed; activation is ready for new terminals",
+                "成功：补丁版 Codex 已安装，新终端激活已就绪",
             )
         )?;
         writeln!(
@@ -1523,8 +1531,8 @@ impl HumanReport for InstallReport {
             "{}: {}",
             language.text("Next", "下一步"),
             language.text(
-                "open a new terminal, then run `codex`.",
-                "请打开新终端，然后运行 `codex`。",
+                "close all terminals and terminal-hosting apps, reopen one, then run `where.exe codex` and `codex --version`.",
+                "请关闭所有终端及承载终端的应用，重新打开后运行 `where.exe codex` 和 `codex --version`。",
             )
         )
     }
@@ -1550,11 +1558,14 @@ impl HumanReport for UninstallReport {
 impl HumanReport for PlugReport {
     fn write_human(&self, writer: &mut dyn Write, language: Language) -> io::Result<()> {
         let message = if self.changed {
-            language.text("OK Patched Codex activated", "成功：补丁版 Codex 已激活")
+            language.text(
+                "OK Patched Codex activation is ready for new terminals",
+                "成功：补丁版 Codex 的新终端激活已就绪",
+            )
         } else {
             language.text(
-                "OK Patched Codex was already active",
-                "成功：补丁版 Codex 已处于激活状态",
+                "OK Patched Codex activation was already ready for new terminals",
+                "成功：补丁版 Codex 的新终端激活已就绪",
             )
         };
         writeln!(writer, "{message}")?;
@@ -1577,8 +1588,8 @@ impl HumanReport for PlugReport {
             "{}: {}",
             language.text("Next", "下一步"),
             language.text(
-                "open a new terminal, then run `codex`.",
-                "请打开新终端，然后运行 `codex`。",
+                "close all terminals and terminal-hosting apps, reopen one, then run `where.exe codex` and `codex --version`.",
+                "请关闭所有终端及承载终端的应用，重新打开后运行 `where.exe codex` 和 `codex --version`。",
             )
         )
     }

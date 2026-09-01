@@ -78,24 +78,18 @@ csa status
 
 ### 3. 确认实际运行的 Codex
 
-在 Windows 上，`install` 会把受管的 `bin` 目录移到当前用户持久化 `PATH` 的最前面，并使用 `where.exe` 静默复验。已经运行的 VS Code 窗口仍保留旧环境，因此安装后需要完全退出并重新打开 VS Code。
+在 Windows 上，`install` 会先把受管的 `bin` 目录放到用户 `PATH` 最前面。如果更高优先级的系统条目仍然抢占命令，CSA 会请求 UAC，在 Program Files 下安装自己的 dispatcher，并把这个受保护目录放到系统 `PATH` 最前面。它不会改写 npm、Bun 或 pnpm 的启动器。
+
+安装后请关闭所有终端窗口，并完全退出 VS Code 等承载终端的应用，再重新打开。只在同一个 VS Code 窗口中新建集成终端还会继承旧环境。
 
 ```powershell
 csa status
+where.exe codex
 Get-Command codex -All
 codex --version
 ```
 
-同一个 Codex Release 的官方版和 patched 版会输出相同版本号。`csa status` 会报告受管 shim 是否已经激活并生效，以及当前解析到的绝对命令路径。
-
-如需让当前 PowerShell 进程立即使用新的 shim：
-
-```powershell
-$Status = csa status | ConvertFrom-Json
-$ManagedBin = [string]$Status.activation.managed_bin
-$OtherEntries = @($env:PATH -split ';' | Where-Object { $_ -and $_ -ine $ManagedBin })
-$env:PATH = (@($ManagedBin) + $OtherEntries) -join ';'
-```
+`where.exe codex` 的第一项应当是 CSA 自有的 `codex.exe`。patched 版本激活时，`codex --version` 会输出 `codex-cli X.Y.Z (CSA <compat-id>)`。只有系统 `PATH` 原本会抢占命令时 CSA 才请求管理员权限；拒绝授权会让激活失败并回滚。
 
 ### 4. 固定较旧的兼容修订
 
@@ -109,12 +103,13 @@ csa install --compat rust-v0.150.1-native-join-p8
 
 ```powershell
 csa uninstall
+where.exe codex
 Get-Command codex -All
 codex --version
 npm uninstall --global @dslzl/csa
 ```
 
-`uninstall` 会移除受管 shim、prepared installation、state 和 CSA 精确添加的用户 `PATH` 项，不会删除官方 Codex 或用户数据。
+`uninstall` 会移除受管 shim、prepared installation、state，以及 CSA 精确添加的用户和系统 dispatcher `PATH` 项。Windows 可能会再次请求 UAC 来清理 Program Files dispatcher；官方 Codex 和用户数据不会被删除。
 
 ## 工作原理
 
@@ -140,6 +135,8 @@ CSA 把四个身份分开处理：
 | CSA Manager | 发现、验证、安装、状态检查、激活和移除 |
 | Patched Codex | Manager 受管目录中按版本固定的 Native Join 与 TUI 修改 |
 | 受管 shim | 每次启动前重新验证 binding，再选择 patched 或官方 Codex |
+
+Windows 下可选的 Program Files dispatcher 是受管 shim 的受保护副本，不是另一套 Codex 安装。
 
 在线安装只下载 `SHA256SUMS`、`compatibility-release.json` 和当前 target 的可执行文件。完整 patch 和 source contract 仍保留在正式 Release 中，用于构建和审计。
 

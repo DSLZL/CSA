@@ -13,7 +13,9 @@ Official Codex installation, read-only
                  |
                  | prepare and plug
                  v
-      <manager-root>/bin/codex
+      CSA command dispatcher
+        | user PATH: <manager-root>/bin/codex
+        | machine conflict: %ProgramFiles%\DSLZL\CSA\bin\codex.exe
           | valid binding   -> patched Codex + verified official runtime
           | invalid binding -> official Codex launcher
 ```
@@ -24,6 +26,7 @@ Official Codex installation, read-only
 | CSA Manager | CSA | Discovery, verification, installation, activation, status, and removal |
 | Patched Codex | Manager-owned artifact directory | Native Join and TUI changes for one exact Codex release |
 | `codex` shim | Manager-owned `bin` directory | Revalidate the binding and start patched or official Codex |
+| Elevated dispatcher | CSA-owned Program Files directory | Win Machine PATH precedence without modifying package-manager launchers |
 
 The official launcher, native executable, package metadata, and companion tools are external read-only resources. CSA records their paths, sizes, versions, and SHA-256 values. It rejects a Manager root that overlaps the official installation.
 
@@ -95,7 +98,7 @@ Preparation runs before activation. It holds an exclusive Manager lock, stages f
 
 The artifact directory is content-addressed. Reinstalling the same verified executable can reuse it, but CSA validates the new input before accepting a cache hit.
 
-Activation copies the Manager executable into `<manager-root>/bin/codex[.exe]`. The same Rust binary detects that it was launched as the shim and enters forwarding mode. There is no second script implementation of command resolution.
+Activation copies the Manager executable into `<manager-root>/bin/codex[.exe]`. The same Rust binary detects that it was launched as the shim and enters forwarding mode. On Windows, CSA first uses the user `PATH`; only a higher-priority machine entry causes a UAC prompt and installation of the same dispatcher under Program Files. There is no package-manager launcher rewrite or resident service.
 
 On every launch, the shim checks:
 
@@ -105,7 +108,7 @@ On every launch, the shim checks:
 4. the patched overlay;
 5. every referenced official runtime component.
 
-If the binding is valid, the shim starts the patched executable by absolute path. If validation fails, it excludes itself and the managed paths, then resolves the real official launcher. It never starts an unverified patched binary.
+If the binding is valid, the shim starts the patched executable by absolute path. Exact `--version` requests are answered as `codex-cli X.Y.Z (CSA <compat-id>)` after the same validation. If validation fails, the shim excludes CSA paths and resolves the real official launcher. It never starts an unverified patched binary.
 
 ## Runtime overlay
 

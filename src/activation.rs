@@ -1,6 +1,8 @@
 use crate::detect::{
     FileFingerprint, OfficialCodex, detect_official, find_codex_launcher, fingerprint,
 };
+#[cfg(windows)]
+use crate::detect::{parse_codex_version, windows_csa_system_bin};
 use crate::error::{ManagerError, Result};
 use crate::manager::{official_command, patched_command, validate_prepared_state};
 use crate::process::{CommandSpec, ProcessRunner};
@@ -26,6 +28,8 @@ const STAGED_SHIM_NAME: &str = ".csa.staging";
 const REMOVED_SHIM_NAME: &str = ".csa.removed.exe";
 #[cfg(not(windows))]
 const REMOVED_SHIM_NAME: &str = ".csa.removed";
+#[cfg(windows)]
+const MANAGER_ROOT_ENV: &str = "DSLZL_CSA_MANAGER_ROOT";
 
 #[derive(Clone, Debug, Deserialize, Eq, PartialEq, Serialize)]
 #[serde(deny_unknown_fields)]
@@ -90,6 +94,14 @@ pub struct UserPathReport {
     pub command_resolution: CommandResolution,
 }
 
+#[cfg(windows)]
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct WindowsPathUpdate {
+    changed: bool,
+    effective_path: String,
+}
+
 #[derive(Clone, Debug, Serialize)]
 pub struct PlugReport {
     pub schema: u32,
@@ -122,6 +134,7 @@ pub struct ShimSelection {
     pub mode: &'static str,
     pub target: PathBuf,
     pub official: OfficialCodex,
+    pub compat_id: Option<String>,
     pub fallback_reason: Option<String>,
 }
 
@@ -359,12 +372,38 @@ pub fn inspect_command_resolution(
 ) -> CommandResolution {
     let resolved_codex = find_codex_launcher(path_value, &[]).ok();
     let managed_shim = shim_path(paths).canonicalize().ok();
-    CommandResolution {
-        managed_bin_on_path: path_contains(&paths.bin, path_value),
-        resolves_to_managed_shim: resolved_codex
+    #[cfg(windows)]
+    let system_bin = windows_csa_system_bin().ok();
+    #[cfg(windows)]
+    let system_managed = resolved_codex.as_ref().is_some_and(|actual| {
+        system_bin
             .as_ref()
-            .zip(managed_shim.as_ref())
-            .is_some_and(|(actual, expected)| actual == expected),
+            .and_then(|bin| bin.join(SHIM_NAME).canonicalize().ok())
+            .is_some_and(|system_shim| {
+                actual == &system_shim
+                    && fingerprint(&system_shim)
+                        .ok()
+                        .zip(fingerprint(&shim_path(paths)).ok())
+                        .is_some_and(|(system, user)| {
+                            system.sha256 == user.sha256 && system.size == user.size
+                        })
+            })
+    });
+    #[cfg(not(windows))]
+    let system_managed = false;
+    #[cfg(windows)]
+    let system_bin_on_path = system_bin
+        .as_ref()
+        .is_some_and(|bin| path_contains(bin, path_value));
+    #[cfg(not(windows))]
+    let system_bin_on_path = false;
+    CommandResolution {
+        managed_bin_on_path: path_contains(&paths.bin, path_value) || system_bin_on_path,
+        resolves_to_managed_shim: resolved_codex.as_ref().is_some_and(|actual| {
+            managed_shim
+                .as_ref()
+                .is_some_and(|expected| actual == expected)
+        }) || system_managed,
         resolved_codex,
     }
 }
@@ -374,7 +413,9 @@ pub fn prioritize_windows_user_path(
     activation: &ActivationReport,
     runner: &dyn ProcessRunner,
 ) -> Result<UserPathReport> {
-    let where_exe = windows_system_executable("System32/where.exe")?;
+    let root = activation.managed_bin.parent().ok_or_else(|| {
+        ManagerError::new("unsafe_manager_root", "managed bin has no manager root")
+    })?;
     let powershell = windows_system_executable("System32/WindowsPowerShell/v1.0/powershell.exe")?;
     let update = runner
         .run(
@@ -387,52 +428,140 @@ pub fn prioritize_windows_user_path(
                     WINDOWS_USER_PATH_SCRIPT,
                 ])
                 .env("CSA_MANAGED_BIN", activation.managed_bin.as_os_str())
+                .env("CSA_MANAGER_ROOT", root.as_os_str())
                 .env("CSA_PATH_MODE", "prepend"),
         )?
         .require_success("put the CSA managed bin first in the Windows user PATH")?;
-    let changed = match std::str::from_utf8(&update.stdout).map(str::trim) {
-        Ok("changed") => true,
-        Ok("unchanged") => false,
-        _ => {
-            return Err(ManagerError::new(
-                "path_activation_failed",
-                "Windows user PATH update returned an unexpected result",
-            ));
-        }
-    };
-
-    let verification_path =
-        path_with_precedence(&activation.managed_bin, std::env::var_os("PATH").as_deref())?;
-    runner
-        .run(
-            &CommandSpec::captured(&where_exe)
-                .arg("codex")
-                .env("PATH", &verification_path),
-        )?
-        .require_success("verify the CSA Codex command with where.exe")?;
-    let root = activation.managed_bin.parent().ok_or_else(|| {
-        ManagerError::new("unsafe_manager_root", "managed bin has no manager root")
-    })?;
+    let mut update = parse_windows_path_update(&update.stdout, "path_activation_failed")?;
     let paths = ManagerPaths::resolve(Some(root.to_path_buf()))?;
-    let command_resolution =
+    let mut verification_path = OsString::from(&update.effective_path);
+    let mut command_resolution =
         inspect_command_resolution(&paths, Some(verification_path.as_os_str()));
     if !command_resolution.resolves_to_managed_shim {
+        let elevated = prioritize_windows_machine_path(activation, root, &powershell, runner)?;
+        update.changed |= elevated.changed;
+        verification_path = OsString::from(elevated.effective_path);
+        command_resolution =
+            inspect_command_resolution(&paths, Some(verification_path.as_os_str()));
+    }
+    if !command_resolution.resolves_to_managed_shim {
+        let resolved = command_resolution.resolved_codex.as_ref().map_or_else(
+            || "no Codex command".to_owned(),
+            |path| path.display().to_string(),
+        );
+        return Err(ManagerError::new(
+            "path_precedence_conflict",
+            format!(
+                "Windows still selects {resolved} before the CSA shim {} after elevated PATH activation",
+                activation.shim_path.display()
+            ),
+        ));
+    }
+
+    let active = activation.state.as_ref().ok_or_else(|| {
+        ManagerError::new(
+            "path_activation_failed",
+            "active state is unavailable for `codex --version` verification",
+        )
+    })?;
+    let resolved = command_resolution.resolved_codex.as_ref().ok_or_else(|| {
+        ManagerError::new(
+            "path_activation_failed",
+            "the verified Codex command path is unavailable",
+        )
+    })?;
+    let version = runner
+        .run(
+            &CommandSpec::captured(resolved)
+                .arg("--version")
+                .env("PATH", &verification_path)
+                .env(MANAGER_ROOT_ENV, root.as_os_str()),
+        )?
+        .require_success("verify patched Codex with `codex --version`")?;
+    let version_bytes = if version.stdout.is_empty() {
+        &version.stderr
+    } else {
+        &version.stdout
+    };
+    let version_text = std::str::from_utf8(version_bytes).map_err(|_| {
+        ManagerError::new(
+            "path_activation_failed",
+            "`codex --version` returned non-UTF-8 output",
+        )
+    })?;
+    let actual_version =
+        parse_csa_codex_version(version_text, &active.binding.compat_id).map_err(|error| {
+            ManagerError::new(
+                "path_activation_failed",
+                format!("`codex --version` verification failed: {error}"),
+            )
+        })?;
+    let expected_version = active.binding.official.version.as_str();
+    if actual_version != expected_version {
         return Err(ManagerError::new(
             "path_activation_failed",
-            "where.exe verification did not resolve Codex to the CSA managed shim",
+            format!("`codex --version` returned {actual_version}, expected {expected_version}"),
         ));
     }
     Ok(UserPathReport {
         status: "verified",
-        changed,
+        changed: update.changed,
         command_resolution,
     })
 }
 
 #[cfg(windows)]
-pub fn remove_windows_user_path(managed_bin: &Path, runner: &dyn ProcessRunner) -> Result<bool> {
-    let powershell = windows_system_executable("System32/WindowsPowerShell/v1.0/powershell.exe")?;
+fn prioritize_windows_machine_path(
+    activation: &ActivationReport,
+    root: &Path,
+    powershell: &Path,
+    runner: &dyn ProcessRunner,
+) -> Result<WindowsPathUpdate> {
     let update = runner
+        .run(
+            &CommandSpec::captured(powershell)
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    WINDOWS_MACHINE_PATH_SCRIPT,
+                ])
+                .env("CSA_MACHINE_PATH_MODE", "install")
+                .env("CSA_SHIM_SOURCE", activation.shim_path.as_os_str())
+                .env("CSA_MANAGER_ROOT", root.as_os_str()),
+        )
+        .map_err(|error| {
+            ManagerError::new(
+                "path_elevation_failed",
+                format!("could not request administrator permission: {error}"),
+            )
+        })?
+        .require_success("install the elevated CSA Codex dispatcher")
+        .map_err(|error| ManagerError::new("path_elevation_failed", error.to_string()))?;
+    parse_windows_path_update(&update.stdout, "path_elevation_failed")
+}
+
+#[cfg(windows)]
+fn parse_csa_codex_version(text: &str, compat_id: &str) -> Result<String> {
+    let suffix = format!(" (CSA {compat_id})");
+    let value = text.trim();
+    let version = value.strip_suffix(&suffix).ok_or_else(|| {
+        ManagerError::new(
+            "invalid_csa_version",
+            format!("expected a CSA version marker for {compat_id}, got {value:?}"),
+        )
+    })?;
+    parse_codex_version(version)
+}
+
+#[cfg(windows)]
+pub fn remove_windows_user_path(managed_bin: &Path, runner: &dyn ProcessRunner) -> Result<bool> {
+    let root = managed_bin.parent().ok_or_else(|| {
+        ManagerError::new("unsafe_manager_root", "managed bin has no manager root")
+    })?;
+    let powershell = windows_system_executable("System32/WindowsPowerShell/v1.0/powershell.exe")?;
+    let user_update = runner
         .run(
             &CommandSpec::captured(&powershell)
                 .args([
@@ -443,35 +572,43 @@ pub fn remove_windows_user_path(managed_bin: &Path, runner: &dyn ProcessRunner) 
                     WINDOWS_USER_PATH_SCRIPT,
                 ])
                 .env("CSA_MANAGED_BIN", managed_bin.as_os_str())
+                .env("CSA_MANAGER_ROOT", root.as_os_str())
                 .env("CSA_PATH_MODE", "remove"),
         )?
-        .require_success("remove the CSA managed bin from the Windows user PATH")?;
-    match std::str::from_utf8(&update.stdout).map(str::trim) {
-        Ok("changed") => Ok(true),
-        Ok("unchanged") => Ok(false),
-        _ => Err(ManagerError::new(
-            "path_deactivation_failed",
-            "Windows user PATH removal returned an unexpected result",
-        )),
-    }
+        .require_success("remove the CSA managed bin from the Windows user PATH")
+        .map_err(|error| ManagerError::new("path_deactivation_failed", error.to_string()))?;
+    let user_update = parse_windows_path_update(&user_update.stdout, "path_deactivation_failed")?;
+    let machine_update = runner
+        .run(
+            &CommandSpec::captured(&powershell)
+                .args([
+                    "-NoLogo",
+                    "-NoProfile",
+                    "-NonInteractive",
+                    "-Command",
+                    WINDOWS_MACHINE_PATH_SCRIPT,
+                ])
+                .env("CSA_MACHINE_PATH_MODE", "remove"),
+        )
+        .map_err(|error| {
+            ManagerError::new(
+                "path_deactivation_failed",
+                format!("could not request administrator permission: {error}"),
+            )
+        })?
+        .require_success("remove the elevated CSA Codex dispatcher")
+        .map_err(|error| ManagerError::new("path_deactivation_failed", error.to_string()))?;
+    let machine_update =
+        parse_windows_path_update(&machine_update.stdout, "path_deactivation_failed")?;
+    Ok(user_update.changed || machine_update.changed)
 }
 
 #[cfg(windows)]
-fn path_with_precedence(directory: &Path, path_value: Option<&OsStr>) -> Result<OsString> {
-    let canonical = directory.canonicalize().ok();
-    let mut entries = vec![directory.to_path_buf()];
-    if let Some(value) = path_value {
-        entries.extend(std::env::split_paths(value).filter(|entry| {
-            entry != directory
-                && !canonical.as_ref().is_some_and(|expected| {
-                    entry.canonicalize().is_ok_and(|actual| &actual == expected)
-                })
-        }));
-    }
-    std::env::join_paths(entries).map_err(|error| {
+fn parse_windows_path_update(bytes: &[u8], error_code: &'static str) -> Result<WindowsPathUpdate> {
+    serde_json::from_slice(bytes).map_err(|error| {
         ManagerError::new(
-            "invalid_path",
-            format!("construct PATH with CSA precedence: {error}"),
+            error_code,
+            format!("Windows user PATH update returned invalid JSON: {error}"),
         )
     })
 }
@@ -505,6 +642,7 @@ const WINDOWS_USER_PATH_SCRIPT: &str = r#"
 $ErrorActionPreference = 'Stop'
 [Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
 $managed = $env:CSA_MANAGED_BIN
+$managerRoot = $env:CSA_MANAGER_ROOT
 $mode = $env:CSA_PATH_MODE
 $key = [Microsoft.Win32.Registry]::CurrentUser.CreateSubKey('Environment')
 if ($null -eq $key) { throw 'cannot open HKCU\Environment' }
@@ -516,9 +654,23 @@ try {
   if ($mode -eq 'prepend') { $updated = (@($managed) + $entries) -join ';' }
   elseif ($mode -eq 'remove') { $updated = $entries -join ';' }
   else { throw 'invalid CSA_PATH_MODE' }
-  $changed = $updated -cne $current
-  if ($changed) {
+  $pathChanged = $updated -cne $current
+  if ($pathChanged) {
     $key.SetValue('Path', $updated, $kind)
+  }
+  $rootName = 'DSLZL_CSA_MANAGER_ROOT'
+  $savedRoot = [string]$key.GetValue($rootName, '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+  $rootChanged = $false
+  if ($mode -eq 'prepend' -and $savedRoot -ine $managerRoot) {
+    $key.SetValue($rootName, $managerRoot, [Microsoft.Win32.RegistryValueKind]::String)
+    $rootChanged = $true
+  }
+  elseif ($mode -eq 'remove' -and $savedRoot -ieq $managerRoot) {
+    $key.DeleteValue($rootName, $false)
+    $rootChanged = $true
+  }
+  $changed = $pathChanged -or $rootChanged
+  if ($changed) {
     try {
       $member = '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);'
       $native = Add-Type -MemberDefinition $member -Name NativeMethods -Namespace CSA -PassThru
@@ -535,10 +687,118 @@ try {
   if ($mode -eq 'remove' -and $managedMatches.Count -ne 0) {
     throw 'managed bin remains in the saved user PATH'
   }
-  if ($changed) { [Console]::Out.Write('changed') }
-  else { [Console]::Out.Write('unchanged') }
+  $machinePath = [Environment]::GetEnvironmentVariable('Path', [System.EnvironmentVariableTarget]::Machine)
+  $userPath = [Environment]::ExpandEnvironmentVariables($saved)
+  $effectivePath = (@([string]$machinePath, [string]$userPath) | Where-Object { $_ }) -join ';'
+  $result = [ordered]@{ changed = [bool]$changed; effective_path = $effectivePath }
+  [Console]::Out.Write(($result | ConvertTo-Json -Compress))
 }
 finally { $key.Dispose() }
+"#;
+
+#[cfg(windows)]
+const WINDOWS_MACHINE_PATH_SCRIPT: &str = r#"
+$ErrorActionPreference = 'Stop'
+[Console]::OutputEncoding = [Text.UTF8Encoding]::new($false)
+$mode = $env:CSA_MACHINE_PATH_MODE
+if ($mode -notin @('install', 'remove')) { throw 'invalid CSA_MACHINE_PATH_MODE' }
+$programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+$machineBin = [IO.Path]::GetFullPath((Join-Path $programFiles 'DSLZL\CSA\bin'))
+$destination = Join-Path $machineBin 'codex.exe'
+$source = if ($mode -eq 'install') { [IO.Path]::GetFullPath($env:CSA_SHIM_SOURCE) } else { '' }
+if ($mode -eq 'install' -and -not (Test-Path -LiteralPath $source -PathType Leaf)) {
+  throw 'CSA shim source is missing'
+}
+$beforePath = [string][Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::Machine)
+$beforeHash = if (Test-Path -LiteralPath $destination -PathType Leaf) {
+  (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+} else { '' }
+$registered = @($beforePath -split ';' | Where-Object { $_ -and $_ -ieq $machineBin }).Count -gt 0
+$needsElevation = $mode -eq 'install' -or $registered -or (Test-Path -LiteralPath $destination)
+if ($needsElevation) {
+  $source64 = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($source))
+  $childTemplate = @'
+$ErrorActionPreference = 'Stop'
+$mode = '__MODE__'
+$source = [Text.Encoding]::Unicode.GetString([Convert]::FromBase64String('__SOURCE__'))
+$programFiles = [Environment]::GetFolderPath([Environment+SpecialFolder]::ProgramFiles)
+$machineBin = [IO.Path]::GetFullPath((Join-Path $programFiles 'DSLZL\CSA\bin'))
+$destination = Join-Path $machineBin 'codex.exe'
+$staged = Join-Path $machineBin '.csa.staging.exe'
+$registryPath = 'SYSTEM\CurrentControlSet\Control\Session Manager\Environment'
+$key = [Microsoft.Win32.Registry]::LocalMachine.OpenSubKey($registryPath, $true)
+if ($null -eq $key) { throw 'cannot open the machine environment registry key' }
+try {
+  $current = [string]$key.GetValue('Path', '', [Microsoft.Win32.RegistryValueOptions]::DoNotExpandEnvironmentNames)
+  try { $kind = $key.GetValueKind('Path') }
+  catch { $kind = [Microsoft.Win32.RegistryValueKind]::ExpandString }
+  $entries = @($current -split ';' | Where-Object { $_ -and $_ -ine $machineBin })
+  if ($mode -eq 'install') {
+    if (-not (Test-Path -LiteralPath $source -PathType Leaf)) { throw 'CSA shim source is missing' }
+    [void](New-Item -ItemType Directory -Path $machineBin -Force)
+    Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+    Copy-Item -LiteralPath $source -Destination $staged
+    if ((Get-FileHash -LiteralPath $source -Algorithm SHA256).Hash -ne (Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash) {
+      throw 'staged system dispatcher hash mismatch'
+    }
+    if (Test-Path -LiteralPath $destination -PathType Leaf) {
+      if ((Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash -eq (Get-FileHash -LiteralPath $staged -Algorithm SHA256).Hash) {
+        Remove-Item -LiteralPath $staged -Force
+      } else {
+        [IO.File]::Replace($staged, $destination, $null)
+      }
+    } else {
+      Move-Item -LiteralPath $staged -Destination $destination
+    }
+    $updated = (@($machineBin) + $entries) -join ';'
+  } else {
+    $updated = $entries -join ';'
+  }
+  if ($updated -cne $current) { $key.SetValue('Path', $updated, $kind) }
+}
+finally { $key.Dispose() }
+if ($mode -eq 'remove') {
+  Remove-Item -LiteralPath $staged -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $destination -Force -ErrorAction SilentlyContinue
+  Remove-Item -LiteralPath $machineBin -ErrorAction SilentlyContinue
+}
+try {
+  $member = '[DllImport("user32.dll", CharSet = CharSet.Unicode)] public static extern IntPtr SendMessageTimeout(IntPtr hWnd, uint msg, UIntPtr wParam, string lParam, uint flags, uint timeout, out UIntPtr result);'
+  $native = Add-Type -MemberDefinition $member -Name NativeMethods -Namespace CSA -PassThru
+  $result = [UIntPtr]::Zero
+  [void]$native::SendMessageTimeout([IntPtr]0xffff, 0x1a, [UIntPtr]::Zero, 'Environment', 2, 5000, [ref]$result)
+} catch {}
+'@
+  $child = $childTemplate.Replace('__MODE__', $mode).Replace('__SOURCE__', $source64)
+  $encoded = [Convert]::ToBase64String([Text.Encoding]::Unicode.GetBytes($child))
+  try {
+    $process = Start-Process -FilePath (Join-Path $PSHOME 'powershell.exe') -ArgumentList @('-NoLogo', '-NoProfile', '-NonInteractive', '-EncodedCommand', $encoded) -Verb RunAs -WindowStyle Hidden -Wait -PassThru
+  }
+  catch { throw "administrator permission was denied or unavailable: $($_.Exception.Message)" }
+  if ($process.ExitCode -ne 0) { throw "elevated PATH helper failed with exit code $($process.ExitCode)" }
+}
+$afterPath = [string][Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::Machine)
+$afterHash = if (Test-Path -LiteralPath $destination -PathType Leaf) {
+  (Get-FileHash -LiteralPath $destination -Algorithm SHA256).Hash
+} else { '' }
+$machineEntries = @($afterPath -split ';' | Where-Object { $_ })
+if ($mode -eq 'install' -and ($machineEntries.Count -eq 0 -or $machineEntries[0] -ine $machineBin)) {
+  throw 'CSA system dispatcher is not first in the machine PATH'
+}
+if ($mode -eq 'install' -and -not (Test-Path -LiteralPath $destination -PathType Leaf)) {
+  throw 'CSA system dispatcher was not installed'
+}
+if ($mode -eq 'remove' -and @($machineEntries | Where-Object { $_ -ieq $machineBin }).Count -ne 0) {
+  throw 'CSA system dispatcher remains in the machine PATH'
+}
+if ($mode -eq 'remove' -and (Test-Path -LiteralPath $destination)) {
+  throw 'CSA system dispatcher remains installed'
+}
+$userPath = [Environment]::ExpandEnvironmentVariables([string][Environment]::GetEnvironmentVariable('Path', [EnvironmentVariableTarget]::User))
+$effectivePath = (@($afterPath, $userPath) | Where-Object { $_ }) -join ';'
+$changed = $beforePath -cne $afterPath -or $beforeHash -cne $afterHash
+$result = [ordered]@{ changed = [bool]$changed; effective_path = $effectivePath }
+[Console]::Out.Write(($result | ConvertTo-Json -Compress))
 "#;
 
 pub fn forward_current_shim(args: Vec<OsString>, runner: &dyn ProcessRunner) -> Result<i32> {
@@ -549,6 +809,27 @@ pub fn forward_current_shim(args: Vec<OsString>, runner: &dyn ProcessRunner) -> 
     let bin = current
         .parent()
         .ok_or_else(|| ManagerError::new("unsafe_shim_path", "activation shim has no parent"))?;
+    #[cfg(windows)]
+    if windows_csa_system_bin()
+        .ok()
+        .and_then(|path| path.canonicalize().ok())
+        .is_some_and(|system_bin| system_bin == bin)
+    {
+        let root = std::env::var_os(MANAGER_ROOT_ENV).map(PathBuf::from);
+        let paths = ManagerPaths::resolve(root)?;
+        let path_value = std::env::var_os("PATH");
+        let filtered_path = path_value
+            .as_deref()
+            .map(|value| path_without(bin, value))
+            .transpose()?;
+        return forward_shim(
+            &paths,
+            args,
+            filtered_path.as_deref(),
+            &shim_path(&paths),
+            runner,
+        );
+    }
     if bin.file_name() != Some(OsStr::new("bin")) {
         return Err(ManagerError::new(
             "unsafe_shim_path",
@@ -585,10 +866,23 @@ pub fn forward_shim(
                 mode: "official",
                 target,
                 official,
+                compat_id: None,
                 fallback_reason: Some(lock_error.to_string()),
             }
         }
     };
+    if selection.mode == "patched"
+        && matches!(args.as_slice(), [arg] if arg == "--version" || arg == "-V")
+    {
+        let compat_id = selection.compat_id.as_deref().ok_or_else(|| {
+            ManagerError::new(
+                "invalid_activation_state",
+                "patched shim selection has no compatibility ID",
+            )
+        })?;
+        println!("codex-cli {} (CSA {compat_id})", selection.official.version);
+        return Ok(0);
+    }
     let command = CommandSpec::captured(&selection.target)
         .args(args)
         .inherited();
@@ -633,14 +927,15 @@ pub fn select_shim_target(
                 "running shim does not match active state",
             ));
         }
-        Ok((prepared.artifact_path, official))
+        Ok((prepared.artifact_path, official, prepared.compat_id))
     })();
 
     match patched {
-        Ok((target, official)) => Ok(ShimSelection {
+        Ok((target, official, compat_id)) => Ok(ShimSelection {
             mode: "patched",
             target,
             official,
+            compat_id: Some(compat_id),
             fallback_reason: None,
         }),
         Err(error) => {
@@ -655,6 +950,7 @@ pub fn select_shim_target(
                 mode: "official",
                 target,
                 official,
+                compat_id: None,
                 fallback_reason: Some(error.to_string()),
             })
         }
@@ -942,6 +1238,20 @@ fn path_contains(directory: &Path, path_value: Option<&OsStr>) -> bool {
                 })
         })
     })
+}
+
+#[cfg(windows)]
+fn path_without(directory: &Path, path_value: &OsStr) -> Result<OsString> {
+    let canonical = directory.canonicalize().ok();
+    std::env::join_paths(std::env::split_paths(path_value).filter(|entry| {
+        !entry
+            .as_os_str()
+            .eq_ignore_ascii_case(directory.as_os_str())
+            && !canonical.as_ref().is_some_and(|expected| {
+                entry.canonicalize().is_ok_and(|actual| &actual == expected)
+            })
+    }))
+    .map_err(|error| ManagerError::new("invalid_path", format!("rebuild PATH: {error}")))
 }
 
 #[cfg(unix)]

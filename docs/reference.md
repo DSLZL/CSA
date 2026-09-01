@@ -126,7 +126,7 @@ Stored official paths are validation references. CSA does not follow them during
 
 Normal shim launches inherit the current working directory, terminal, arguments, environment, and `CODEX_HOME`. CSA only adds the verified official package context needed by the patched overlay.
 
-On Windows, explicit `install` and `plug` place the managed `bin` directory first in the current user's persistent `PATH`. They do not edit the system `PATH` or shell profiles. Existing applications keep their inherited environment until restarted.
+On Windows, explicit `install` and `plug` place the managed `bin` directory first in the current user's persistent `PATH`. If the next process's machine-plus-user ordering still selects another Codex, CSA requests UAC, installs `%ProgramFiles%\DSLZL\CSA\bin\codex.exe`, and places that protected dispatcher first in the machine `PATH`. It never edits package-manager launchers or shell profiles. Verification requires the CSA path to resolve first and one `codex --version` result in the form `codex-cli X.Y.Z (CSA <compat-id>)`. Existing applications keep their inherited environment until every terminal host is restarted.
 
 `exec --isolated` requires separate absolute paths for `CODEX_HOME`, cwd, logs, state, and its evidence record. It does not create a shim or persist a `PATH` change.
 

@@ -1,9 +1,10 @@
 use csa::BUILD_TARGET;
-use csa::activation::{forward_shim, plug, purge, select_shim_target, shim_path, unplug};
 #[cfg(windows)]
 use csa::activation::{
-    inspect as inspect_activation, inspect_command_resolution, prioritize_windows_user_path,
+    ActivationBinding, ActivationReport, ActivationState, inspect_command_resolution,
+    prioritize_windows_user_path, remove_windows_user_path,
 };
+use csa::activation::{forward_shim, plug, purge, select_shim_target, shim_path, unplug};
 use csa::compat::LoadedCompatibility;
 use csa::error::Result;
 use csa::hash::sha256_bytes;
@@ -15,7 +16,7 @@ use csa::manager::{
 use csa::process::{CommandResult, CommandSpec, ProcessRunner};
 use csa::state::{Clock, ManagerPaths, PrepareLock};
 use serde_json::Value;
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, VecDeque};
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
@@ -248,6 +249,10 @@ struct FakeRunner {
     preimage_drift: bool,
     artifact_bytes: Vec<u8>,
     commands: Arc<Mutex<Vec<CommandSpec>>>,
+    #[cfg(windows)]
+    windows_effective_paths: Arc<Mutex<VecDeque<OsString>>>,
+    #[cfg(windows)]
+    fail_windows_elevation: bool,
 }
 
 impl FakeRunner {
@@ -260,6 +265,10 @@ impl FakeRunner {
             preimage_drift: false,
             artifact_bytes: artifact_bytes.to_vec(),
             commands: Arc::new(Mutex::new(Vec::new())),
+            #[cfg(windows)]
+            windows_effective_paths: Arc::new(Mutex::new(VecDeque::new())),
+            #[cfg(windows)]
+            fail_windows_elevation: false,
         }
     }
 
@@ -290,6 +299,25 @@ impl FakeRunner {
     fn commands(&self) -> Vec<CommandSpec> {
         self.commands.lock().unwrap().clone()
     }
+
+    #[cfg(windows)]
+    fn windows_effective_path(mut self, value: OsString) -> Self {
+        self.windows_effective_paths = Arc::new(Mutex::new(VecDeque::from([value])));
+        self
+    }
+
+    #[cfg(windows)]
+    fn windows_effective_paths(mut self, values: impl IntoIterator<Item = OsString>) -> Self {
+        self.windows_effective_paths =
+            Arc::new(Mutex::new(values.into_iter().collect::<VecDeque<_>>()));
+        self
+    }
+
+    #[cfg(windows)]
+    fn fail_windows_elevation(mut self) -> Self {
+        self.fail_windows_elevation = true;
+        self
+    }
 }
 
 impl ProcessRunner for FakeRunner {
@@ -301,14 +329,56 @@ impl ProcessRunner for FakeRunner {
             .map(|arg| arg.to_string_lossy().into_owned())
             .collect();
         if args == ["--version"] {
+            let marker = if command
+                .env
+                .contains_key(&OsString::from("DSLZL_CSA_MANAGER_ROOT"))
+            {
+                " (CSA test-compat)"
+            } else {
+                ""
+            };
             return Ok(CommandResult::success(format!(
-                "codex-cli {}\n",
-                self.version.lock().unwrap()
+                "codex-cli {}{marker}\n",
+                self.version.lock().unwrap(),
             )));
         }
         #[cfg(windows)]
-        if command.env.contains_key(&OsString::from("CSA_PATH_MODE")) {
-            return Ok(CommandResult::success("changed"));
+        if command
+            .env
+            .contains_key(&OsString::from("CSA_MACHINE_PATH_MODE"))
+            && self.fail_windows_elevation
+        {
+            return Ok(CommandResult {
+                code: Some(1),
+                stdout: Vec::new(),
+                stderr: b"UAC denied".to_vec(),
+            });
+        }
+        #[cfg(windows)]
+        if command.env.contains_key(&OsString::from("CSA_PATH_MODE"))
+            || command
+                .env
+                .contains_key(&OsString::from("CSA_MACHINE_PATH_MODE"))
+        {
+            let effective_path = self
+                .windows_effective_paths
+                .lock()
+                .unwrap()
+                .pop_front()
+                .unwrap_or_else(|| {
+                    command
+                        .env
+                        .get(&OsString::from("CSA_MANAGED_BIN"))
+                        .unwrap()
+                        .clone()
+                });
+            return Ok(CommandResult::success(
+                serde_json::to_vec(&serde_json::json!({
+                    "changed": true,
+                    "effective_path": effective_path.to_string_lossy(),
+                }))
+                .unwrap(),
+            ));
         }
         if self.source_build && args == ["run", TOOLCHAIN, "rustc", "--version", "--verbose"] {
             return Ok(CommandResult::success(format!(
@@ -929,6 +999,29 @@ fn activation_lifecycle_is_reversible_and_drift_falls_back_without_recursion() {
     #[cfg(not(windows))]
     assert!(forwarded.env.is_empty());
 
+    let version_start = runner.commands().len();
+    assert_eq!(
+        forward_shim(
+            &paths,
+            vec![OsString::from("--version")],
+            None,
+            &shim,
+            &runner,
+        )
+        .unwrap(),
+        0
+    );
+    assert!(runner.commands()[version_start..].iter().all(|command| {
+        command.program != prepared_artifact || command.args != [OsString::from("--version")]
+    }));
+    assert_eq!(
+        select_shim_target(&paths, None, &shim, &runner)
+            .unwrap()
+            .compat_id
+            .as_deref(),
+        Some("test-compat")
+    );
+
     let fallback_bin = temp.join("official-bin");
     fs::create_dir_all(&fallback_bin).unwrap();
     let fallback = fallback_bin.join(if cfg!(windows) { "codex.exe" } else { "codex" });
@@ -1004,11 +1097,39 @@ fn windows_user_path_activation_prioritizes_and_verifies_codex() {
     write_executable(&managed, b"managed");
     let official_bin = temp.join("official-bin");
     fs::create_dir_all(&official_bin).unwrap();
-    write_executable(&official_bin.join("codex.exe"), b"official");
-    let official_first = std::env::join_paths([&official_bin, &paths.bin]).unwrap();
-    assert!(!inspect_command_resolution(&paths, Some(&official_first)).resolves_to_managed_shim);
-    let activation = inspect_activation(&paths, None);
-    let runner = FakeRunner::new(b"");
+    let official = official_bin.join("codex.exe");
+    write_executable(&official, b"official");
+    let machine_bin = temp.join("machine-bin");
+    fs::create_dir_all(&machine_bin).unwrap();
+    let future_path = std::env::join_paths([&machine_bin, &paths.bin, &official_bin]).unwrap();
+    let activation = ActivationReport {
+        status: "plugged",
+        effective: false,
+        managed_bin: paths.bin.clone(),
+        shim_path: managed.clone(),
+        command_resolution: inspect_command_resolution(&paths, None),
+        state: Some(ActivationState {
+            schema: 2,
+            binding: ActivationBinding {
+                compat_id: "test-compat".to_owned(),
+                manifest_path: temp.join("manifest.toml"),
+                artifact_path: temp.join("patched-codex.exe"),
+                artifact_sha256: "a".repeat(64),
+                artifact_size: 1,
+                official: csa::detect::OfficialCodex {
+                    executable: csa::detect::fingerprint(&official).unwrap(),
+                    version: VERSION.to_owned(),
+                    native: None,
+                    runtime: None,
+                },
+            },
+            shim_sha256: "b".repeat(64),
+            shim_size: 1,
+            activated_at_unix_seconds: 1,
+        }),
+        reason: None,
+    };
+    let runner = FakeRunner::new(b"").windows_effective_path(future_path.clone());
 
     let report = prioritize_windows_user_path(&activation, &runner).unwrap();
     assert!(report.changed);
@@ -1020,9 +1141,104 @@ fn windows_user_path_activation_prioritizes_and_verifies_codex() {
         commands[0].env.get(&OsString::from("CSA_PATH_MODE")),
         Some(&OsString::from("prepend"))
     );
-    assert_eq!(commands[1].args, [OsString::from("codex")]);
+    assert_eq!(commands[1].program, managed.canonicalize().unwrap());
+    assert_eq!(commands[1].args, [OsString::from("--version")]);
     let verified_path = commands[1].env.get(&OsString::from("PATH")).unwrap();
-    assert_eq!(std::env::split_paths(verified_path).next(), Some(paths.bin));
+    assert_eq!(verified_path, &future_path);
+    assert_eq!(
+        commands[1]
+            .env
+            .get(&OsString::from("DSLZL_CSA_MANAGER_ROOT")),
+        Some(&paths.root.clone().into_os_string())
+    );
+
+    let conflict_path = std::env::join_paths([&official_bin, &paths.bin]).unwrap();
+    let conflict_runner =
+        FakeRunner::new(b"").windows_effective_paths([conflict_path.clone(), future_path.clone()]);
+    let elevated = prioritize_windows_user_path(&activation, &conflict_runner).unwrap();
+    assert!(elevated.command_resolution.resolves_to_managed_shim);
+    let conflict_commands = conflict_runner.commands();
+    assert_eq!(conflict_commands.len(), 3);
+    assert_eq!(
+        conflict_commands[1]
+            .env
+            .get(&OsString::from("CSA_MACHINE_PATH_MODE")),
+        Some(&OsString::from("install"))
+    );
+    assert_eq!(
+        conflict_commands[1]
+            .env
+            .get(&OsString::from("CSA_SHIM_SOURCE")),
+        Some(&managed.clone().into_os_string())
+    );
+
+    let denied_runner = FakeRunner::new(b"")
+        .windows_effective_path(conflict_path)
+        .fail_windows_elevation();
+    assert_eq!(
+        prioritize_windows_user_path(&activation, &denied_runner)
+            .unwrap_err()
+            .code,
+        "path_elevation_failed"
+    );
+    assert_eq!(denied_runner.commands().len(), 2);
+
+    let wrong_version = FakeRunner::new(b"").windows_effective_path(future_path);
+    wrong_version.set_version("9.9.9");
+    assert_eq!(
+        prioritize_windows_user_path(&activation, &wrong_version)
+            .unwrap_err()
+            .code,
+        "path_activation_failed"
+    );
+
+    let mut wrong_marker_activation = activation;
+    wrong_marker_activation
+        .state
+        .as_mut()
+        .unwrap()
+        .binding
+        .compat_id = "other-compat".to_owned();
+    assert_eq!(
+        prioritize_windows_user_path(
+            &wrong_marker_activation,
+            &FakeRunner::new(b"").windows_effective_path(
+                std::env::join_paths([&machine_bin, &paths.bin, &official_bin,]).unwrap()
+            ),
+        )
+        .unwrap_err()
+        .code,
+        "path_activation_failed"
+    );
+
+    let removal_path = std::env::join_paths([&machine_bin, &official_bin]).unwrap();
+    let removal_runner =
+        FakeRunner::new(b"").windows_effective_paths([removal_path.clone(), removal_path.clone()]);
+    assert!(remove_windows_user_path(&paths.bin, &removal_runner).unwrap());
+    let removal_commands = removal_runner.commands();
+    assert_eq!(removal_commands.len(), 2);
+    assert_eq!(
+        removal_commands[0]
+            .env
+            .get(&OsString::from("CSA_PATH_MODE")),
+        Some(&OsString::from("remove"))
+    );
+    assert_eq!(
+        removal_commands[1]
+            .env
+            .get(&OsString::from("CSA_MACHINE_PATH_MODE")),
+        Some(&OsString::from("remove"))
+    );
+
+    let removal_denied = FakeRunner::new(b"")
+        .windows_effective_path(removal_path)
+        .fail_windows_elevation();
+    assert_eq!(
+        remove_windows_user_path(&paths.bin, &removal_denied)
+            .unwrap_err()
+            .code,
+        "path_deactivation_failed"
+    );
 }
 
 #[test]

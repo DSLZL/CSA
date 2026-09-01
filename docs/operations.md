@@ -190,43 +190,19 @@ Region and speed results are not stored. Credentials are not sent to mirrors. Re
 
 Preparation publishes a content-addressed patched artifact and a minimal runtime manifest. Activation then creates `<manager-root>/bin/codex[.exe]`.
 
-On Windows, `install` and `plug` move that directory to the front of the current user's persistent `PATH` and verify the result with the system `where.exe`. They do not modify the system `PATH` or overwrite the official launcher.
+On Windows, `install` and `plug` first put that directory at the front of the current user's persistent `PATH`. CSA reconstructs the next process's machine-plus-user ordering. If a machine entry still wins, Windows displays a UAC prompt; after approval, CSA installs a protected dispatcher at `%ProgramFiles%\DSLZL\CSA\bin\codex.exe` and puts that directory first in the machine `PATH`. Package-manager launchers remain untouched.
 
-Existing applications keep the environment they inherited at startup. Fully quit and reopen VS Code after installation; opening another integrated terminal inside the same window is not enough.
+Existing applications keep the environment they inherited at startup. Close every terminal and fully quit terminal hosts such as VS Code after installation; opening another integrated terminal inside the same window is not enough.
+
+Windows places the machine `PATH` before the user `PATH`. CSA handles that conflict through the elevated dispatcher. Denying UAC returns `path_elevation_failed` and rolls back activation. `path_precedence_conflict` is reserved for a policy or later machine `PATH` change that still prevents the CSA entry from becoming first.
 
 Verify from a new terminal:
 
 ```powershell
 csa status
+where.exe codex
 Get-Command codex -All
 codex --version
-```
-
-For the current PowerShell process:
-
-```powershell
-$Status = csa status | ConvertFrom-Json
-$ManagedBin = [string]$Status.activation.managed_bin
-$OtherEntries = @($env:PATH -split ';' | Where-Object { $_ -and $_ -ine $ManagedBin })
-$env:PATH = (@($ManagedBin) + $OtherEntries) -join ';'
-```
-
-With an explicit root:
-
-```powershell
-$env:PATH = (Join-Path $ManagerRoot 'bin') + [IO.Path]::PathSeparator + $env:PATH
-```
-
-Command Prompt:
-
-```bat
-set "PATH=C:\absolute\manager-root\bin;%PATH%"
-```
-
-Bash or Zsh:
-
-```bash
-export PATH="/absolute/manager-root/bin:$PATH"
 ```
 
 Keep the official Codex launcher later on `PATH`. The shim needs it for safe fallback.
@@ -321,10 +297,10 @@ Choose the narrowest command:
 | Command | Removed | Preserved |
 | --- | --- | --- |
 | `csa unplug` | Active shim | Prepared payload and state |
-| `csa uninstall` | Shim, prepared installation, and exact managed user-`PATH` entry | Official Codex, user data, npm package |
-| `csa purge` | All Manager-owned shim, prepared, source, build, state data, and exact managed user-`PATH` entry | Official Codex, user data, external packages |
+| `csa uninstall` | Shim, prepared installation, exact user-`PATH` entry, and elevated CSA dispatcher registration | Official Codex, user data, npm package |
+| `csa purge` | All Manager-owned shim, prepared, source, build, state data, and exact user/system CSA `PATH` entries | Official Codex, user data, external packages |
 
-These commands are idempotent.
+These commands are idempotent. Windows may request UAC when `uninstall` or `purge` removes the Program Files dispatcher and its machine `PATH` entry.
 
 ```powershell
 csa uninstall
@@ -339,8 +315,10 @@ npm uninstall --global @dslzl/csa
 | npm or Bun mirror returns 404 | `npm config get registry` | Use `registry.npmjs.org` or wait for mirror sync |
 | Picker has no versions | `csa doctor --json` official version and Manager target | Install a matching official Codex version or wait for a formal compatibility |
 | Install pauses after selection | Human progress and network route | Wait for bounded metadata and mirror probes; retry if a structured network error appears |
-| `codex` still resolves to official | `csa status` and `Get-Command codex -All` | Fully restart VS Code or put the managed `bin` first in the current process |
-| `codex --version` looks unchanged | Absolute command path | Official and patched builds share the same version string; use `csa status` |
+| `codex` still resolves to official | `csa status` and `Get-Command codex -All` | Close all terminals and fully restart the terminal host |
+| Install reports `path_elevation_failed` | UAC was denied or unavailable | Retry and approve the administrator prompt |
+| Install reports `path_precedence_conflict` | Policy or later machine `PATH` changes still override CSA | Ask an administrator to inspect the machine `PATH`, then run `csa plug` |
+| `codex --version` has no `CSA` marker | The official command still wins or patched mode is inactive | Check that `where.exe codex` lists a CSA path first, then run `csa status` |
 | State becomes invalidated after official upgrade | Official version and hashes | Install a compatibility for the new exact official release |
 | Shim reports fallback | Activation reason in `status --json` | Keep official Codex on `PATH`, then reinstall or unplug |
 | Codex reports a migration checksum mismatch | Database path and exact error | Stop; do not delete the database. Verify the selected compatibility and use an isolated copy for diagnosis |

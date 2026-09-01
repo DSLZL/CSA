@@ -78,24 +78,18 @@ No GitHub login is required. CSA uses public Git refs, chooses direct GitHub or 
 
 ### 3. Confirm which Codex will run
 
-On Windows, `install` moves the managed `bin` directory to the front of the current user's persistent `PATH` and silently verifies it with `where.exe`. A running VS Code window keeps its old environment, so fully quit and reopen VS Code after installation.
+On Windows, `install` first puts the managed `bin` directory at the front of the user `PATH`. If a higher-priority machine entry still wins, CSA requests UAC, installs its own dispatcher under Program Files, and puts that protected directory first in the machine `PATH`. It never edits npm, Bun, or pnpm launchers.
+
+Close every terminal window and fully quit terminal hosts such as VS Code after installation, then reopen one. Opening another integrated terminal inside the same VS Code window is not enough.
 
 ```powershell
 csa status
+where.exe codex
 Get-Command codex -All
 codex --version
 ```
 
-Official and patched builds of the same Codex release print the same version. `csa status` reports whether the managed shim is active and effective, along with the resolved absolute command path.
-
-To update the current PowerShell process without restarting it:
-
-```powershell
-$Status = csa status | ConvertFrom-Json
-$ManagedBin = [string]$Status.activation.managed_bin
-$OtherEntries = @($env:PATH -split ';' | Where-Object { $_ -and $_ -ine $ManagedBin })
-$env:PATH = (@($ManagedBin) + $OtherEntries) -join ';'
-```
+`where.exe codex` should list a CSA-owned `codex.exe` first. An active patched installation prints `codex-cli X.Y.Z (CSA <compat-id>)` from `codex --version`. CSA requests administrator permission only when the machine `PATH` would otherwise take priority; denying the prompt fails activation and rolls it back.
 
 ### 4. Pin a compatible older revision
 
@@ -109,12 +103,13 @@ The requested Release must still match the installed official Codex version and 
 
 ```powershell
 csa uninstall
+where.exe codex
 Get-Command codex -All
 codex --version
 npm uninstall --global @dslzl/csa
 ```
 
-`uninstall` removes the managed shim, prepared installation, state, and CSA's exact user-`PATH` entry. It leaves official Codex and user data alone.
+`uninstall` removes the managed shim, prepared installation, state, and CSA's exact user and elevated dispatcher `PATH` entries. Windows may request UAC to remove the Program Files dispatcher. Official Codex and user data remain untouched.
 
 ## How it works
 
@@ -140,6 +135,8 @@ CSA separates four identities:
 | CSA Manager | Discovery, verification, installation, status, activation, and removal |
 | Patched Codex | Version-pinned Native Join and TUI changes in a Manager-owned directory |
 | Managed shim | Revalidates the binding before choosing patched or official Codex |
+
+The optional Windows Program Files dispatcher is a protected copy of the managed shim, not another Codex installation.
 
 Online installation downloads only `SHA256SUMS`, `compatibility-release.json`, and the current target's executable. The full patch and source contract remains attached to the formal Release for build and audit work.
 

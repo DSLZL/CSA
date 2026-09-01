@@ -55,12 +55,40 @@ pub struct OfficialCodex {
     pub runtime: Option<OfficialRuntime>,
 }
 
+#[cfg(windows)]
+pub(crate) fn windows_csa_system_bin() -> Result<PathBuf> {
+    let program_files = std::env::var_os("ProgramFiles")
+        .map(PathBuf::from)
+        .filter(|path| {
+            path.is_absolute()
+                && !path.components().any(|component| {
+                    matches!(
+                        component,
+                        std::path::Component::CurDir | std::path::Component::ParentDir
+                    )
+                })
+        })
+        .ok_or_else(|| {
+            ManagerError::new(
+                "windows_program_files_missing",
+                "ProgramFiles is unavailable or invalid",
+            )
+        })?;
+    Ok(program_files.join("DSLZL").join("CSA").join("bin"))
+}
+
 pub fn detect_official(
     runner: &dyn ProcessRunner,
     explicit: Option<&Path>,
     explicit_native: Option<&Path>,
     excluded_roots: &[PathBuf],
 ) -> Result<OfficialCodex> {
+    let mut effective_excluded_roots = excluded_roots.to_vec();
+    #[cfg(windows)]
+    if let Ok(system_bin) = windows_csa_system_bin() {
+        effective_excluded_roots.push(system_bin);
+    }
+    let excluded_roots = effective_excluded_roots.as_slice();
     let executable_path = match explicit {
         Some(path) => canonical_launcher(path)?,
         None => find_codex_launcher(std::env::var_os("PATH").as_deref(), excluded_roots)?,
