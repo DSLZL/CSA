@@ -2065,6 +2065,7 @@ mod tests {
             .map(|revision| {
                 let compat_id = format!("rust-v0.150.1-native-join-p{revision}");
                 InstallCandidate {
+                    repository: "DSLZL/CSA-codex".to_owned(),
                     compat_id: compat_id.clone(),
                     codex_version: "0.150.1".to_owned(),
                     build_target: "x86_64-pc-windows-msvc".to_owned(),

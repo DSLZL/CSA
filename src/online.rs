@@ -18,7 +18,8 @@ use std::time::{Duration, Instant};
 use ureq::{Agent, ResponseExt};
 
 const OPENAI_REPOSITORY: &str = "openai/codex";
-const CSA_REPOSITORY: &str = "dslzl/CSA";
+const PRIMARY_COMPAT_REPOSITORY: &str = "DSLZL/CSA-codex";
+const LEGACY_COMPAT_REPOSITORY: &str = "DSLZL/CSA";
 const GH_PROXY_ROUTES: [(&str, &str); 7] = [
     ("https://gh-proxy.org/", "gh-proxy.org"),
     ("https://v4.gh-proxy.org/", "v4.gh-proxy.org"),
@@ -28,8 +29,6 @@ const GH_PROXY_ROUTES: [(&str, &str); 7] = [
     ("https://gh-proxy.com/", "gh-proxy.com"),
     ("https://ghfast.top/", "ghfast.top"),
 ];
-const GH_PROXY_PROBE_URL: &str =
-    "https://github.com/DSLZL/CSA.git/info/refs?service=git-upload-pack";
 const CLOUDFLARE_TRACE_URL: &str = "https://www.cloudflare.com/cdn-cgi/trace";
 const ALIBABA_REGION_URL: &str = "https://ip.taobao.com/outGetIpInfo?ip=myip&accessKey=alibaba-inc";
 const RELEASE_DESCRIPTOR: &str = "compatibility-release.json";
@@ -49,6 +48,7 @@ const MAX_INSTALL_CATALOG_PROBES: usize = 16;
 
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct InstallCandidate {
+    pub repository: String,
     pub compat_id: String,
     pub codex_version: String,
     pub build_target: String,
@@ -62,6 +62,7 @@ pub struct InstallCandidate {
 pub type InstallSelector<'a> = dyn FnMut(&[InstallCandidate]) -> Result<String> + 'a;
 
 struct SelectedCompatibility {
+    repository: String,
     compat_id: String,
     release_tag: String,
     release_commit: String,
@@ -127,7 +128,7 @@ fn resolve_online_install_inner(
         std::slice::from_ref(&paths.root),
     )?;
     progress(InstallEvent::DiscoveringCompatibility);
-    let client = GitHubClient::new();
+    let github_route = detect_github_route().unwrap_or(GitHubRoute::Direct);
     paths.initialize()?;
     let staging_path = paths
         .downloads
@@ -139,30 +140,59 @@ fn resolve_online_install_inner(
         path: staging_path.clone(),
     };
 
-    let refs = client.repository_refs(CSA_REPOSITORY)?;
-    let selected = if let Some(requested) = options.compat.as_deref() {
+    let (client, selected) = if let Some(requested) = options.compat.as_deref() {
         validate_asset_name(requested)?;
         let release_tag = format!("compat-{requested}");
-        let release_commit = peel_tag_from_refs(&refs, &release_tag).map_err(|_| {
+        resolve_ordered_authority(|repository| {
+            let client = GitHubClient::new(repository, github_route);
+            let Some(refs) = client.repository_refs()? else {
+                return Ok(None);
+            };
+            let Some(release_commit) = tag_commit_if_present(&refs, &release_tag)? else {
+                return Ok(None);
+            };
+            Ok(Some((
+                client,
+                SelectedCompatibility {
+                    repository: repository.to_owned(),
+                    compat_id: requested.to_owned(),
+                    release_tag: release_tag.clone(),
+                    release_commit,
+                    catalog_entry: None,
+                },
+            )))
+        })?
+        .ok_or_else(|| {
             ManagerError::new(
                 "compatibility_not_found",
                 format!("no formal compatibility release has ID {requested}"),
             )
-        })?;
-        SelectedCompatibility {
-            compat_id: requested.to_owned(),
-            release_tag,
-            release_commit,
-            catalog_entry: None,
-        }
+        })?
     } else {
-        let mut candidates = discover_install_candidates(
-            &client,
-            &paths.root,
-            &staging_path,
-            &refs,
-            &official.version,
-        )?;
+        let (client, mut candidates) = resolve_ordered_authority(|repository| {
+            let client = GitHubClient::new(repository, github_route);
+            let Some(refs) = client.repository_refs()? else {
+                return Ok(None);
+            };
+            let candidates = discover_install_candidates(
+                &client,
+                &paths.root,
+                &staging_path,
+                &refs,
+                &official.version,
+            )?;
+            if candidates.is_empty() {
+                Ok(None)
+            } else {
+                Ok(Some((client, candidates)))
+            }
+        })?
+        .ok_or_else(|| {
+            ManagerError::new(
+                "no_installable_compatibility_releases",
+                "no formal compatibility release matches this Manager target and official Codex version",
+            )
+        })?;
         let recommended = select_automatic(&candidates)?;
         candidates[recommended].recommended = true;
         let selected_id = if let Some(select) = selector {
@@ -172,19 +202,27 @@ fn resolve_online_install_inner(
             candidates[recommended].compat_id.clone()
         };
         let candidate = take_selected_candidate(candidates, &selected_id)?;
-        SelectedCompatibility {
-            compat_id: candidate.compat_id.clone(),
-            release_tag: candidate.release_tag.clone(),
-            release_commit: candidate.release_commit.clone(),
-            catalog_entry: Some(candidate),
-        }
+        (
+            client,
+            SelectedCompatibility {
+                repository: candidate.repository.clone(),
+                compat_id: candidate.compat_id.clone(),
+                release_tag: candidate.release_tag.clone(),
+                release_commit: candidate.release_commit.clone(),
+                catalog_entry: Some(candidate),
+            },
+        )
     };
-    let compat_id = &selected.compat_id;
+    let SelectedCompatibility {
+        repository,
+        compat_id,
+        release_tag,
+        release_commit,
+        catalog_entry,
+    } = selected;
     progress(InstallEvent::SelectedCompatibility {
         compat_id: compat_id.clone(),
     });
-    let release_tag = selected.release_tag;
-    let csa_commit = selected.release_commit;
     let artifact_target = compatibility_artifact_target(BUILD_TARGET);
     progress(InstallEvent::DownloadingReleaseMetadata);
     let selected_path = staging_path.join("selected");
@@ -196,8 +234,14 @@ fn resolve_online_install_inner(
                 format!("selected compatibility release disappeared: {release_tag}"),
             )
         })?;
-    validate_catalog_descriptor(&descriptor, &release_tag, &csa_commit, compat_id)?;
-    if selected.catalog_entry.is_some_and(|expected| {
+    validate_catalog_descriptor(
+        &descriptor,
+        &repository,
+        &release_tag,
+        &release_commit,
+        &compat_id,
+    )?;
+    if catalog_entry.is_some_and(|expected| {
         descriptor.upstream.version != expected.codex_version
             || !descriptor_supports_target(&descriptor, &expected.build_target)
     }) {
@@ -222,7 +266,7 @@ fn resolve_online_install_inner(
     let release_artifact = descriptor_artifact(&descriptor, artifact_target)?;
     validate_declared_asset(release_artifact, &checksums)?;
     let runtime = RuntimeManifest::new(
-        compat_id.clone(),
+        compat_id,
         upstream_version,
         artifact_target.to_owned(),
         RuntimeArtifact {
@@ -272,6 +316,28 @@ fn resolve_online_install_inner(
     })
 }
 
+fn resolve_ordered_authority<T>(
+    mut lookup: impl FnMut(&'static str) -> Result<Option<T>>,
+) -> Result<Option<T>> {
+    for repository in [PRIMARY_COMPAT_REPOSITORY, LEGACY_COMPAT_REPOSITORY] {
+        if let Some(value) = lookup(repository)? {
+            return Ok(Some(value));
+        }
+    }
+    Ok(None)
+}
+
+fn tag_commit_if_present(
+    refs: &BTreeMap<String, String>,
+    release_tag: &str,
+) -> Result<Option<String>> {
+    let reference = format!("refs/tags/{release_tag}");
+    if !refs.contains_key(&reference) && !refs.contains_key(&format!("{reference}^{{}}")) {
+        return Ok(None);
+    }
+    peel_tag_from_refs(refs, release_tag).map(Some)
+}
+
 fn discover_install_candidates(
     client: &GitHubClient,
     manager_root: &Path,
@@ -279,17 +345,34 @@ fn discover_install_candidates(
     refs: &BTreeMap<String, String>,
     official_version: &str,
 ) -> Result<Vec<InstallCandidate>> {
-    let catalog_path = staging_path.join("catalog");
+    let catalog_path = staging_path.join(
+        if client
+            .repository
+            .eq_ignore_ascii_case(PRIMARY_COMPAT_REPOSITORY)
+        {
+            "primary-catalog"
+        } else {
+            "legacy-catalog"
+        },
+    );
     ensure_managed_directory(manager_root, &catalog_path)?;
-    let catalog = load_install_catalog(client, &catalog_path, refs)?;
-    install_candidates(catalog, official_version, BUILD_TARGET)
+    let Some(catalog) = load_install_catalog(client, &catalog_path, refs)? else {
+        return Ok(Vec::new());
+    };
+    Ok(install_candidates(
+        catalog,
+        official_version,
+        BUILD_TARGET,
+        client.repository,
+    ))
 }
 
 fn install_candidates(
     catalog: InstallCatalog,
     official_version: &str,
     manager_target: &str,
-) -> Result<Vec<InstallCandidate>> {
+    repository: &str,
+) -> Vec<InstallCandidate> {
     let artifact_target = compatibility_artifact_target(manager_target);
     let candidates: Vec<_> = catalog
         .entries
@@ -298,6 +381,7 @@ fn install_candidates(
             entry.codex_version == official_version && entry.supports_target(artifact_target)
         })
         .map(|entry| InstallCandidate {
+            repository: repository.to_owned(),
             compat_id: entry.compat_id,
             codex_version: entry.codex_version,
             build_target: artifact_target.to_owned(),
@@ -308,13 +392,7 @@ fn install_candidates(
             release_commit: entry.release_commit,
         })
         .collect();
-    if candidates.is_empty() {
-        return Err(ManagerError::new(
-            "no_installable_compatibility_releases",
-            "no formal compatibility release matches this Manager target and official Codex version",
-        ));
-    }
-    Ok(candidates)
+    candidates
 }
 
 fn compatibility_artifact_target(manager_target: &str) -> &str {
@@ -344,9 +422,13 @@ fn load_install_catalog(
     client: &GitHubClient,
     catalog_path: &Path,
     refs: &BTreeMap<String, String>,
-) -> Result<InstallCatalog> {
+) -> Result<Option<InstallCatalog>> {
+    let release_tags = compatibility_tags(refs)?;
+    if release_tags.is_empty() {
+        return Ok(None);
+    }
     // ponytail: probe only the newest 16 tags; switch to one stable catalog URL if release history outgrows it.
-    for (index, release_tag) in compatibility_tags(refs)?
+    for (index, release_tag) in release_tags
         .into_iter()
         .take(MAX_INSTALL_CATALOG_PROBES)
         .enumerate()
@@ -361,9 +443,17 @@ fn load_install_catalog(
             MAX_INSTALL_CATALOG_BYTES,
         )? {
             let catalog = read_install_catalog(&destination)?;
-            validate_install_catalog(&catalog, refs, Some(&release_tag))?;
-            return Ok(catalog);
+            validate_install_catalog(&catalog, client.repository, refs, Some(&release_tag))?;
+            return Ok(Some(catalog));
         }
+    }
+    if !client
+        .repository
+        .eq_ignore_ascii_case(LEGACY_COMPAT_REPOSITORY)
+    {
+        return Err(invalid_install_catalog(
+            "primary compatibility tags do not publish an install catalog",
+        ));
     }
     let catalog: InstallCatalog =
         serde_json::from_str(INSTALL_CATALOG_BOOTSTRAP).map_err(|error| {
@@ -372,8 +462,8 @@ fn load_install_catalog(
                 format!("invalid bundled install catalog: {error}"),
             )
         })?;
-    validate_install_catalog(&catalog, refs, None)?;
-    Ok(catalog)
+    validate_install_catalog(&catalog, LEGACY_COMPAT_REPOSITORY, refs, None)?;
+    Ok(Some(catalog))
 }
 
 fn download_release_metadata(
@@ -508,11 +598,12 @@ fn version_key(version: &str) -> Result<(u64, u64, u64)> {
 
 fn validate_install_catalog(
     catalog: &InstallCatalog,
+    expected_repository: &str,
     refs: &BTreeMap<String, String>,
     containing_release_tag: Option<&str>,
 ) -> Result<()> {
     if !matches!(catalog.schema, 1 | 2)
-        || !catalog.repository.eq_ignore_ascii_case(CSA_REPOSITORY)
+        || !catalog.repository.eq_ignore_ascii_case(expected_repository)
         || catalog.entries.is_empty()
         || catalog.entries.len() > MAX_COMPATIBILITY_TAGS
     {
@@ -680,6 +771,7 @@ impl<R: Read> Read for ProgressReader<'_, R> {
 }
 
 struct GitHubClient {
+    repository: &'static str,
     agent: Agent,
     route: Cell<GitHubRoute>,
     proxy_order: RefCell<Vec<usize>>,
@@ -692,15 +784,15 @@ enum GitHubRoute {
 }
 
 impl GitHubClient {
-    fn new() -> Self {
-        let route = match detect_github_route().unwrap_or(GitHubRoute::Direct) {
+    fn new(repository: &'static str, detected_route: GitHubRoute) -> Self {
+        let route = match detected_route {
             GitHubRoute::Direct => GitHubRoute::Direct,
-            GitHubRoute::Proxy(_) => GitHubRoute::Proxy(select_proxy_index()),
+            GitHubRoute::Proxy(_) => GitHubRoute::Proxy(select_proxy_index(repository)),
         };
-        Self::with_route(route)
+        Self::with_route(repository, route)
     }
 
-    fn with_route(route: GitHubRoute) -> Self {
+    fn with_route(repository: &'static str, route: GitHubRoute) -> Self {
         let config = Agent::config_builder()
             .https_only(true)
             .max_redirects(5)
@@ -713,29 +805,26 @@ impl GitHubClient {
             proxy_order.rotate_left(index);
         }
         Self {
+            repository,
             agent: Agent::new_with_config(config),
             route: Cell::new(route),
             proxy_order: RefCell::new(proxy_order),
         }
     }
 
-    fn repository_refs(&self, repository: &str) -> Result<BTreeMap<String, String>> {
-        let url = format!("https://github.com/{repository}.git/info/refs?service=git-upload-pack");
-        let mut response = self
-            .get_response(
-                &url,
-                "application/x-git-upload-pack-advertisement",
-                true,
-                &["github.com"],
-                "query GitHub repository refs",
-                false,
-            )?
-            .ok_or_else(|| {
-                ManagerError::new(
-                    "github_repository_not_found",
-                    format!("GitHub repository not found: {repository}"),
-                )
-            })?;
+    fn repository_refs(&self) -> Result<Option<BTreeMap<String, String>>> {
+        let url = git_refs_url(self.repository);
+        let Some(mut response) = self.get_response(
+            &url,
+            "application/x-git-upload-pack-advertisement",
+            true,
+            &["github.com"],
+            "query GitHub repository refs",
+            true,
+        )?
+        else {
+            return Ok(None);
+        };
         let bytes = response
             .body_mut()
             .with_config()
@@ -748,7 +837,7 @@ impl GitHubClient {
                 "GitHub repository refs exceed the supported size",
             ));
         }
-        parse_git_refs(&bytes)
+        parse_git_refs(&bytes).map(Some)
     }
 
     fn rank_proxy_routes_for_asset(&self, release_tag: &str, asset_name: &str, expected_size: u64) {
@@ -759,7 +848,7 @@ impl GitHubClient {
         if active.len() <= 1 {
             return;
         }
-        let direct_url = release_asset_url(release_tag, asset_name);
+        let direct_url = release_asset_url(self.repository, release_tag, asset_name);
         let samples = sample_proxy_routes(&active, &direct_url, expected_size);
         let ranked = rank_proxy_indices(&active, samples);
         if let Some(first) = ranked.first().copied() {
@@ -806,7 +895,7 @@ impl GitHubClient {
         if let Some(expected) = expected_sha256 {
             validate_sha256(expected)?;
         }
-        let url = release_asset_url(release_tag, asset_name);
+        let url = release_asset_url(self.repository, release_tag, asset_name);
         loop {
             let Some(mut response) = self.get_response(
                 &url,
@@ -975,7 +1064,7 @@ impl GitHubClient {
             Err(ureq::Error::StatusCode(404)) => Ok(None),
             Err(error) if should_try_proxy(&error) => {
                 let direct_error = error.to_string();
-                let index = select_proxy_index();
+                let index = select_proxy_index(self.repository);
                 self.route.set(GitHubRoute::Proxy(index));
                 self.request_from_proxy_pool(
                     index,
@@ -1281,12 +1370,12 @@ fn rank_proxy_indices(active: &[usize], mut samples: Vec<(usize, Duration)>) -> 
     ranked
 }
 
-fn select_proxy_index() -> usize {
+fn select_proxy_index(repository: &'static str) -> usize {
     let (sender, receiver) = mpsc::channel();
     for index in 0..GH_PROXY_ROUTES.len() {
         let sender = sender.clone();
         std::thread::spawn(move || {
-            if proxy_responds(index) {
+            if proxy_responds(index, repository) {
                 let _ = sender.send(index);
             }
         });
@@ -1295,7 +1384,7 @@ fn select_proxy_index() -> usize {
     receiver.recv_timeout(Duration::from_secs(4)).unwrap_or(0)
 }
 
-fn proxy_responds(index: usize) -> bool {
+fn proxy_responds(index: usize, repository: &str) -> bool {
     let config = Agent::config_builder()
         .https_only(true)
         .max_redirects(2)
@@ -1305,7 +1394,10 @@ fn proxy_responds(index: usize) -> bool {
         .build();
     let agent = Agent::new_with_config(config);
     let response = agent
-        .get(&routed_url(GitHubRoute::Proxy(index), GH_PROXY_PROBE_URL))
+        .get(&routed_url(
+            GitHubRoute::Proxy(index),
+            &git_refs_url(repository),
+        ))
         .header("Accept", "application/x-git-upload-pack-advertisement")
         .header("Git-Protocol", "version=1")
         .header("User-Agent", concat!("csa/", env!("CARGO_PKG_VERSION")))
@@ -1315,8 +1407,12 @@ fn proxy_responds(index: usize) -> bool {
         .is_ok_and(|response| require_route_host(response, GitHubRoute::Proxy(index), &[]).is_ok())
 }
 
-fn release_asset_url(release_tag: &str, asset_name: &str) -> String {
-    format!("https://github.com/{CSA_REPOSITORY}/releases/download/{release_tag}/{asset_name}")
+fn git_refs_url(repository: &str) -> String {
+    format!("https://github.com/{repository}.git/info/refs?service=git-upload-pack")
+}
+
+fn release_asset_url(repository: &str, release_tag: &str, asset_name: &str) -> String {
+    format!("https://github.com/{repository}/releases/download/{release_tag}/{asset_name}")
 }
 
 fn should_try_proxy(error: &ureq::Error) -> bool {
@@ -1631,8 +1727,9 @@ fn descriptor_artifact<'a>(
 
 fn validate_catalog_descriptor(
     descriptor: &CompatibilityRelease,
+    expected_repository: &str,
     release_tag: &str,
-    csa_commit: &str,
+    release_commit: &str,
     compat_id: &str,
 ) -> Result<()> {
     validate_asset_name(compat_id)?;
@@ -1663,7 +1760,7 @@ fn validate_catalog_descriptor(
             ));
         }
     }
-    validate_sha(csa_commit)?;
+    validate_sha(release_commit)?;
     validate_sha(&descriptor.source_commit)?;
     validate_sha(&descriptor.upstream.commit)?;
     let parsed_version = parse_codex_version(&format!("codex-cli {}", descriptor.upstream.version))
@@ -1674,9 +1771,11 @@ fn validate_catalog_descriptor(
             )
         })?;
     version_key(&parsed_version)?;
-    if descriptor.repository != CSA_REPOSITORY
+    if !descriptor
+        .repository
+        .eq_ignore_ascii_case(expected_repository)
         || descriptor.release_tag != release_tag
-        || descriptor.source_commit != csa_commit
+        || descriptor.source_commit != release_commit
         || descriptor.compat_id != compat_id
         || descriptor.upstream.repository != OPENAI_REPOSITORY
         || descriptor.upstream.version != parsed_version
@@ -1821,16 +1920,18 @@ fn network_error(context: &str, error: impl std::fmt::Display) -> ManagerError {
 #[cfg(test)]
 mod tests {
     use super::{
-        BUILD_TARGET, CSA_REPOSITORY, CompatibilityRelease, GH_PROXY_PROBE_URL, GH_PROXY_ROUTES,
-        GitHubClient, GitHubRoute, InstallCandidate, InstallCatalog, InstallCatalogEntry,
-        MAX_ARTIFACT_BYTES, OPENAI_REPOSITORY, ProgressReader, ReleaseFile, UpstreamRelease,
-        compatibility_artifact_target, compatibility_tags, content_range_matches,
-        country_from_alibaba_region, country_from_cloudflare_trace, descriptor_artifact,
-        descriptor_assets, install_candidates, parse_checksums, parse_git_refs, patch_revision,
+        BUILD_TARGET, CompatibilityRelease, GH_PROXY_ROUTES, GitHubClient, GitHubRoute,
+        InstallCandidate, InstallCatalog, InstallCatalogEntry, LEGACY_COMPAT_REPOSITORY,
+        MAX_ARTIFACT_BYTES, OPENAI_REPOSITORY, PRIMARY_COMPAT_REPOSITORY, ProgressReader,
+        ReleaseFile, UpstreamRelease, compatibility_artifact_target, compatibility_tags,
+        content_range_matches, country_from_alibaba_region, country_from_cloudflare_trace,
+        descriptor_artifact, descriptor_assets, git_refs_url, install_candidates,
+        invalid_install_catalog, parse_checksums, parse_git_refs, patch_revision,
         peel_tag_from_refs, proxy_indices_from, rank_proxy_indices, release_asset_url,
-        require_uri_host, route_from_region_probes, routed_url, select_automatic, should_try_proxy,
-        stable_release_version, take_selected_candidate, valid_recorded_on,
-        validate_catalog_descriptor, validate_declared_asset, validate_install_catalog,
+        require_uri_host, resolve_ordered_authority, route_from_region_probes, routed_url,
+        select_automatic, should_try_proxy, stable_release_version, take_selected_candidate,
+        valid_recorded_on, validate_catalog_descriptor, validate_declared_asset,
+        validate_install_catalog,
     };
     use crate::manager::InstallEvent;
     use std::collections::BTreeMap;
@@ -1848,6 +1949,7 @@ mod tests {
     #[test]
     fn compatibility_catalog_uses_the_greatest_numeric_patch_revision() {
         let entry = |compat_id: &str| InstallCandidate {
+            repository: LEGACY_COMPAT_REPOSITORY.to_owned(),
             compat_id: compat_id.to_owned(),
             codex_version: "0.10.0".to_owned(),
             build_target: BUILD_TARGET.to_owned(),
@@ -1887,12 +1989,47 @@ mod tests {
     }
 
     #[test]
+    fn ordered_authority_prefers_primary_and_falls_back_only_on_absence() {
+        let mut visited = Vec::new();
+        let selected = resolve_ordered_authority(|repository| {
+            visited.push(repository);
+            Ok(Some((repository, "duplicate-compat-id")))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected.0, PRIMARY_COMPAT_REPOSITORY);
+        assert_eq!(visited, [PRIMARY_COMPAT_REPOSITORY]);
+
+        visited.clear();
+        let selected = resolve_ordered_authority(|repository| {
+            visited.push(repository);
+            Ok((repository == LEGACY_COMPAT_REPOSITORY).then_some(repository))
+        })
+        .unwrap()
+        .unwrap();
+        assert_eq!(selected, LEGACY_COMPAT_REPOSITORY);
+        assert_eq!(
+            visited,
+            [PRIMARY_COMPAT_REPOSITORY, LEGACY_COMPAT_REPOSITORY]
+        );
+
+        visited.clear();
+        let error = resolve_ordered_authority::<&str>(|repository| {
+            visited.push(repository);
+            Err(invalid_install_catalog("invalid primary catalog"))
+        })
+        .unwrap_err();
+        assert_eq!(error.code, "invalid_install_catalog");
+        assert_eq!(visited, [PRIMARY_COMPAT_REPOSITORY]);
+    }
+
+    #[test]
     fn install_catalog_is_strict_and_bound_to_git_refs() {
         let source_tag = "compat-rust-v0.10.0-native-join-p10";
         let source_commit = "a".repeat(40);
         let mut refs = BTreeMap::new();
         refs.insert(format!("refs/tags/{source_tag}"), source_commit.clone());
-        let catalog = InstallCatalog {
+        let mut catalog = InstallCatalog {
             schema: 1,
             repository: "DSLZL/CSA".to_owned(),
             source_release_tag: source_tag.to_owned(),
@@ -1908,7 +2045,17 @@ mod tests {
                 recorded_on: "2026-08-29".to_owned(),
             }],
         };
-        validate_install_catalog(&catalog, &refs, Some(source_tag)).unwrap();
+        validate_install_catalog(&catalog, LEGACY_COMPAT_REPOSITORY, &refs, Some(source_tag))
+            .unwrap();
+        assert!(
+            validate_install_catalog(&catalog, PRIMARY_COMPAT_REPOSITORY, &refs, Some(source_tag),)
+                .is_err()
+        );
+        catalog.entries[0].release_commit = "b".repeat(40);
+        assert!(
+            validate_install_catalog(&catalog, LEGACY_COMPAT_REPOSITORY, &refs, Some(source_tag),)
+                .is_err()
+        );
         assert!(valid_recorded_on("2024-02-29"));
         assert!(!valid_recorded_on("2025-02-29"));
         assert!(!valid_recorded_on("0000-01-01"));
@@ -1936,8 +2083,14 @@ mod tests {
         .unwrap();
         let refs = BTreeMap::from([(format!("refs/tags/{source_tag}"), source_commit.to_owned())]);
 
-        validate_install_catalog(&catalog, &refs, Some(source_tag)).unwrap();
-        let candidates = install_candidates(catalog, "0.10.0", "x86_64-unknown-linux-gnu").unwrap();
+        validate_install_catalog(&catalog, LEGACY_COMPAT_REPOSITORY, &refs, Some(source_tag))
+            .unwrap();
+        let candidates = install_candidates(
+            catalog,
+            "0.10.0",
+            "x86_64-unknown-linux-gnu",
+            LEGACY_COMPAT_REPOSITORY,
+        );
         assert_eq!(candidates.len(), 1);
         assert_eq!(candidates[0].build_target, "x86_64-unknown-linux-musl");
         assert_eq!(
@@ -1961,7 +2114,7 @@ mod tests {
                 entry.release_commit.clone(),
             );
         }
-        validate_install_catalog(&catalog, &refs, None).unwrap();
+        validate_install_catalog(&catalog, LEGACY_COMPAT_REPOSITORY, &refs, None).unwrap();
     }
 
     #[test]
@@ -1992,13 +2145,14 @@ mod tests {
         }
         let catalog = InstallCatalog {
             schema: 1,
-            repository: CSA_REPOSITORY.to_owned(),
+            repository: LEGACY_COMPAT_REPOSITORY.to_owned(),
             source_release_tag: source.release_tag.clone(),
             source_commit: source.release_commit.clone(),
             entries,
         };
-        validate_install_catalog(&catalog, &refs, None).unwrap();
-        let candidates = install_candidates(catalog, "0.10.0", BUILD_TARGET).unwrap();
+        validate_install_catalog(&catalog, LEGACY_COMPAT_REPOSITORY, &refs, None).unwrap();
+        let candidates =
+            install_candidates(catalog, "0.10.0", BUILD_TARGET, LEGACY_COMPAT_REPOSITORY);
         assert_eq!(candidates.len(), 100);
         assert_eq!(
             candidates[select_automatic(&candidates).unwrap()].patch_revision,
@@ -2069,7 +2223,7 @@ mod tests {
         };
         let mut descriptor = CompatibilityRelease {
             schema: 1,
-            repository: CSA_REPOSITORY.to_owned(),
+            repository: LEGACY_COMPAT_REPOSITORY.to_owned(),
             release_tag: "compat-rust-v1.2.3-native-join-p1".to_owned(),
             source_commit: csa_commit.clone(),
             compat_id: "rust-v1.2.3-native-join-p1".to_owned(),
@@ -2087,6 +2241,7 @@ mod tests {
         assert!(
             validate_catalog_descriptor(
                 &descriptor,
+                LEGACY_COMPAT_REPOSITORY,
                 "compat-rust-v1.2.3-native-join-p1",
                 &csa_commit,
                 "rust-v1.2.3-native-join-p1",
@@ -2094,10 +2249,23 @@ mod tests {
             .is_ok()
         );
         assert!(descriptor_artifact(&descriptor, BUILD_TARGET).is_ok());
+        descriptor.repository = PRIMARY_COMPAT_REPOSITORY.to_owned();
+        assert!(
+            validate_catalog_descriptor(
+                &descriptor,
+                LEGACY_COMPAT_REPOSITORY,
+                "compat-rust-v1.2.3-native-join-p1",
+                &csa_commit,
+                "rust-v1.2.3-native-join-p1",
+            )
+            .is_err()
+        );
+        descriptor.repository = LEGACY_COMPAT_REPOSITORY.to_owned();
         descriptor.upstream.tag = "rust-v9.9.9".to_owned();
         assert!(
             validate_catalog_descriptor(
                 &descriptor,
+                LEGACY_COMPAT_REPOSITORY,
                 "compat-rust-v1.2.3-native-join-p1",
                 &csa_commit,
                 "rust-v1.2.3-native-join-p1",
@@ -2150,7 +2318,7 @@ mod tests {
             assert!(!content_range_matches(invalid, 262_144, 1_000_000));
         }
 
-        let client = GitHubClient::with_route(GitHubRoute::Proxy(2));
+        let client = GitHubClient::with_route(LEGACY_COMPAT_REPOSITORY, GitHubRoute::Proxy(2));
         let mut progress: Option<&mut dyn FnMut(InstallEvent)> = None;
         assert!(client.switch_after_failed_download(GitHubRoute::Proxy(2), &mut progress));
         assert_eq!(client.route.get(), GitHubRoute::Proxy(3));
@@ -2172,7 +2340,7 @@ mod tests {
         let refs = parse_git_refs(&advertisement).unwrap();
         assert_eq!(compatibility_tags(&refs).unwrap(), [tag]);
         assert_eq!(peel_tag_from_refs(&refs, tag).unwrap(), commit);
-        let direct = release_asset_url(tag, "SHA256SUMS");
+        let direct = release_asset_url(LEGACY_COMPAT_REPOSITORY, tag, "SHA256SUMS");
         assert_eq!(routed_url(GitHubRoute::Direct, &direct), direct);
         assert_eq!(
             routed_url(GitHubRoute::Proxy(0), &direct),
@@ -2183,8 +2351,12 @@ mod tests {
             format!("https://ghfast.top/{direct}")
         );
         assert_eq!(
-            GH_PROXY_PROBE_URL,
-            "https://github.com/DSLZL/CSA.git/info/refs?service=git-upload-pack"
+            git_refs_url(PRIMARY_COMPAT_REPOSITORY),
+            "https://github.com/DSLZL/CSA-codex.git/info/refs?service=git-upload-pack"
+        );
+        assert_eq!(
+            release_asset_url(PRIMARY_COMPAT_REPOSITORY, tag, "SHA256SUMS"),
+            format!("https://github.com/DSLZL/CSA-codex/releases/download/{tag}/SHA256SUMS")
         );
         assert_eq!(GH_PROXY_ROUTES.len(), 7);
         assert_eq!(
@@ -2232,7 +2404,7 @@ mod tests {
         assert!(!should_try_proxy(&ureq::Error::StatusCode(404)));
         assert!(!should_try_proxy(&ureq::Error::Tls("certificate rejected")));
 
-        let client = GitHubClient::with_route(GitHubRoute::Direct);
+        let client = GitHubClient::with_route(LEGACY_COMPAT_REPOSITORY, GitHubRoute::Direct);
         let destination = std::env::temp_dir().join("artifact").join("codex.exe");
         let digest = "a".repeat(64);
         assert!(
@@ -2255,7 +2427,7 @@ mod tests {
 
     #[test]
     fn github_client_allows_large_release_bodies_within_global_timeout() {
-        let timeouts = GitHubClient::with_route(GitHubRoute::Direct)
+        let timeouts = GitHubClient::with_route(LEGACY_COMPAT_REPOSITORY, GitHubRoute::Direct)
             .agent
             .config()
             .timeouts();
