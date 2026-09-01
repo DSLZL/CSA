@@ -146,7 +146,7 @@ jobs:
               --access public \
               --registry=https://registry.npmjs.org
 
-            for attempt in {1..36}; do
+            for attempt in {1..60}; do
               if actual="$(npm view "$package@$VERSION" dist.integrity --registry=https://registry.npmjs.org 2>"$error_file")" \
                 && [[ "$actual" == "$expected" ]]; then
                 echo "Verified $package@$VERSION at the registry."
