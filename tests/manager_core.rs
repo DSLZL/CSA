@@ -16,7 +16,9 @@ use csa::manager::{
 use csa::process::{CommandResult, CommandSpec, ProcessRunner};
 use csa::state::{Clock, ManagerPaths, PrepareLock};
 use serde_json::Value;
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::BTreeMap;
+#[cfg(windows)]
+use std::collections::VecDeque;
 use std::ffi::OsString;
 use std::fs;
 use std::path::{Path, PathBuf};
