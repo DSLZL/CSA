@@ -14,7 +14,7 @@ CSA has two independent products:
 
 | Product | Release namespace | Current release |
 | --- | --- | --- |
-| CSA Manager | `vX.Y.Z` and `@dslzl/csa` | `0.1.6` |
+| CSA Manager | `vX.Y.Z` and `@dslzl/csa` | `0.1.7` |
 | Patched Codex | `compat-<compat_id>` | Codex `0.151.0` p10 |
 
 The Manager never installs, downgrades, or repairs official Codex. It only accepts a patched Release that already matches the installed runtime.
@@ -24,15 +24,15 @@ The Manager never installs, downgrades, or repairs official Codex. It only accep
 Install the npm meta package globally:
 
 ```powershell
-npm install --global @dslzl/csa@0.1.6
+npm install --global @dslzl/csa@0.1.7
 csa --version
 ```
 
 For one-off use:
 
 ```powershell
-npx @dslzl/csa@0.1.6 --version
-bunx @dslzl/csa@0.1.6 --version
+npx @dslzl/csa@0.1.7 --version
+bunx @dslzl/csa@0.1.7 --version
 ```
 
 `npx --yes` suppresses npm's confirmation before installing a missing package. It does not bypass CSA validation or answer the later version picker. `csa install --yes` is the separate CSA option for automatic compatibility selection.
@@ -63,7 +63,7 @@ npm view @dslzl/csa version --registry=https://registry.npmjs.org
 If the official registry has the version but a mirror returns 404, use the official registry for this installation or wait for synchronization:
 
 ```powershell
-npm install --global @dslzl/csa@0.1.6 --registry=https://registry.npmjs.org
+npm install --global @dslzl/csa@0.1.7 --registry=https://registry.npmjs.org
 ```
 
 The same issue can affect `bunx` when Bun is configured to use an npm mirror.

@@ -11,7 +11,7 @@ GitHub Actions is the release authority. Local builds and candidate artifacts ar
 
 ## Current release snapshot
 
-The current Manager release is [`v0.1.6`](https://github.com/DSLZL/CSA/releases/tag/v0.1.6), and the npm meta package is [`@dslzl/csa@0.1.6`](https://www.npmjs.com/package/@dslzl/csa).
+The current Manager release is [`v0.1.7`](https://github.com/DSLZL/CSA/releases/tag/v0.1.7), and the npm meta package is [`@dslzl/csa@0.1.7`](https://www.npmjs.com/package/@dslzl/csa).
 
 The current formal patched Release is [`compat-rust-v0.151.0-native-join-p10`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.151.0-native-join-p10).
 
@@ -121,7 +121,7 @@ Commit and push the reviewed version change to the default branch.
 Run `Release CSA` from the default branch:
 
 ```text
-version=0.1.6
+version=0.1.7
 ```
 
 The workflow:
@@ -136,20 +136,20 @@ The workflow:
 8. creates an annotated `vX.Y.Z` tag and GitHub Release;
 9. explicitly dispatches npm Trusted Publishing for that tag.
 
-The `v0.1.6` asset set is:
+The `v0.1.7` asset set is:
 
 ```text
-csa-v0.1.6-windows-x86_64.zip
-csa-v0.1.6-linux-x86_64.tar.gz
-csa-v0.1.6-linux-aarch64.tar.gz
-csa-v0.1.6-macos-x86_64.tar.gz
-csa-v0.1.6-macos-aarch64.tar.gz
-dslzl-csa-0.1.6.tgz
-dslzl-csa-win32-x64-0.1.6.tgz
-dslzl-csa-linux-x64-0.1.6.tgz
-dslzl-csa-linux-arm64-0.1.6.tgz
-dslzl-csa-darwin-x64-0.1.6.tgz
-dslzl-csa-darwin-arm64-0.1.6.tgz
+csa-v0.1.7-windows-x86_64.zip
+csa-v0.1.7-linux-x86_64.tar.gz
+csa-v0.1.7-linux-aarch64.tar.gz
+csa-v0.1.7-macos-x86_64.tar.gz
+csa-v0.1.7-macos-aarch64.tar.gz
+dslzl-csa-0.1.7.tgz
+dslzl-csa-win32-x64-0.1.7.tgz
+dslzl-csa-linux-x64-0.1.7.tgz
+dslzl-csa-linux-arm64-0.1.7.tgz
+dslzl-csa-darwin-x64-0.1.7.tgz
+dslzl-csa-darwin-arm64-0.1.7.tgz
 SHA256SUMS
 ```
 
@@ -182,14 +182,14 @@ The five platform packages publish before `@dslzl/csa`. A rerun skips an existin
 To resume an existing formal Release:
 
 ```powershell
-gh workflow run publish-npm.yml --ref main -f tag=v0.1.6
+gh workflow run publish-npm.yml --ref main -f tag=v0.1.7
 ```
 
 Verify the registry and launcher:
 
 ```powershell
 npm view @dslzl/csa version dist-tags.latest --registry=https://registry.npmjs.org
-npx --yes @dslzl/csa@0.1.6 --version
+npx --yes @dslzl/csa@0.1.7 --version
 ```
 
 The exact immutable `0.1.4` recovery path is the only exception that disables the Sigstore provenance statement because those old tarballs lack `repository.url`. It still uses OIDC.

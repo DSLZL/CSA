@@ -132,7 +132,7 @@ On Windows, explicit `install` and `plug` place the managed `bin` directory firs
 
 ## Platform support
 
-CSA Manager `0.1.6` is published for:
+CSA Manager `0.1.7` is published for:
 
 | Platform | Rust target | npm package |
 | --- | --- | --- |

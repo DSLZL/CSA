@@ -18,7 +18,7 @@ CSA is a Rust manager for patched Codex CLI builds. It detects the installed off
 The official Codex package, configuration, authentication, sessions, and local databases stay in place.
 
 > [!IMPORTANT]
-> The current Manager is `0.1.6`. The current formal patched Release is Codex `0.151.0` p10. Six native patched artifacts are published; formal runtime acceptance currently covers Windows x64.
+> The current Manager is `0.1.7`. The current formal patched Release is Codex `0.151.0` p10. Six native patched artifacts are published; formal runtime acceptance currently covers Windows x64.
 
 ## What the patch adds
 
@@ -36,7 +36,7 @@ The npm distribution requires Node.js 18 or newer and a working official Codex C
 
 | Product | Current release | Published platforms |
 | --- | --- | --- |
-| CSA Manager | `0.1.6` | Windows x64, Linux x64, Linux arm64 glibc, macOS x64, macOS arm64 |
+| CSA Manager | `0.1.7` | Windows x64, Linux x64, Linux arm64 glibc, macOS x64, macOS arm64 |
 | Patched Codex CLI | [`rust-v0.151.0-native-join-p10`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.151.0-native-join-p10) | Windows x64/arm64, Linux x64/arm64 musl, macOS x64/arm64 |
 
 Manager support does not guarantee that a patched Codex artifact exists for the same target. Online installation requires an exact match for both the installed official Codex version and the Manager build target.
@@ -46,15 +46,15 @@ Manager support does not guarantee that a patched Codex artifact exists for the 
 ### 1. Install the Manager
 
 ```powershell
-npm install --global @dslzl/csa@0.1.6
+npm install --global @dslzl/csa@0.1.7
 csa --version
 ```
 
 You can run CSA without a global install:
 
 ```powershell
-npx @dslzl/csa@0.1.6 --version
-bunx @dslzl/csa@0.1.6 --version
+npx @dslzl/csa@0.1.7 --version
+bunx @dslzl/csa@0.1.7 --version
 ```
 
 `npx --yes` only suppresses npm's package-install confirmation. It does not answer CSA's version picker. Use `csa install --yes` when CSA should select the recommended exact match without prompting.

@@ -18,7 +18,7 @@ CSA 是用于管理 patched Codex CLI 的 Rust 工具。它会检测本机的官
 官方 Codex package、配置、认证、会话和本地数据库都保留在原位。
 
 > [!IMPORTANT]
-> 当前 Manager 版本是 `0.1.6`。当前正式 patched Release 是 Codex `0.151.0` p10，共发布六个平台产物；正式 runtime 验收目前覆盖 Windows x64。
+> 当前 Manager 版本是 `0.1.7`。当前正式 patched Release 是 Codex `0.151.0` p10，共发布六个平台产物；正式 runtime 验收目前覆盖 Windows x64。
 
 ## 补丁增加了什么
 
@@ -36,7 +36,7 @@ npm 分发包需要 Node.js 18 或更高版本，并且本机已经有可正常�
 
 | 产品 | 当前版本 | 已发布平台 |
 | --- | --- | --- |
-| CSA Manager | `0.1.6` | Windows x64、Linux x64、Linux arm64 glibc、macOS x64、macOS arm64 |
+| CSA Manager | `0.1.7` | Windows x64、Linux x64、Linux arm64 glibc、macOS x64、macOS arm64 |
 | Patched Codex CLI | [`rust-v0.151.0-native-join-p10`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.151.0-native-join-p10) | Windows x64/arm64、Linux x64/arm64 musl、macOS x64/arm64 |
 
 Manager 支持某个平台，不代表同一 target 一定有 patched Codex 产物。在线安装要求本机官方 Codex 版本和 Manager build target 同时精确匹配。
@@ -46,15 +46,15 @@ Manager 支持某个平台，不代表同一 target 一定有 patched Codex 产�
 ### 1. 安装 Manager
 
 ```powershell
-npm install --global @dslzl/csa@0.1.6
+npm install --global @dslzl/csa@0.1.7
 csa --version
 ```
 
 也可以不做全局安装：
 
 ```powershell
-npx @dslzl/csa@0.1.6 --version
-bunx @dslzl/csa@0.1.6 --version
+npx @dslzl/csa@0.1.7 --version
+bunx @dslzl/csa@0.1.7 --version
 ```
 
 `npx --yes` 只会跳过 npm 的 package 安装确认，不会代替你操作 CSA 的版本选择器。需要 CSA 无交互选择推荐版本时，请使用 `csa install --yes`。
