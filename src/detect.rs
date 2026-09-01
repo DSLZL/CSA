@@ -83,7 +83,10 @@ pub fn detect_official(
     explicit_native: Option<&Path>,
     excluded_roots: &[PathBuf],
 ) -> Result<OfficialCodex> {
+    #[cfg(windows)]
     let mut effective_excluded_roots = excluded_roots.to_vec();
+    #[cfg(not(windows))]
+    let effective_excluded_roots = excluded_roots.to_vec();
     #[cfg(windows)]
     if let Ok(system_bin) = windows_csa_system_bin() {
         effective_excluded_roots.push(system_bin);
