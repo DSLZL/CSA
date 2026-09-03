@@ -9,6 +9,7 @@ import io
 import json
 import os
 import platform as sys_platform
+import re
 import shutil
 import subprocess
 import sys
@@ -1005,7 +1006,7 @@ def test_release_stream_contracts() -> None:
     assert "--all-targets" in patched_workflow
 
     sccache_action = (
-        "mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c"
+        "mozilla-actions/sccache-action@v0.0.11"
     )
     workflow_root = REPOSITORY / ".github" / "workflows"
     workflow_sources = {
@@ -1013,6 +1014,29 @@ def test_release_stream_contracts() -> None:
         for pattern in ("*.yml", "*.yaml")
         for path in sorted(workflow_root.glob(pattern))
     }
+    action_pattern = re.compile(r"^\s*-?\s*uses:\s+([^\s#]+)", re.MULTILINE)
+    action_sources = {
+        source
+        for pattern in ("*.yml", "*.yaml")
+        for path in sorted((REPOSITORY / ".github").rglob(pattern))
+        for source in action_pattern.findall(path.read_text(encoding="utf-8"))
+        if not source.startswith("./")
+    }
+    assert action_sources == {
+        "actions/cache@v6.1.0",
+        "actions/checkout@v7.0.1",
+        "actions/download-artifact@v8.0.1",
+        "actions/setup-node@v7.0.0",
+        "actions/setup-python@v7.0.0",
+        "actions/upload-artifact@v7.0.1",
+        "dtolnay/rust-toolchain@1.95.0",
+        "mlugg/setup-zig@v2.2.1",
+        "mozilla-actions/sccache-action@v0.0.11",
+    }
+    assert all(
+        re.fullmatch(r"[^@\s]+@v?[0-9]+\.[0-9]+\.[0-9]+", source)
+        for source in action_sources
+    )
     expected_cache_owners = {
         "build-patched-codex-target.yml",
         "validate-patched-codex.yml",
@@ -1098,13 +1122,13 @@ def test_release_stream_contracts() -> None:
     assert patched_workflow.count("if: needs.plan.outputs.publish_requested != 'true'") == 2
     assert patched_workflow.count("if: needs.plan.outputs.publish_requested == 'true'") == 2
     assert patched_workflow.count(
-        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+        "actions/upload-artifact@v7.0.1"
     ) == 2
     assert target_workflow.count(
-        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+        "actions/upload-artifact@v7.0.1"
     ) == 1
     assert windows_test_workflow.count(
-        "actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a"
+        "actions/upload-artifact@v7.0.1"
     ) == 1
 
     assert 'gh release view "$TAG"' in patched_workflow
@@ -1159,7 +1183,7 @@ def test_release_stream_contracts() -> None:
     assert "runs-on: windows-2025" in validation_workflow
     assert "runs-on: ubuntu-24.04" not in validation_workflow
     assert "shell: bash" not in validation_workflow
-    assert "dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582" in validation_workflow
+    assert "dtolnay/rust-toolchain@1.95.0" in validation_workflow
     assert "toolchain: ${{ steps.resolve.outputs.rust_toolchain }}" not in validation_workflow
     assert "components: rustfmt, clippy" in validation_workflow
     assert "setup-msvc-env.ps1" in validation_workflow

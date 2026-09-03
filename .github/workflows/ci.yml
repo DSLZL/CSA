@@ -62,7 +62,7 @@ jobs:
       node_compat: ${{ steps.detect.outputs.node_compat }}
       platform: ${{ steps.detect.outputs.platform }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
@@ -255,27 +255,27 @@ jobs:
     if: needs.changes.outputs.quality == 'true'
     runs-on: ubuntu-24.04
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
 
       - name: Set up Node.js
         if: needs.changes.outputs.launcher == 'true' || needs.changes.outputs.packaged_docs == 'true' || needs.changes.outputs.workflows == 'true'
-        uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+        uses: actions/setup-node@v7.0.0
         with:
           node-version: "26"
           package-manager-cache: false
 
       - name: Set up Python
         if: needs.changes.outputs.payload == 'true' || needs.changes.outputs.tooling == 'true' || needs.changes.outputs.workflows == 'true'
-        uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+        uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
 
       - name: Set up Rust
         if: needs.changes.outputs.manager == 'true' || needs.changes.outputs.workflows == 'true'
-        uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
+        uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy,rustfmt
 
@@ -344,10 +344,10 @@ jobs:
       matrix:
         node: ["22", "24"]
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@v7.0.0
         with:
           node-version: ${{ matrix.node }}
           package-manager-cache: false
@@ -400,17 +400,17 @@ jobs:
           ) | Add-Content -Path $env:GITHUB_ENV -Encoding utf8
           @('artifact', 'activation', 'codex-home', 'home', 'npm-cache', 'npm-prefix', 'tarballs') |
             ForEach-Object { New-Item -ItemType Directory -Force (Join-Path $root $_) | Out-Null }
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-node@820762786026740c76f36085b0efc47a31fe5020 # v7
+      - uses: actions/setup-node@v7.0.0
         with:
           node-version: "26"
           package-manager-cache: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
-      - uses: dtolnay/rust-toolchain@a5f673d0ba8626c3977bb416a1612774bc82181b # 1.95.0 branch
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           components: clippy
           targets: ${{ matrix.target }}
@@ -477,7 +477,7 @@ jobs:
             --isolation-root "${{ runner.temp }}/csa" `
             --output "${{ runner.temp }}/csa/artifact/${{ matrix.id }}"
           if ($LASTEXITCODE -ne 0) { throw "platform artifact recording failed" }
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@v7.0.1
         with:
           name: platform-${{ matrix.id }}
           path: ${{ runner.temp }}/csa/artifact

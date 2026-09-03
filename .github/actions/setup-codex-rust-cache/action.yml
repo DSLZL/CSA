@@ -26,7 +26,7 @@ runs:
         "sccache-path=$sccacheDir" | Add-Content -Path $env:GITHUB_OUTPUT -Encoding utf8
 
     - name: Restore Cargo registry and git downloads
-      uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+      uses: actions/cache@v6.1.0
       with:
         path: |
           ${{ steps.cargo-home.outputs.path }}/registry/index
@@ -38,7 +38,7 @@ runs:
           csa-cargo-home-v5-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-
 
     - name: Restore updateable local compiler cache
-      uses: actions/cache@668228422ae6a00e4ad889ee87cd7109ec5666a7 # v5.0.4
+      uses: actions/cache@v6.1.0
       with:
         path: ${{ steps.cargo-home.outputs.sccache-path }}
         key: csa-sccache-local-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.cache-scope }}-${{ github.sha }}
@@ -46,7 +46,7 @@ runs:
           csa-sccache-local-v1-${{ runner.os }}-${{ runner.arch }}-${{ inputs.toolchain }}-${{ inputs.cache-scope }}-
 
     - name: Install pinned sccache
-      uses: mozilla-actions/sccache-action@fc920bf0ec8de6ee65d409111f7ec508035751ba # v0.0.11
+      uses: mozilla-actions/sccache-action@v0.0.11
       with:
         version: "v0.16.0"
 

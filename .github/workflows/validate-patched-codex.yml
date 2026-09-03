@@ -90,17 +90,17 @@ jobs:
             $tmp
           ) | Out-Null
 
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
           ref: ${{ inputs.source_commit || github.sha }}
 
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
 
-      - uses: mozilla-actions/sccache-action@fd02668681acd5f960e1372061bee5e3e987195c # v0.0.11
+      - uses: mozilla-actions/sccache-action@v0.0.11
         with:
           version: v0.16.0
 
@@ -159,7 +159,7 @@ jobs:
             throw 'Pinned upstream tag and commit identity differ.'
           }
 
-      - uses: dtolnay/rust-toolchain@e081816240890017053eacbb1bdf337761dc5582 # 1.95.0
+      - uses: dtolnay/rust-toolchain@1.95.0
         with:
           targets: ${{ steps.resolve.outputs.build_target }}
           components: rustfmt, clippy
@@ -291,7 +291,7 @@ jobs:
           if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
 
       - name: Upload validation evidence
-        uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+        uses: actions/upload-artifact@v7.0.1
         with:
           name: patched-codex-validation-${{ steps.resolve.outputs.compat_id }}
           path: ${{ runner.temp }}/csa-patched-codex-validation/evidence

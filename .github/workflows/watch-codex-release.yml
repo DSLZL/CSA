@@ -37,11 +37,11 @@ jobs:
       issue_number: ${{ steps.detect.outputs.issue_number }}
       issue_needs_update: ${{ steps.detect.outputs.issue_needs_update }}
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
       - id: detect
@@ -65,10 +65,10 @@ jobs:
       contents: read
       issues: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
       - name: Move the same Issue to the newest stable target
@@ -130,10 +130,10 @@ jobs:
             throw "Codex source must not live inside the CSA repository: $source"
           }
           New-Item -ItemType Directory -Force $root | Out-Null
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7.0.1
         with:
           fetch-depth: 0
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
       - id: clone
@@ -265,7 +265,7 @@ jobs:
             "stage=$($failed.Name)" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
             Copy-Item "$env:WATCH_ROOT/$($failed.Log)" "$env:WATCH_ROOT/failure.log"
           }
-      - uses: actions/upload-artifact@043fb46d1a93c77aae656e7c1c64a875d1fc6a0a # v7
+      - uses: actions/upload-artifact@v7.0.1
         if: steps.outcome.outputs.success == 'false'
         with:
           name: compatibility-failure-patch-${{ needs.detect.outputs.upstream_commit }}
@@ -283,10 +283,10 @@ jobs:
     permissions:
       contents: read
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
       - name: Record the next authoritative action
@@ -341,13 +341,13 @@ jobs:
       contents: read
       issues: write
     steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7
+      - uses: actions/checkout@v7.0.1
         with:
           persist-credentials: false
-      - uses: actions/setup-python@ece7cb06caefa5fff74198d8649806c4678c61a1 # v6
+      - uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
-      - uses: actions/download-artifact@3e5f45b2cfb9172054b4087a40e8e0b5a5461e7c # v8
+      - uses: actions/download-artifact@v8.0.1
         with:
           pattern: compatibility-failure-*
           path: ${{ runner.temp }}/csa-watch/failure
