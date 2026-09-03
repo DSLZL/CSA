@@ -27,7 +27,7 @@ csa [--json] <command> [options]
 
 ### Install modes
 
-Online mode is selected when `install` has no `--manifest`. It discovers formal compatibility Releases from `DSLZL/CSA` and accepts only an exact match for the installed official Codex version and the resolved artifact target. Linux GNU Manager targets resolve to the corresponding musl artifact target.
+Online mode is selected when `install` has no `--manifest`. It discovers formal compatibility Releases from `DSLZL/CSA-codex`, with an embedded bootstrap for legacy `DSLZL/CSA` Releases, and accepts only an exact match for the installed official Codex version and the resolved artifact target. Linux GNU Manager targets resolve to the corresponding musl artifact target.
 
 Local mode requires `--manifest` and exactly one of `--artifact` or `--source`. It rejects `--yes` and `--compat`. Local mode is intended for development and acceptance work.
 
@@ -152,10 +152,9 @@ The Linux npm packages contain static musl Manager binaries and intentionally om
 | `npm/meta/package.json` | npm meta package version and platform dependencies |
 | `npm/meta/platforms.json` | npm platform mapping |
 | `release/support-matrix.json` | Manager build and release platforms |
-| `release/compatibility-index.json` | Compatibility routing and lifecycle |
-| Compatibility `manifest.toml` | Upstream identity, payload, toolchain, targets, and artifact contract |
-| `release/runtime-locks/` | Exact official runtime package contract |
-| `release/acceptance/` | Sanitized development acceptance evidence |
-| Published `compat-<compat_id>` Release | Final production manifest, descriptor, assets, sizes, and checksums |
+| `release/release-inputs.schema.json` | Manager release-candidate input contract |
+| `release/install-catalog-bootstrap-v1.json` | Legacy compatibility discovery bootstrap |
+| `DSLZL/CSA-codex` | Current compatibility routing, payloads, validation, and release authority |
+| Published `compat-<compat_id>` Release in `DSLZL/CSA-codex` | Final production manifest, descriptor, assets, sizes, and checksums |
 
-Manager Releases use `vX.Y.Z`. Patched Codex Releases use `compat-<compat_id>`. The two asset streams are independent.
+Manager Releases use `vX.Y.Z` in `DSLZL/CSA`. Patched Codex Releases use `compat-<compat_id>` in `DSLZL/CSA-codex`. The two repositories and asset streams are independent.

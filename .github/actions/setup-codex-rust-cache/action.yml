@@ -1,9 +1,9 @@
-name: Setup Codex-style Rust cache
-description: Restore Cargo downloads and a bounded local sccache archive without restoring target artifacts.
+name: Setup Manager Rust cache
+description: Restore Cargo downloads and the local CSA Manager sccache archive without restoring target artifacts.
 
 inputs:
   cache-scope:
-    description: Stable scope such as the CSA Cargo.lock hash or an exact upstream Codex commit.
+    description: Stable CSA Manager dependency scope, such as the Cargo.lock hash.
     required: true
   toolchain:
     description: Rust toolchain identifier used in the cache key.

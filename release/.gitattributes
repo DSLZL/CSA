@@ -1,2 +1,2 @@
-# Catalog bindings hash release authority bytes; keep them stable on Windows.
+# Manager release metadata is hashed; keep its bytes stable on Windows.
 ** text eol=lf

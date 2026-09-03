@@ -7,7 +7,7 @@
 [![CI](https://github.com/DSLZL/CSA/actions/workflows/ci.yml/badge.svg)](https://github.com/DSLZL/CSA/actions/workflows/ci.yml)
 [![CSA release](https://img.shields.io/github/v/release/DSLZL/CSA?filter=v%2A&label=CSA)](https://github.com/DSLZL/CSA/releases)
 [![npm](https://img.shields.io/npm/v/%40dslzl%2Fcsa)](https://www.npmjs.com/package/@dslzl/csa)
-[![Patched Codex](https://img.shields.io/badge/patched%20Codex-0.151.0%20p10-white)](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.151.0-native-join-p10)
+[![Patched Codex](https://img.shields.io/badge/patched%20Codex-0.151.0%20p10-white)](https://github.com/DSLZL/CSA-codex/releases/tag/compat-rust-v0.151.0-native-join-p10)
 
 [快速开始](#快速开始) · [工作原理](#工作原理) · [命令](#命令) · [文档](#文档) · [English](README.md)
 
@@ -37,7 +37,7 @@ npm 分发包需要 Node.js 18 或更高版本，并且本机已经有可正常�
 | 产品 | 当前版本 | 已发布平台 |
 | --- | --- | --- |
 | CSA Manager | `0.1.8` | Windows x64、Linux x64、Linux arm64、macOS x64、macOS arm64 |
-| Patched Codex CLI | [`rust-v0.151.0-native-join-p10`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.151.0-native-join-p10) | Windows x64/arm64、Linux x64/arm64 musl、macOS x64/arm64 |
+| Patched Codex CLI | [`rust-v0.151.0-native-join-p10`](https://github.com/DSLZL/CSA-codex/releases/tag/compat-rust-v0.151.0-native-join-p10) | Windows x64/arm64、Linux x64/arm64 musl、macOS x64/arm64 |
 
 Manager 支持某个平台，不代表该平台一定有 patched Codex 产物。在线安装要求官方 Codex 版本精确匹配，并会将 Linux Manager target 解析到已发布的 musl 产物。
 
@@ -138,7 +138,7 @@ CSA 把四个身份分开处理：
 
 Windows 下可选的 Program Files dispatcher 是受管 shim 的受保护副本，不是另一套 Codex 安装。
 
-在线安装只下载 `SHA256SUMS`、`compatibility-release.json` 和当前 target 的可执行文件。完整 patch 和 source contract 仍保留在正式 Release 中，用于构建和审计。
+在线安装只下载 `SHA256SUMS`、`compatibility-release.json` 和当前 target 的可执行文件。完整 patch、source contract 和正式 compatibility Release 由 [`DSLZL/CSA-codex`](https://github.com/DSLZL/CSA-codex) 维护。
 
 通过 shim 正常启动时会复用当前 `CODEX_HOME`。测试和验收应使用 `csa exec --isolated` 与一次性目录。
 
@@ -168,11 +168,11 @@ Human 输出跟随检测到的系统语言。`zh` locale 统一使用简体中�
 - [CLI 与平台参考](docs/reference.md)
 - [架构与安全模型](docs/architecture.md)
 - [开发与隔离测试](docs/development.md)
-- [Compatibility 与发布流程](docs/release.md)
-- [Compatibility catalog](release/compatibility-index.json)
+- [Manager 发布流程](docs/release.md)
+- [Patched Codex 生产仓库](https://github.com/DSLZL/CSA-codex)
 - [Manager support matrix](release/support-matrix.json)
 
-轻量级 [Ratatui UI harness](tests/ui/README.md) 可以在不编译 Codex 的情况下展示全部子代理状态和动画。
+轻量级 [Ratatui UI harness](https://github.com/DSLZL/CSA-codex/tree/main/tests/ui) 由 patched Codex 生产仓库一并维护。
 
 ## 友链
 

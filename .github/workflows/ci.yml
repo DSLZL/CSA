@@ -13,7 +13,6 @@ on:
       - "src/**"
       - "tests/**"
       - "npm/**"
-      - "payload/codex/**"
       - "release/**"
       - "scripts/**"
   pull_request:
@@ -28,7 +27,6 @@ on:
       - "src/**"
       - "tests/**"
       - "npm/**"
-      - "payload/codex/**"
       - "release/**"
       - "scripts/**"
   workflow_dispatch:
@@ -54,7 +52,6 @@ jobs:
       manager: ${{ steps.detect.outputs.manager }}
       launcher: ${{ steps.detect.outputs.launcher }}
       packaged_docs: ${{ steps.detect.outputs.packaged_docs }}
-      payload: ${{ steps.detect.outputs.payload }}
       tooling: ${{ steps.detect.outputs.tooling }}
       platform_support: ${{ steps.detect.outputs.platform_support }}
       workflows: ${{ steps.detect.outputs.workflows }}
@@ -83,7 +80,6 @@ jobs:
           manager=false
           launcher=false
           packaged_docs=false
-          payload=false
           tooling=false
           platform_support=false
           workflows=false
@@ -92,7 +88,6 @@ jobs:
             manager=true
             launcher=true
             packaged_docs=true
-            payload=true
             tooling=true
             platform_support=true
             workflows=true
@@ -149,14 +144,7 @@ jobs:
               esac
 
               case "$file" in
-                payload/codex/*|scripts/*.sh|scripts/run_patch_contract.py|scripts/validation_evidence.py|scripts/test_validation_evidence.py|scripts/verify_patch_payload.py|scripts/test_verify_patch_payload.py|scripts/compatibility_audit.py|scripts/check_sccache_stats.py)
-                  payload=true
-                  classified=true
-                  ;;
-              esac
-
-              case "$file" in
-                release/*|release-readiness.md|scripts/*.py)
+                release/*|scripts/*.py)
                   tooling=true
                   classified=true
                   ;;
@@ -191,12 +179,11 @@ jobs:
             manager=true
             launcher=true
             packaged_docs=true
-            payload=true
             tooling=true
           fi
 
           quality=false
-          if [[ "$manager" == "true" || "$launcher" == "true" || "$packaged_docs" == "true" || "$payload" == "true" || "$tooling" == "true" ]]; then
+          if [[ "$manager" == "true" || "$launcher" == "true" || "$packaged_docs" == "true" || "$tooling" == "true" ]]; then
             quality=true
           fi
 
@@ -216,7 +203,6 @@ jobs:
             echo "manager=$manager"
             echo "launcher=$launcher"
             echo "packaged_docs=$packaged_docs"
-            echo "payload=$payload"
             echo "tooling=$tooling"
             echo "platform_support=$platform_support"
             echo "workflows=$workflows"
@@ -233,7 +219,6 @@ jobs:
             echo "| manager | $manager |"
             echo "| launcher | $launcher |"
             echo "| packaged docs | $packaged_docs |"
-            echo "| payload | $payload |"
             echo "| release/tooling | $tooling |"
             echo "| platform support tooling | $platform_support |"
             echo "| workflows | $workflows |"
@@ -268,7 +253,7 @@ jobs:
           package-manager-cache: false
 
       - name: Set up Python
-        if: needs.changes.outputs.payload == 'true' || needs.changes.outputs.tooling == 'true' || needs.changes.outputs.workflows == 'true'
+        if: needs.changes.outputs.tooling == 'true' || needs.changes.outputs.workflows == 'true'
         uses: actions/setup-python@v7.0.0
         with:
           python-version: "3.13"
@@ -305,35 +290,9 @@ jobs:
           node --check scripts/stage_npm_packages.mjs
           node scripts/test_npm_launcher.mjs
 
-      - name: Patch, release, and compatibility tooling
-        if: needs.changes.outputs.payload == 'true' || needs.changes.outputs.tooling == 'true' || needs.changes.outputs.workflows == 'true'
-        run: |
-          python scripts/test_verify_patch_payload.py
-          python scripts/test_release_tools.py
-          python scripts/test_compat_catalog.py
-          python scripts/test_verify_release_asset_set.py
-          python scripts/test_validation_evidence.py
-          python scripts/compat_catalog.py validate --repository .
-          python scripts/compat_catalog.py guard-workflows \
-            .github/workflows/ci.yml \
-            .github/workflows/build-patched-codex-target.yml \
-            .github/workflows/build-patched-codex-windows.yml \
-            .github/workflows/publish-npm.yml \
-            .github/workflows/release-csa.yml \
-            .github/workflows/release-patched-codex.yml \
-            .github/workflows/validate-patched-codex.yml \
-            .github/workflows/watch-codex-release.yml
-
-      - name: Immutable compatibility entries
-        if: github.event_name == 'pull_request' && (needs.changes.outputs.payload == 'true' || needs.changes.outputs.workflows == 'true')
-        env:
-          BASE_SHA: ${{ github.event.pull_request.base.sha }}
-        run: |
-          mkdir -p "$RUNNER_TEMP/compat-base"
-          git archive "$BASE_SHA" payload/codex | tar -x -C "$RUNNER_TEMP/compat-base"
-          python scripts/compatibility_audit.py immutability \
-            --baseline "$RUNNER_TEMP/compat-base/payload/codex" \
-            --candidate "$GITHUB_WORKSPACE/payload/codex"
+      - name: Manager release tooling
+        if: needs.changes.outputs.tooling == 'true' || needs.changes.outputs.workflows == 'true'
+        run: python scripts/test_release_tools.py
 
   node-compat:
     name: Node ${{ matrix.node }}

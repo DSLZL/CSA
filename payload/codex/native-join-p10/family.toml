@@ -1,9 +1,0 @@
-schema = 2
-family_id = "native-join-p10"
-patch_api = 1
-patch_set_version = 10
-
-[[bindings]]
-compat_id = "rust-v0.151.0-native-join-p10"
-manifest = "bindings/rust-v0.151.0-native-join-p10/manifest.toml"
-sha256 = "563b34f187e61e70aee5453f2383df640058475d742be38137e99c0cb2f9ca0d"

@@ -117,7 +117,7 @@ Start the interactive installer:
 csa install
 ```
 
-CSA reads public `DSLZL/CSA` Git refs and probes at most the 16 newest compatibility tags for `install-catalog-v1.json`. An embedded catalog covers older p3, p8, and p9 Releases that predate that asset.
+CSA reads public `DSLZL/CSA-codex` Git refs and probes at most the 16 newest compatibility tags for `install-catalog-v1.json`. An embedded catalog keeps legacy `DSLZL/CSA` compatibility Releases discoverable.
 
 The catalog only supplies picker rows. It does not authorize installation.
 

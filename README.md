@@ -7,7 +7,7 @@ Install and switch between version-pinned patched Codex CLI builds without repla
 [![CI](https://github.com/DSLZL/CSA/actions/workflows/ci.yml/badge.svg)](https://github.com/DSLZL/CSA/actions/workflows/ci.yml)
 [![CSA release](https://img.shields.io/github/v/release/DSLZL/CSA?filter=v%2A&label=CSA)](https://github.com/DSLZL/CSA/releases)
 [![npm](https://img.shields.io/npm/v/%40dslzl%2Fcsa)](https://www.npmjs.com/package/@dslzl/csa)
-[![Patched Codex](https://img.shields.io/badge/patched%20Codex-0.151.0%20p10-white)](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.151.0-native-join-p10)
+[![Patched Codex](https://img.shields.io/badge/patched%20Codex-0.151.0%20p10-white)](https://github.com/DSLZL/CSA-codex/releases/tag/compat-rust-v0.151.0-native-join-p10)
 
 [Quick start](#quick-start) · [How it works](#how-it-works) · [Commands](#commands) · [Documentation](#documentation) · [简体中文](README_ZH.md)
 
@@ -37,7 +37,7 @@ The npm distribution requires Node.js 18 or newer and a working official Codex C
 | Product | Current release | Published platforms |
 | --- | --- | --- |
 | CSA Manager | `0.1.8` | Windows x64, Linux x64, Linux arm64, macOS x64, macOS arm64 |
-| Patched Codex CLI | [`rust-v0.151.0-native-join-p10`](https://github.com/DSLZL/CSA/releases/tag/compat-rust-v0.151.0-native-join-p10) | Windows x64/arm64, Linux x64/arm64 musl, macOS x64/arm64 |
+| Patched Codex CLI | [`rust-v0.151.0-native-join-p10`](https://github.com/DSLZL/CSA-codex/releases/tag/compat-rust-v0.151.0-native-join-p10) | Windows x64/arm64, Linux x64/arm64 musl, macOS x64/arm64 |
 
 Manager support does not guarantee that a patched Codex artifact exists for the same platform. Online installation requires an exact official Codex version and resolves Linux Manager targets to the published musl artifacts.
 
@@ -138,7 +138,7 @@ CSA separates four identities:
 
 The optional Windows Program Files dispatcher is a protected copy of the managed shim, not another Codex installation.
 
-Online installation downloads only `SHA256SUMS`, `compatibility-release.json`, and the current target's executable. The full patch and source contract remains attached to the formal Release for build and audit work.
+Online installation downloads only `SHA256SUMS`, `compatibility-release.json`, and the current target's executable. The full patch, source contract, and formal compatibility Release are maintained by [`DSLZL/CSA-codex`](https://github.com/DSLZL/CSA-codex).
 
 Normal shim launches reuse the current `CODEX_HOME`. Tests and acceptance runs should use `csa exec --isolated` with disposable directories.
 
@@ -168,11 +168,11 @@ See the [CLI reference](docs/reference.md) for complete syntax, status values, e
 - [CLI and platform reference](docs/reference.md)
 - [Architecture and security model](docs/architecture.md)
 - [Development and isolated testing](docs/development.md)
-- [Compatibility and release process](docs/release.md)
-- [Compatibility catalog](release/compatibility-index.json)
+- [Manager release process](docs/release.md)
+- [Patched Codex producer](https://github.com/DSLZL/CSA-codex)
 - [Manager support matrix](release/support-matrix.json)
 
-The lightweight [Ratatui UI harness](tests/ui/README.md) shows every subagent state and animation without compiling Codex.
+The lightweight [Ratatui UI harness](https://github.com/DSLZL/CSA-codex/tree/main/tests/ui) is maintained with the patched Codex producer.
 
 ## Friends
 

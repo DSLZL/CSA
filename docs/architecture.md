@@ -37,7 +37,7 @@ An online installation follows one bounded path:
 ```text
 locate official Codex
   -> record exact version, target, package layout, sizes, and hashes
-  -> read public CSA compatibility refs
+  -> read public CSA-codex compatibility refs
   -> build the matching version picker
   -> verify the selected formal Release and descriptor
   -> download the current-target executable
@@ -54,7 +54,7 @@ The picker catalog is display metadata. It can tell the user which versions exis
 - the current build target and artifact filename;
 - every declared size and SHA-256 value.
 
-Online install persists only a minimal runtime manifest and the current platform's patched executable. Patch files, source hashes, test contracts, and source manifests stay in the GitHub Release for build and audit work.
+Online install persists only a minimal runtime manifest and the current platform's patched executable. Patch files, source hashes, test contracts, and source manifests stay in the CSA-codex GitHub Release for build and audit work.
 
 ## Direct and mirrored downloads
 
@@ -124,7 +124,7 @@ Normal shim launches use the current `CODEX_HOME`. Configuration, authentication
 
 The p10 patch canonicalizes SQLx migration bytes for the target platform and can atomically repair only the known checksum produced by the earlier line-ending variant. It does not accept an arbitrary checksum, skip migrations, rebuild the database, or delete user rows. Unknown migration drift still fails through SQLx validation.
 
-This design supports switching between official and patched Codex without maintaining two user histories. The current formal Windows x64 acceptance record does not yet include a complete official-to-patched-to-official database roundtrip, so that lane remains unverified rather than assumed.
+This design supports switching between official and patched Codex without maintaining two user histories. Compatibility-specific acceptance status is published by `DSLZL/CSA-codex`; the Manager does not bundle or reinterpret producer evidence.
 
 Development and manual acceptance use a disposable `CODEX_HOME`. Credentials may be reused only with explicit operator authorization, and their contents must not enter logs, evidence, or the repository.
 
@@ -141,40 +141,24 @@ Patch preflight accumulates the full ordered series in a temporary Git index. It
 
 `csa exec --isolated` runs the prepared artifact without activating a shim. Separate absolute paths are required for `CODEX_HOME`, cwd, logs, state, and the evidence record. This keeps the official Codex control plane separate from the patched system under test.
 
-## Compatibility families
+## Compatibility authority
 
-A compatibility binds one Codex version, upstream tag and commit, source preimages, patch revision, Rust toolchain, build targets, and artifacts.
+A compatibility binds one Codex version, upstream tag and commit, source preimages, patch revision, Rust toolchain, build targets, and artifacts. Those payloads and patch-family rules live in [`DSLZL/CSA-codex`](https://github.com/DSLZL/CSA-codex).
 
-Schema-2 patch families separate reusable CSA-owned additions from exact upstream adapters:
-
-```text
-payload/codex/<family>/
-  family.toml
-  shared/additions/
-  shared/patches/                 optional, requires two exact bindings
-  bindings/<compat_id>/
-    manifest.toml
-    patches/
-```
-
-Shared additions may contain only paths absent from every represented upstream version with byte-identical patched content. Changes to upstream-owned files stay in a binding adapter until at least two exact bindings prove that the canonical diff is identical.
-
-There is no version range or fuzzy fallback. Upstream drift creates a new exact binding. A change to CSA behavior, protocol, state machine, or acceptance contract creates a new numeric patch family.
+The Manager consumes only a published compatibility descriptor during online installation or an exact external manifest during local preparation. It has no bundled current payload and does not use version ranges, fuzzy patch application, or three-way patch fallback.
 
 ## Release boundaries
 
-CSA uses two independent Release namespaces:
+CSA uses two independent repository and Release namespaces:
 
-| Namespace | Product |
+| Repository and namespace | Product |
 | --- | --- |
-| `vX.Y.Z` | CSA Manager archives and npm packages |
-| `compat-<compat_id>` | Patched Codex binaries and compatibility payload |
+| `DSLZL/CSA`, `vX.Y.Z` | CSA Manager archives and npm packages |
+| `DSLZL/CSA-codex`, `compat-<compat_id>` | Patched Codex binaries and compatibility payload |
 
 A Manager Release never contains patched Codex. A compatibility Release never contains the Manager or npm packages.
 
-Formal patched publication uses one ordered GitHub Actions run: resolve the accepted compatibility, validate the exact upstream source and patch contract, build every manifest target on its native runner, aggregate the complete inventory, finalize a temporary manifest, reconcile a draft, then publish only after local and remote assets match.
-
-Candidate artifacts are development evidence. Formal publication rebuilds every target independently and does not reuse a candidate executable or its accepted hash.
+Formal patched publication and its six independent native build repositories are outside the Manager repository. The Manager trusts only a descriptor and artifacts that pass its exact identity, size, and checksum checks.
 
 ## Failure model
 
