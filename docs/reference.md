@@ -14,7 +14,7 @@ csa [--json] <command> [options]
 | --- | --- |
 | Help | `csa --help` |
 | Version | `csa --version` |
-| Diagnose | `csa doctor [--manager-root PATH] [--official PATH] [--official-native PATH] [--manifest PATH]` |
+| Diagnose | `csa doctor [--manager-root PATH] [--official PATH] [--official-native PATH] [--manifest PATH] [--remote [--refresh]]` |
 | Install online | `csa install [--yes] [--manager-root PATH] [--official PATH] [--official-native PATH] [--compat ID]` |
 | Install locally | `csa install [--manager-root PATH] [--official PATH] [--official-native PATH] --manifest PATH (--artifact PATH \| --source PATH)` |
 | Prepare locally | `csa prepare [--manager-root PATH] [--official PATH] [--official-native PATH] --manifest PATH (--artifact PATH \| --source PATH)` |
@@ -29,7 +29,27 @@ csa [--json] <command> [options]
 
 The supported shell names are `sh`, `bash`, `zsh`, and `fish`.
 
-### Install modes
+### Remote doctor diagnostics
+
+`csa doctor --remote` reads public compatibility metadata from `DSLZL/CSA-codex` and compares it with the detected official Codex version and resolved artifact target. A match is a PASS; no match, an unreachable catalog, or an ambiguous maximum patch revision is a WARN and does not change the doctor exit code. The JSON report adds `remote_compatibility` only when this option is used. Its `source` is `network` or `cache` when metadata was available, and `checked_at_unix_seconds` is the UTC Unix timestamp for that metadata. The normalized catalog is cached in the OS per-user cache directory under `remote-doctor` for one hour, outside `<manager-root>` and outside `purge`/`uninstall` cleanup. Expired or invalid cache data is ignored; a network failure then reports `unreachable`. `--refresh` skips cache reads and is valid only with `--remote`; a failed refresh does not use stale data. Doctor never downloads a patched executable or writes Manager installation state. Installation independently validates every selected Release.
+
+Remote JSON fields are:
+
+| Field | Meaning |
+| --- | --- |
+| `status` | `match`, `none_for_version`, `unreachable`, or `ambiguous_compatibility_revision` when the greatest patch revision is tied. |
+| `artifact_target` | Resolved compatibility artifact target, including Linux GNU-to-musl mapping. |
+| `compat_ids` | Compatibility IDs matching the official version and artifact target. |
+| `recommended_compat_id` | Candidate selected by the same maximum numeric `-pN` rule as install, or `null`. |
+| `prepared_compat_id` | Compatibility ID from the Manager's prepared state, or `null`. |
+| `update_available` | Whether the prepared compatibility ID differs from the recommendation. |
+| `latest_candidate` | Full highest `(official version, patch revision)` candidate for this target when there is no exact match, or `null`. |
+| `official_version_relation` | Whether the official version is `older`, `same`, or `newer` than `latest_candidate`, or `null`. |
+| `source` | `network`, `cache`, or `null` if no metadata was available. |
+| `checked_at_unix_seconds` | UTC Unix timestamp for fetched or cached metadata, or `null`. |
+
+`repository` identifies the repository used when available. The official version remains in the existing top-level `official.version` field; remote field names and values are not localized.
+
 
 Online mode is selected when `install` has no `--manifest`. It discovers formal compatibility Releases from `DSLZL/CSA-codex`, with an embedded bootstrap for legacy `DSLZL/CSA` Releases, and accepts only an exact match for the installed official Codex version and the resolved artifact target. Linux GNU Manager targets resolve to the corresponding musl artifact target.
 
@@ -123,6 +143,8 @@ Without `--manager-root`, CSA uses the platform local-data directory. `doctor` a
   state.json
   locks/
 ```
+
+The optional remote doctor cache is separate from this managed tree. It uses the OS per-user cache directory and is not removed by `purge` or `uninstall`.
 
 Stored official paths are validation references. CSA does not follow them during removal.
 

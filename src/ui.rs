@@ -1118,6 +1118,130 @@ fn doctor_assessment(
         ),
     ];
 
+    if let Some(remote) = &report.remote_compatibility {
+        let recommendation = remote.recommended_compat_id.as_deref();
+        let (detail, impact) = match remote.status {
+            "match" if remote.update_available => (
+                if language == Language::Chinese {
+                    format!(
+                        "有可更新版本：本地准备 {}，远程推荐 {}",
+                        remote.prepared_compat_id.as_deref().unwrap_or("unknown"),
+                        recommendation.unwrap_or("unknown")
+                    )
+                } else {
+                    format!(
+                        "Update available: prepared {}, remote recommends {}",
+                        remote.prepared_compat_id.as_deref().unwrap_or("unknown"),
+                        recommendation.unwrap_or("unknown")
+                    )
+                },
+                language.text(
+                    "Remote metadata is informational; installation validates the selected Release independently.",
+                    "远程元数据仅供参考；安装时会独立验证所选 Release。",
+                ),
+            ),
+            "match" => (
+                if language == Language::Chinese {
+                    format!(
+                        "官方版本 {} 有兼容 Release{}",
+                        report.official.version,
+                        recommendation
+                            .map(|id| format!("；推荐 {id}"))
+                            .unwrap_or_default()
+                    )
+                } else {
+                    format!(
+                        "compatible Release found for {}{}",
+                        report.official.version,
+                        recommendation
+                            .map(|id| format!("; recommended {id}"))
+                            .unwrap_or_default()
+                    )
+                },
+                language.text(
+                    "Remote metadata is informational; installation validates the selected Release independently.",
+                    "远程元数据仅供参考；安装时会独立验证所选 Release。",
+                ),
+            ),
+            "ambiguous_compatibility_revision" => (
+                if language == Language::Chinese {
+                    format!(
+                        "官方版本 {} 有多个最高修订号相同的兼容 Release，无法自动选择",
+                        report.official.version
+                    )
+                } else {
+                    format!(
+                        "multiple compatible Releases for {} share the highest revision; automatic selection is ambiguous",
+                        report.official.version
+                    )
+                },
+                language.text(
+                    "The install selector will require an explicit compatibility choice.",
+                    "安装时需要明确选择兼容版本。",
+                ),
+            ),
+            "none_for_version" => {
+                let latest = remote.latest_candidate.as_ref().map(|candidate| {
+                    if language == Language::Chinese {
+                        format!(
+                            "；远程最新 {}（{}）",
+                            candidate.codex_version, candidate.compat_id
+                        )
+                    } else {
+                        format!(
+                            "; latest remote {} ({})",
+                            candidate.codex_version, candidate.compat_id
+                        )
+                    }
+                });
+                let relation = match remote.official_version_relation {
+                    Some("older") if language == Language::Chinese => "；当前官方版本较旧",
+                    Some("newer") if language == Language::Chinese => "；当前官方版本较新",
+                    Some("older") => "; official version is older",
+                    Some("newer") => "; official version is newer",
+                    _ => "",
+                };
+                (
+                    if language == Language::Chinese {
+                        format!(
+                            "未找到与官方版本 {} 匹配的兼容 Release{}{}",
+                            report.official.version,
+                            latest.unwrap_or_default(),
+                            relation
+                        )
+                    } else {
+                        format!(
+                            "no compatible Release found for {}{}{}",
+                            report.official.version,
+                            latest.unwrap_or_default(),
+                            relation
+                        )
+                    },
+                    language.text(
+                        "No remote release currently matches the official version.",
+                        "当前没有与官方版本匹配的远程 Release。",
+                    ),
+                )
+            }
+            _ => (
+                language.text("remote compatibility could not be checked", "无法检查远程兼容性").to_owned(),
+                language.text("The local doctor assessment is unchanged.", "本地诊断结果不受影响。"),
+            ),
+        };
+        let severity = if remote.status == "match" {
+            CheckSeverity::Pass
+        } else {
+            CheckSeverity::Warn
+        };
+        checks.push(check(
+            severity,
+            language.text("Remote compatibility", "远程兼容性"),
+            detail,
+            Some(impact),
+            None,
+        ));
+    }
+
     if let Some(compatibility) = &report.compatibility {
         checks.push(if compatibility.exact_official_version {
             check(
@@ -1191,6 +1315,20 @@ fn doctor_assessment(
         });
     }
 
+    let remote_has_no_match = report
+        .remote_compatibility
+        .as_ref()
+        .is_some_and(|remote| remote.status == "none_for_version");
+    let no_match_hint = language.text(
+        "No remote release matches this official version; try again later or provide a local manifest and artifact.",
+        "当前没有匹配此官方版本的远程 Release；请稍后重试，或提供本地清单和产物。",
+    );
+    let install_hint = if remote_has_no_match {
+        no_match_hint
+    } else {
+        language.text("Run `csa install`.", "请运行 `csa install`。")
+    };
+
     let mut incomplete = false;
     match (status.status, status.state.as_ref()) {
         ("unprepared", None) => checks.push(check(
@@ -1203,7 +1341,7 @@ fn doctor_assessment(
                 "The official Codex remains available, but CSA is not managing it.",
                 "官方 Codex 仍可使用，但 CSA 尚未管理它。",
             )),
-            Some(language.text("Run `csa install`.", "请运行 `csa install`。")),
+            Some(install_hint),
         )),
         ("prepared", Some(state)) => checks.push(check(
             CheckSeverity::Pass,
@@ -1228,10 +1366,14 @@ fn doctor_assessment(
                 "CSA will not trust or execute the prepared patched binary.",
                 "CSA 不会信任或执行已准备的补丁版二进制文件。",
             )),
-            Some(language.text(
-                "Run `csa install` to replace the invalid state.",
-                "请运行 `csa install` 替换失效状态。",
-            )),
+            Some(if remote_has_no_match {
+                no_match_hint
+            } else {
+                language.text(
+                    "Run `csa install` to replace the invalid state.",
+                    "请运行 `csa install` 替换失效状态。",
+                )
+            }),
         )),
         _ => {
             incomplete = true;
@@ -1269,7 +1411,7 @@ fn doctor_assessment(
             Some(if status.state.is_some() {
                 activation_refresh_hint(language)
             } else {
-                language.text("Run `csa install`.", "请运行 `csa install`。")
+                install_hint
             }),
         )),
         ("plugged", true) => checks.push(check(
@@ -1311,10 +1453,14 @@ fn doctor_assessment(
                 "CSA will fall back instead of trusting the patched activation.",
                 "CSA 将执行回退，而不会信任补丁版激活状态。",
             )),
-            Some(language.text(
-                "Run `csa install` to rebuild and reactivate the patched Codex.",
-                "请运行 `csa install`，重新构建并激活补丁版 Codex。",
-            )),
+            Some(if remote_has_no_match {
+                no_match_hint
+            } else {
+                language.text(
+                    "Run `csa install` to rebuild and reactivate the patched Codex.",
+                    "请运行 `csa install`，重新构建并激活补丁版 Codex。",
+                )
+            }),
         )),
         _ => {
             incomplete = true;
@@ -1376,7 +1522,7 @@ fn doctor_assessment(
             Some(if status.state.is_some() {
                 activation_refresh_hint(language)
             } else {
-                language.text("Run `csa install`.", "请运行 `csa install`。")
+                install_hint
             }),
         ));
     } else if matches!(status.activation.status, "plugged" | "fallback") {
@@ -1799,7 +1945,7 @@ mod tests {
     use csa::detect::{FileFingerprint, OfficialCodex};
     use csa::i18n::Language;
     use csa::manager::{CompatibilityReport, DoctorReport, InstallEvent, StatusReport};
-    use csa::online::InstallCandidate;
+    use csa::online::{InstallCandidate, RemoteCompatibilityReport};
     use csa::state::PreparedState;
     use serde::Serialize;
     #[cfg(unix)]
@@ -1911,6 +2057,7 @@ mod tests {
                 resolves_to_managed_shim,
             },
             compatibility: None,
+            remote_compatibility: None,
         }
     }
 
@@ -1943,6 +2090,134 @@ mod tests {
         )
         .unwrap();
         (exit_code, String::from_utf8(output).unwrap())
+    }
+
+    #[test]
+    fn remote_human_report_shows_updates_and_no_match_without_install_hint() {
+        let mut report = doctor_fixture(true);
+        report.remote_compatibility = Some(RemoteCompatibilityReport {
+            status: "match",
+            repository: Some("DSLZL/CSA-codex".to_owned()),
+            artifact_target: "x86_64-pc-windows-msvc".to_owned(),
+            compat_ids: vec!["rust-v0.150.1-native-join-p15".to_owned()],
+            recommended_compat_id: Some("rust-v0.150.1-native-join-p15".to_owned()),
+            prepared_compat_id: Some("rust-v0.150.1-native-join-p14".to_owned()),
+            update_available: true,
+            latest_candidate: None,
+            official_version_relation: None,
+            source: Some("network"),
+            checked_at_unix_seconds: Some(1_790_417_600),
+        });
+        let prepared_status = status_fixture("prepared", "plugged", true, true);
+        let (english_exit, english) = render_doctor(&report, &prepared_status);
+        let (chinese_exit, chinese) =
+            render_doctor_in(&report, &prepared_status, Language::Chinese);
+        assert_eq!(english_exit, 0);
+        assert_eq!(chinese_exit, 0);
+        assert!(english.contains("PASS Remote compatibility:"));
+        assert!(chinese.contains("通过 远程兼容性:"));
+        assert!(english.contains("Update available"));
+        assert!(english.contains("p14"));
+        assert!(english.contains("p15"));
+        assert!(chinese.contains("可更新版本"));
+        assert!(chinese.contains("p14"));
+        assert!(chinese.contains("p15"));
+
+        report.remote_compatibility = Some(RemoteCompatibilityReport {
+            status: "none_for_version",
+            repository: Some("DSLZL/CSA-codex".to_owned()),
+            artifact_target: "x86_64-pc-windows-msvc".to_owned(),
+            compat_ids: Vec::new(),
+            recommended_compat_id: None,
+            prepared_compat_id: None,
+            update_available: false,
+            latest_candidate: Some(InstallCandidate {
+                repository: "DSLZL/CSA-codex".to_owned(),
+                compat_id: "rust-v0.152.0-native-join-p8".to_owned(),
+                codex_version: "0.152.0".to_owned(),
+                build_target: "x86_64-pc-windows-msvc".to_owned(),
+                patch_revision: 8,
+                recorded_on: "2026-09-26".to_owned(),
+                recommended: false,
+                release_tag: "compat-rust-v0.152.0-native-join-p8".to_owned(),
+                release_commit: "a".repeat(40),
+            }),
+            official_version_relation: Some("older"),
+            source: Some("cache"),
+            checked_at_unix_seconds: Some(1_790_417_600),
+        });
+        let unprepared_status = status_fixture("unprepared", "unplugged", false, false);
+        let (english_exit, english) = render_doctor(&report, &unprepared_status);
+        let (chinese_exit, chinese) =
+            render_doctor_in(&report, &unprepared_status, Language::Chinese);
+        assert_eq!(english_exit, 0);
+        assert_eq!(chinese_exit, 0);
+        assert!(english.contains("WARN Remote compatibility:"));
+        assert!(chinese.contains("警告 远程兼容性:"));
+        assert!(english.contains("0.152.0"));
+        assert!(english.contains("rust-v0.152.0-native-join-p8"));
+        assert!(english.contains("official version is older"));
+        assert!(!english.contains("csa install"));
+        assert!(chinese.contains("0.152.0"));
+        assert!(chinese.contains("rust-v0.152.0-native-join-p8"));
+        assert!(chinese.contains("当前官方版本较旧"));
+        assert!(!chinese.contains("csa install"));
+
+        report.official.version = "0.153.0".to_owned();
+        report
+            .remote_compatibility
+            .as_mut()
+            .unwrap()
+            .official_version_relation = Some("newer");
+        let (_, english) = render_doctor(&report, &unprepared_status);
+        let (_, chinese) = render_doctor_in(&report, &unprepared_status, Language::Chinese);
+        assert!(english.contains("official version is newer"));
+        assert!(chinese.contains("当前官方版本较新"));
+
+        let invalidated_status = status_fixture("invalidated", "fallback", false, true);
+        let (_, english) = render_doctor(&report, &invalidated_status);
+        let (_, chinese) = render_doctor_in(&report, &invalidated_status, Language::Chinese);
+        assert!(!english.contains("csa install"));
+        assert!(!chinese.contains("csa install"));
+    }
+
+    #[test]
+    fn remote_unreachable_is_warning_and_default_output_omits_remote_fields() {
+        let mut report = doctor_fixture(true);
+        let status = status_fixture("prepared", "plugged", true, true);
+        report.remote_compatibility = Some(RemoteCompatibilityReport {
+            status: "unreachable",
+            repository: None,
+            artifact_target: "x86_64-pc-windows-msvc".to_owned(),
+            compat_ids: Vec::new(),
+            recommended_compat_id: None,
+            prepared_compat_id: Some("rust-v0.150.1-native-join-p14".to_owned()),
+            update_available: false,
+            latest_candidate: None,
+            official_version_relation: None,
+            source: None,
+            checked_at_unix_seconds: None,
+        });
+        let (exit_code, english) = render_doctor(&report, &status);
+        let (_, chinese) = render_doctor_in(&report, &status, Language::Chinese);
+        assert_eq!(exit_code, 0);
+        assert!(english.contains("WARN Remote compatibility:"));
+        assert!(chinese.contains("警告 远程兼容性:"));
+        assert!(english.contains("remote compatibility could not be checked"));
+        assert!(chinese.contains("无法检查远程兼容性"));
+
+        let invalidated = status_fixture("invalidated", "fallback", false, true);
+        let (local_failure_exit, output) = render_doctor(&report, &invalidated);
+        assert_eq!(local_failure_exit, 1);
+        assert!(output.contains("WARN Remote compatibility:"));
+        assert!(output.contains("FAIL Prepared state:"));
+
+        report.remote_compatibility = None;
+        let (_, human) = render_doctor(&report, &status);
+        assert!(!human.contains("Remote compatibility"));
+        assert!(!human.contains("远程兼容性"));
+        let json = serde_json::to_value(&report).unwrap();
+        assert!(json.get("remote_compatibility").is_none());
     }
 
     #[test]

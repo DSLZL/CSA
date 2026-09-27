@@ -11,7 +11,7 @@ use std::path::PathBuf;
 pub const USAGE: &str = "\
 csa [--json] <command>
 
-csa doctor [--manager-root PATH] [--official PATH] [--official-native PATH] [--manifest PATH]
+csa doctor [--remote [--refresh]] [--manager-root PATH] [--official PATH] [--official-native PATH] [--manifest PATH]
 csa install [--yes] [--manager-root PATH] [--official PATH] [--official-native PATH] [--compat ID | --manifest PATH (--artifact PATH | --source PATH)]
 csa uninstall [--manager-root PATH]
 csa prepare [--manager-root PATH] [--official PATH] [--official-native PATH] --manifest PATH (--artifact PATH | --source PATH)
@@ -28,7 +28,7 @@ Global option: --json writes machine-readable output and may appear before or af
 pub const USAGE_ZH: &str = "\
 csa [--json] <命令>
 
-csa doctor [--manager-root PATH] [--official PATH] [--official-native PATH] [--manifest PATH]
+csa doctor [--remote [--refresh]] [--manager-root PATH] [--official PATH] [--official-native PATH] [--manifest PATH]
 csa install [--yes] [--manager-root PATH] [--official PATH] [--official-native PATH] [--compat ID | --manifest PATH (--artifact PATH | --source PATH)]
 csa uninstall [--manager-root PATH]
 csa prepare [--manager-root PATH] [--official PATH] [--official-native PATH] --manifest PATH (--artifact PATH | --source PATH)
@@ -241,8 +241,14 @@ fn parse_doctor(mut args: VecDeque<OsString>, explicit_json: &mut bool) -> Resul
     let mut official = None;
     let mut official_native = None;
     let mut manifest = None;
+    let mut remote = false;
+    let mut refresh = false;
     while let Some(flag) = args.pop_front() {
         match unicode_flag(&flag)? {
+            "--remote" if !remote => remote = true,
+            "--remote" => return Err(duplicate_flag("--remote")),
+            "--refresh" if !refresh => refresh = true,
+            "--refresh" => return Err(duplicate_flag("--refresh")),
             "--manager-root" => set_path(
                 &mut manager_root,
                 take_value(&mut args, "--manager-root")?,
@@ -268,11 +274,19 @@ fn parse_doctor(mut args: VecDeque<OsString>, explicit_json: &mut bool) -> Resul
             flag => return Err(unknown_flag(flag)),
         }
     }
+    if refresh && !remote {
+        return Err(ManagerError::new(
+            "invalid_cli",
+            "--refresh requires --remote",
+        ));
+    }
     Ok(Cli::Doctor(DoctorOptions {
         manager_root,
         official,
         official_native,
         manifest,
+        remote,
+        refresh,
     }))
 }
 
@@ -561,6 +575,21 @@ mod tests {
 
     fn parse(args: &[&str]) -> crate::error::Result<Cli> {
         Cli::parse(args.iter().map(OsString::from))
+    }
+
+    #[test]
+    fn doctor_remote_refresh_flags_have_strict_dependencies() {
+        let Cli::Doctor(options) = parse(&["doctor", "--remote", "--refresh"]).unwrap() else {
+            panic!("expected doctor")
+        };
+        assert!(options.remote);
+        assert!(options.refresh);
+        assert_eq!(
+            parse(&["doctor", "--refresh"]).unwrap_err().code,
+            "invalid_cli"
+        );
+        assert!(parse(&["doctor", "--remote", "--remote"]).is_err());
+        assert!(parse(&["doctor", "--remote", "--refresh", "--refresh"]).is_err());
     }
 
     #[test]

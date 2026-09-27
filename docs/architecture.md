@@ -92,7 +92,10 @@ Outside mainland China, CSA starts with GitHub directly. Connection, timeout, pr
 
 Region results and speed rankings are not stored in logs or Manager state. CSA does not send GitHub credentials to mirrors. Redirect hosts remain restricted, and every downloaded file must still pass Release size and checksum validation.
 
-## Preparation and activation
+## Read-only remote doctor diagnostics
+
+`csa doctor --remote` reads public refs and the install catalog from `DSLZL/CSA-codex`. It falls back to the legacy Manager repository when the primary catalog has no exact install match. A compatible Release is PASS; no match, an unavailable catalog, or an ambiguous maximum revision is WARN and cannot change the local failure rules or exit code. Verified catalog metadata is cached in the OS per-user cache directory under `remote-doctor` for one hour, outside the Manager tree; expired or invalid data is ignored, and refresh bypasses cache reads. This path does not write Manager state or download executable assets. The install path shares target and candidate selection logic and still performs full Release validation before downloading.
+
 
 Preparation runs before activation. It holds an exclusive Manager lock, stages files in a Manager-owned directory, and publishes state only after both the patched artifact and the official runtime fingerprints pass.
 

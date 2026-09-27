@@ -652,6 +652,8 @@ fn linux_real_runtime_discovery_and_shell_activation_contract() {
             official: Some(fixture.official.clone()),
             official_native: None,
             manifest: Some(fixture.manifest.clone()),
+            remote: false,
+            refresh: false,
         },
         &RealProcessRunner,
     )
@@ -683,6 +685,8 @@ fn linux_real_runtime_discovery_and_shell_activation_contract() {
             official: Some(fixture.official),
             official_native: None,
             manifest: None,
+            remote: false,
+            refresh: false,
         },
         &RealProcessRunner,
     )

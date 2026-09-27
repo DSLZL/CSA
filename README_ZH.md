@@ -106,9 +106,13 @@ eval (csa shell env fish)
 
 ```powershell
 csa doctor
+csa doctor --remote
+csa doctor --remote --refresh
 csa install
 csa status
 ```
+
+`doctor --remote` 会按已安装 Codex 版本和产物 target 检查公开兼容目录。找到兼容 Release 时显示 PASS；没有匹配项、无法检查或最高修订号并列时显示 WARN。目录缓存保存在操作系统的当前用户缓存目录中，有效期一小时，位于 `--manager-root` 之外；过期或无效缓存会被忽略。`--refresh` 跳过缓存，且必须与 `--remote` 一起使用。此检查不会下载 patched 可执行文件，也不会修改 Manager 安装状态。
 
 在交互式终端中，`install` 会先按当前 target 和官方 Codex 版本筛选 Release，再打开固定五行的选择器。可以使用方向键、翻页键、Home/End 或搜索，按 Enter 确认。Escape 或 Ctrl+C 会在下载大型可执行文件之前取消，并以状态码 130 退出。
 

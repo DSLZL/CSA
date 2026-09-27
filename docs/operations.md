@@ -283,7 +283,15 @@ csa status --json
 
 Human output leads with installed, active, and healthy conclusions. JSON includes full paths, hashes, runtime files, timestamps, and raw state.
 
-`doctor` is a read-only diagnosis. It exits 0 for PASS/WARN-only results, 1 for a fully diagnosed FAIL, and 2 when invalid input, I/O, corrupt state, or another error prevents a complete assessment.
+`doctor` is read-only. Add `--remote` to check the public compatibility catalog for the installed official Codex version:
+
+```powershell
+csa doctor --remote
+csa doctor --remote --refresh
+```
+
+Compatible metadata is reported as PASS. No matching Release, an ambiguous maximum revision, or an unavailable remote check is WARN and does not change the local failure rules or exit code. Verified catalog data is cached in the OS per-user cache directory, outside `--manager-root`, for one hour; expired or invalid data is ignored, and a failed request does not fall back to stale data. `--refresh` bypasses cache reads and requires `--remote`. The check downloads metadata only, does not change Manager state, and does not download a patched executable.
+
 
 See [CSA reference](reference.md) for every status and activation value.
 

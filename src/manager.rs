@@ -36,6 +36,8 @@ pub struct DoctorOptions {
     pub official: Option<PathBuf>,
     pub official_native: Option<PathBuf>,
     pub manifest: Option<PathBuf>,
+    pub remote: bool,
+    pub refresh: bool,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -46,6 +48,8 @@ pub struct DoctorReport {
     pub official: OfficialCodex,
     pub command_resolution: CommandResolution,
     pub compatibility: Option<CompatibilityReport>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub remote_compatibility: Option<crate::online::RemoteCompatibilityReport>,
 }
 
 #[derive(Clone, Debug, Serialize)]
@@ -247,6 +251,21 @@ pub fn doctor(options: DoctorOptions, runner: &dyn ProcessRunner) -> Result<Doct
                     .contains_key(selected_runtime_artifact_target()),
             }
         });
+    let prepared_compat_id = if options.remote {
+        prepared_compat_id(&paths)
+    } else {
+        None
+    };
+    let remote_compatibility = if options.remote {
+        Some(crate::online::diagnose_remote_compatibility(
+            &official.version,
+            BUILD_TARGET,
+            prepared_compat_id.as_deref(),
+            options.refresh,
+        ))
+    } else {
+        None
+    };
     Ok(DoctorReport {
         schema: 1,
         manager_root: paths.root,
@@ -254,7 +273,16 @@ pub fn doctor(options: DoctorOptions, runner: &dyn ProcessRunner) -> Result<Doct
         official,
         command_resolution,
         compatibility,
+        remote_compatibility,
     })
+}
+
+fn prepared_compat_id(paths: &ManagerPaths) -> Option<String> {
+    StateStore::new(paths)
+        .load()
+        .ok()
+        .flatten()
+        .map(|state| state.compat_id)
 }
 
 pub fn prepare(
@@ -1579,4 +1607,70 @@ fn captured_text(result: CommandResult, context: &str) -> Result<String> {
 
 fn os(value: impl AsRef<OsStr>) -> OsString {
     value.as_ref().to_os_string()
+}
+
+#[cfg(test)]
+mod doctor_remote_tests {
+    use super::prepared_compat_id;
+    use crate::detect::{FileFingerprint, OfficialCodex};
+    use crate::state::{ManagerPaths, PreparedState, StateStore};
+    use std::fs;
+    use std::path::PathBuf;
+    use std::sync::atomic::{AtomicU64, Ordering};
+
+    static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
+
+    #[test]
+    fn remote_prepared_id_comes_from_manager_state() {
+        let root = std::env::temp_dir().join(format!(
+            "csa-doctor-state-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let paths = ManagerPaths::resolve(Some(root.clone())).unwrap();
+        let state = PreparedState {
+            schema: 2,
+            compat_id: "rust-v0.150.1-native-join-p14".to_owned(),
+            manifest_path: PathBuf::from("/outside/diagnostic-manifest.toml"),
+            build_target: "x86_64-pc-windows-msvc".to_owned(),
+            manager_build_target: "x86_64-pc-windows-msvc".to_owned(),
+            artifact_path: PathBuf::from("/csa/artifact"),
+            artifact_sha256: "b".repeat(64),
+            artifact_size: 1,
+            official: OfficialCodex {
+                executable: FileFingerprint {
+                    path: PathBuf::from("/official/codex"),
+                    sha256: "a".repeat(64),
+                    size: 1,
+                },
+                version: "0.150.1".to_owned(),
+                native: None,
+                runtime: None,
+            },
+            prepared_at_unix_seconds: 1,
+        };
+        StateStore::new(&paths).save(&state).unwrap();
+
+        assert_eq!(
+            prepared_compat_id(&paths).as_deref(),
+            Some("rust-v0.150.1-native-join-p14")
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn remote_prepared_id_ignores_unreadable_manager_state() {
+        let root = std::env::temp_dir().join(format!(
+            "csa-doctor-invalid-state-{}-{}",
+            std::process::id(),
+            NEXT_TEMP.fetch_add(1, Ordering::Relaxed)
+        ));
+        fs::create_dir_all(&root).unwrap();
+        let paths = ManagerPaths::resolve(Some(root.clone())).unwrap();
+        fs::write(&paths.state, b"{ invalid json").unwrap();
+
+        assert_eq!(prepared_compat_id(&paths), None);
+        let _ = fs::remove_dir_all(root);
+    }
 }
