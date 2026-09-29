@@ -63,6 +63,12 @@ pub struct InstallCandidate {
     pub release_commit: String,
 }
 
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PreparedCompatibilityMetadata {
+    pub compat_id: String,
+    pub codex_version: Option<String>,
+}
+
 #[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
 pub struct RemoteCompatibilityReport {
     pub status: &'static str,
@@ -78,11 +84,11 @@ pub struct RemoteCompatibilityReport {
     pub checked_at_unix_seconds: Option<u64>,
 }
 
-pub fn remote_compatibility_report(
+fn remote_compatibility_report(
     candidates: &[InstallCandidate],
     official_version: &str,
     manager_target: &str,
-    prepared_compat_id: Option<&str>,
+    prepared: Option<&PreparedCompatibilityMetadata>,
 ) -> RemoteCompatibilityReport {
     let artifact_target = compatibility_artifact_target(manager_target);
     let matching = matching_install_candidates(candidates, official_version, manager_target);
@@ -108,12 +114,10 @@ pub fn remote_compatibility_report(
             artifact_target: artifact_target.to_owned(),
             compat_ids: ids,
             recommended_compat_id: recommended_id.clone(),
-            prepared_compat_id: prepared_compat_id.map(str::to_owned),
+            prepared_compat_id: prepared.map(|prepared| prepared.compat_id.clone()),
             update_available: status == "match"
-                && prepared_compat_id.is_some_and(|id| {
-                    recommended_id
-                        .as_deref()
-                        .is_some_and(|recommended| id != recommended)
+                && recommended.is_some_and(|recommended| {
+                    prepared_update_available(prepared, official_version, &matching, recommended)
                 }),
             latest_candidate: None,
             official_version_relation: None,
@@ -144,7 +148,7 @@ pub fn remote_compatibility_report(
         artifact_target: artifact_target.to_owned(),
         compat_ids: Vec::new(),
         recommended_compat_id: None,
-        prepared_compat_id: prepared_compat_id.map(str::to_owned),
+        prepared_compat_id: prepared.map(|prepared| prepared.compat_id.clone()),
         update_available: false,
         latest_candidate: latest,
         official_version_relation: relation,
@@ -153,9 +157,9 @@ pub fn remote_compatibility_report(
     }
 }
 
-pub fn unreachable_remote_report(
+fn unreachable_remote_report(
     manager_target: &str,
-    prepared_compat_id: Option<&str>,
+    prepared: Option<&PreparedCompatibilityMetadata>,
 ) -> RemoteCompatibilityReport {
     RemoteCompatibilityReport {
         status: "unreachable",
@@ -163,7 +167,7 @@ pub fn unreachable_remote_report(
         artifact_target: compatibility_artifact_target(manager_target).to_owned(),
         compat_ids: Vec::new(),
         recommended_compat_id: None,
-        prepared_compat_id: prepared_compat_id.map(str::to_owned),
+        prepared_compat_id: prepared.map(|prepared| prepared.compat_id.clone()),
         update_available: false,
         latest_candidate: None,
         official_version_relation: None,
@@ -172,7 +176,32 @@ pub fn unreachable_remote_report(
     }
 }
 
+fn prepared_update_available(
+    prepared: Option<&PreparedCompatibilityMetadata>,
+    official_version: &str,
+    matching: &[InstallCandidate],
+    recommended: &InstallCandidate,
+) -> bool {
+    let Some(prepared) = prepared else {
+        return false;
+    };
+    if prepared.compat_id == recommended.compat_id {
+        return false;
+    }
+    let Some(prepared_version) = prepared.codex_version.as_deref() else {
+        return false;
+    };
+    if prepared_version != official_version {
+        return true;
+    }
+    matching
+        .iter()
+        .find(|candidate| candidate.compat_id == prepared.compat_id)
+        .is_some_and(|candidate| candidate.patch_revision < recommended.patch_revision)
+}
+
 const REMOTE_DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_REGION_PROBE_TIMEOUT: Duration = Duration::from_millis(1_500);
 const REMOTE_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 
 trait RemoteMetadataSource {
@@ -259,10 +288,10 @@ fn select_detected_remote_route(
     }
 }
 
-pub fn diagnose_remote_compatibility(
+pub(crate) fn diagnose_remote_compatibility(
     official_version: &str,
     manager_target: &str,
-    prepared_compat_id: Option<&str>,
+    prepared: Option<&PreparedCompatibilityMetadata>,
     refresh: bool,
 ) -> RemoteCompatibilityReport {
     let mut source = GitHubRemoteMetadata::new();
@@ -271,7 +300,7 @@ pub fn diagnose_remote_compatibility(
     diagnose_remote_with_source(
         official_version,
         manager_target,
-        prepared_compat_id,
+        prepared,
         refresh,
         &mut source,
         cache_dir.as_deref(),
@@ -281,7 +310,7 @@ pub fn diagnose_remote_compatibility(
 fn diagnose_remote_with_source(
     official_version: &str,
     manager_target: &str,
-    prepared_compat_id: Option<&str>,
+    prepared: Option<&PreparedCompatibilityMetadata>,
     refresh: bool,
     source: &mut dyn RemoteMetadataSource,
     cache_dir: Option<&Path>,
@@ -289,7 +318,7 @@ fn diagnose_remote_with_source(
     diagnose_remote_with_deadline(
         official_version,
         manager_target,
-        prepared_compat_id,
+        prepared,
         refresh,
         source,
         cache_dir,
@@ -300,7 +329,7 @@ fn diagnose_remote_with_source(
 fn diagnose_remote_with_deadline(
     official_version: &str,
     manager_target: &str,
-    prepared_compat_id: Option<&str>,
+    prepared: Option<&PreparedCompatibilityMetadata>,
     refresh: bool,
     source: &mut dyn RemoteMetadataSource,
     cache_dir: Option<&Path>,
@@ -309,7 +338,7 @@ fn diagnose_remote_with_deadline(
     diagnose_remote_with_deadline_at(
         official_version,
         manager_target,
-        prepared_compat_id,
+        prepared,
         refresh,
         source,
         cache_dir,
@@ -329,7 +358,7 @@ struct RemoteDiagnosticTiming {
 fn diagnose_remote_with_deadline_at(
     official_version: &str,
     manager_target: &str,
-    prepared_compat_id: Option<&str>,
+    prepared: Option<&PreparedCompatibilityMetadata>,
     refresh: bool,
     source: &mut dyn RemoteMetadataSource,
     cache_dir: Option<&Path>,
@@ -346,12 +375,8 @@ fn diagnose_remote_with_deadline_at(
             .as_deref()
             .and_then(|path| read_remote_cache_at(path, manager_target, timing.now))
     {
-        let mut report = remote_compatibility_report(
-            &candidates,
-            official_version,
-            manager_target,
-            prepared_compat_id,
-        );
+        let mut report =
+            remote_compatibility_report(&candidates, official_version, manager_target, prepared);
         report.source = Some("cache");
         report.checked_at_unix_seconds = cache_path
             .as_deref()
@@ -369,14 +394,14 @@ fn diagnose_remote_with_deadline_at(
                 &candidates,
                 official_version,
                 manager_target,
-                prepared_compat_id,
+                prepared,
             );
             report.repository = Some(repository.to_owned());
             report.source = Some("network");
             report.checked_at_unix_seconds = system_time_unix_seconds(SystemTime::now());
             report
         }
-        _ => unreachable_remote_report(manager_target, prepared_compat_id),
+        _ => unreachable_remote_report(manager_target, prepared),
     }
 }
 
@@ -1926,16 +1951,23 @@ fn detect_github_route() -> Option<GitHubRoute> {
 }
 
 fn detect_github_route_until(deadline: Instant) -> Result<Option<GitHubRoute>> {
+    let probe_deadline = remote_region_probe_deadline(Instant::now(), deadline);
     let probes = std::thread::scope(|scope| {
-        let cloudflare = scope.spawn(|| detect_cloudflare_country_until(deadline));
-        let alibaba = scope.spawn(|| detect_alibaba_country_until(deadline));
+        let cloudflare = scope.spawn(|| detect_cloudflare_country_until(probe_deadline));
+        let alibaba = scope.spawn(|| detect_alibaba_country_until(probe_deadline));
         [
             cloudflare.join().ok().flatten(),
             alibaba.join().ok().flatten(),
         ]
     });
     remaining_deadline(deadline)?;
-    Ok(route_from_region_probes(probes))
+    Ok(Some(remote_route_from_region_probes(probes)))
+}
+
+fn remote_region_probe_deadline(start: Instant, overall_deadline: Instant) -> Instant {
+    start
+        .checked_add(REMOTE_REGION_PROBE_TIMEOUT)
+        .map_or(overall_deadline, |limit| limit.min(overall_deadline))
 }
 
 fn detect_cloudflare_country() -> Option<bool> {
@@ -2056,6 +2088,10 @@ fn route_from_region_probes(probes: [Option<bool>; 2]) -> Option<GitHubRoute> {
     } else {
         None
     }
+}
+
+fn remote_route_from_region_probes(probes: [Option<bool>; 2]) -> GitHubRoute {
+    route_from_region_probes(probes).unwrap_or(GitHubRoute::Direct)
 }
 
 fn routed_url(route: GitHubRoute, direct_url: &str) -> String {
@@ -2919,6 +2955,16 @@ mod tests {
         format!("rust-v{version}-{variant}-p{revision}")
     }
 
+    fn prepared_metadata(
+        compat_id: &str,
+        codex_version: Option<&str>,
+    ) -> PreparedCompatibilityMetadata {
+        PreparedCompatibilityMetadata {
+            compat_id: compat_id.to_owned(),
+            codex_version: codex_version.map(str::to_owned),
+        }
+    }
+
     #[test]
     fn remote_report_uses_install_selection_and_preserves_latest_candidate() {
         let target = "x86_64-unknown-linux-musl";
@@ -2930,7 +2976,10 @@ mod tests {
             &matching,
             "0.150.1",
             "x86_64-unknown-linux-gnu",
-            Some("rust-v0.150.1-native-join-p14"),
+            Some(&prepared_metadata(
+                "rust-v0.150.1-native-join-p14",
+                Some("0.150.1"),
+            )),
         );
         assert_eq!(report.status, "match");
         assert_eq!(report.artifact_target, target);
@@ -2977,7 +3026,10 @@ mod tests {
             &matching,
             "0.150.1",
             WINDOWS_TARGET,
-            Some("rust-v0.150.1-native-join-p15"),
+            Some(&prepared_metadata(
+                "rust-v0.150.1-native-join-p15",
+                Some("0.150.1"),
+            )),
         );
         assert_eq!(current.status, "match");
         assert!(!current.update_available);
@@ -2986,10 +3038,32 @@ mod tests {
             &matching,
             "0.150.1",
             WINDOWS_TARGET,
-            Some("rust-v0.150.1-native-join-p14"),
+            Some(&prepared_metadata(
+                "rust-v0.150.1-native-join-p14",
+                Some("0.150.1"),
+            )),
         );
         assert_eq!(newer_available.status, "match");
         assert!(newer_available.update_available);
+
+        let unknown_prepared_revision = remote_compatibility_report(
+            &matching,
+            "0.150.1",
+            WINDOWS_TARGET,
+            Some(&prepared_metadata("custom-local-build", Some("0.150.1"))),
+        );
+        assert!(!unknown_prepared_revision.update_available);
+
+        let different_prepared_official = remote_compatibility_report(
+            &matching,
+            "0.150.1",
+            WINDOWS_TARGET,
+            Some(&prepared_metadata(
+                "rust-v0.149.0-native-join-p20",
+                Some("0.149.0"),
+            )),
+        );
+        assert!(different_prepared_official.update_available);
 
         let latest = vec![candidate(
             "0.152.0",
@@ -3242,7 +3316,10 @@ mod tests {
         let report = diagnose_remote_with_deadline(
             "0.150.1",
             WINDOWS_TARGET,
-            Some("rust-v0.150.1-native-join-p14"),
+            Some(&prepared_metadata(
+                "rust-v0.150.1-native-join-p14",
+                Some("0.150.1"),
+            )),
             true,
             &mut slow_source,
             None,
@@ -3294,7 +3371,10 @@ mod tests {
         let report = diagnose_remote_with_source(
             "0.150.1",
             WINDOWS_TARGET,
-            Some("rust-v0.150.1-native-join-p14"),
+            Some(&prepared_metadata(
+                "rust-v0.150.1-native-join-p14",
+                Some("0.150.1"),
+            )),
             false,
             &mut original,
             Some(&directory.0),
@@ -3903,6 +3983,26 @@ mod tests {
         )
         .unwrap_err();
         assert_eq!(error.code, "network_error");
+    }
+
+    #[test]
+    fn remote_region_probes_use_a_short_deadline_and_fall_back_to_direct() {
+        let now = Instant::now();
+        let overall_deadline = now + Duration::from_secs(5);
+        assert_eq!(
+            remote_region_probe_deadline(now, overall_deadline),
+            now + REMOTE_REGION_PROBE_TIMEOUT
+        );
+
+        let short_overall_deadline = now + Duration::from_millis(500);
+        assert_eq!(
+            remote_region_probe_deadline(now, short_overall_deadline),
+            short_overall_deadline
+        );
+        assert_eq!(
+            remote_route_from_region_probes([None, None]),
+            GitHubRoute::Direct
+        );
     }
 
     #[test]

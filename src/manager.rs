@@ -13,8 +13,8 @@ use crate::error::{ManagerError, Result};
 use crate::hash::sha256_bytes;
 use crate::isolation::{IsolationPlan, IsolationRequest};
 use crate::online::{
-    InstallSelector, OnlineBundle, resolve_online_install_with_progress,
-    resolve_online_install_with_selector,
+    InstallSelector, OnlineBundle, PreparedCompatibilityMetadata,
+    resolve_online_install_with_progress, resolve_online_install_with_selector,
 };
 use crate::platform::{ensure_executable, selected_runtime_artifact_target};
 use crate::process::{CommandResult, CommandSpec, ProcessRunner};
@@ -251,8 +251,8 @@ pub fn doctor(options: DoctorOptions, runner: &dyn ProcessRunner) -> Result<Doct
                     .contains_key(selected_runtime_artifact_target()),
             }
         });
-    let prepared_compat_id = if options.remote {
-        prepared_compat_id(&paths)
+    let prepared_compatibility = if options.remote {
+        prepared_compatibility_metadata(&paths)
     } else {
         None
     };
@@ -260,7 +260,7 @@ pub fn doctor(options: DoctorOptions, runner: &dyn ProcessRunner) -> Result<Doct
         Some(crate::online::diagnose_remote_compatibility(
             &official.version,
             BUILD_TARGET,
-            prepared_compat_id.as_deref(),
+            prepared_compatibility.as_ref(),
             options.refresh,
         ))
     } else {
@@ -277,12 +277,19 @@ pub fn doctor(options: DoctorOptions, runner: &dyn ProcessRunner) -> Result<Doct
     })
 }
 
-fn prepared_compat_id(paths: &ManagerPaths) -> Option<String> {
-    StateStore::new(paths)
-        .load()
+fn prepared_compatibility_metadata(paths: &ManagerPaths) -> Option<PreparedCompatibilityMetadata> {
+    let state = StateStore::new(paths).load().ok().flatten()?;
+    let codex_version = load_prepared_runtime(&state, paths)
         .ok()
-        .flatten()
-        .map(|state| state.compat_id)
+        .filter(|manifest| {
+            manifest.compat_id == state.compat_id
+                && manifest.codex_version == state.official.version
+        })
+        .map(|manifest| manifest.codex_version);
+    Some(PreparedCompatibilityMetadata {
+        compat_id: state.compat_id,
+        codex_version,
+    })
 }
 
 pub fn prepare(
@@ -1611,7 +1618,8 @@ fn os(value: impl AsRef<OsStr>) -> OsString {
 
 #[cfg(test)]
 mod doctor_remote_tests {
-    use super::prepared_compat_id;
+    use super::prepared_compatibility_metadata;
+    use crate::compat::{RuntimeArtifact, RuntimeManifest};
     use crate::detect::{FileFingerprint, OfficialCodex};
     use crate::state::{ManagerPaths, PreparedState, StateStore};
     use std::fs;
@@ -1621,7 +1629,7 @@ mod doctor_remote_tests {
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
     #[test]
-    fn remote_prepared_id_comes_from_manager_state() {
+    fn remote_prepared_metadata_comes_from_manager_state_and_manifest() {
         let root = std::env::temp_dir().join(format!(
             "csa-doctor-state-{}-{}",
             std::process::id(),
@@ -1629,12 +1637,29 @@ mod doctor_remote_tests {
         ));
         fs::create_dir_all(&root).unwrap();
         let paths = ManagerPaths::resolve(Some(root.clone())).unwrap();
+        let compat_id = "rust-v0.150.1-native-join-p14";
+        let build_target = "x86_64-pc-windows-msvc";
+        let manifest_root = paths.manifests.join("_runtime").join(compat_id);
+        fs::create_dir_all(&manifest_root).unwrap();
+        let manifest_path = manifest_root.join(format!("{build_target}.toml"));
+        let manifest = RuntimeManifest::new(
+            compat_id.to_owned(),
+            "0.150.1".to_owned(),
+            build_target.to_owned(),
+            RuntimeArtifact {
+                filename: "codex.exe".to_owned(),
+                sha256: "a".repeat(64),
+                size: 1,
+            },
+        )
+        .unwrap();
+        fs::write(&manifest_path, toml::to_string(&manifest).unwrap()).unwrap();
         let state = PreparedState {
             schema: 2,
-            compat_id: "rust-v0.150.1-native-join-p14".to_owned(),
-            manifest_path: PathBuf::from("/outside/diagnostic-manifest.toml"),
-            build_target: "x86_64-pc-windows-msvc".to_owned(),
-            manager_build_target: "x86_64-pc-windows-msvc".to_owned(),
+            compat_id: compat_id.to_owned(),
+            manifest_path,
+            build_target: build_target.to_owned(),
+            manager_build_target: build_target.to_owned(),
             artifact_path: PathBuf::from("/csa/artifact"),
             artifact_sha256: "b".repeat(64),
             artifact_size: 1,
@@ -1652,10 +1677,9 @@ mod doctor_remote_tests {
         };
         StateStore::new(&paths).save(&state).unwrap();
 
-        assert_eq!(
-            prepared_compat_id(&paths).as_deref(),
-            Some("rust-v0.150.1-native-join-p14")
-        );
+        let prepared = prepared_compatibility_metadata(&paths).unwrap();
+        assert_eq!(prepared.compat_id, "rust-v0.150.1-native-join-p14");
+        assert_eq!(prepared.codex_version.as_deref(), Some("0.150.1"));
         let _ = fs::remove_dir_all(root);
     }
 
@@ -1670,7 +1694,7 @@ mod doctor_remote_tests {
         let paths = ManagerPaths::resolve(Some(root.clone())).unwrap();
         fs::write(&paths.state, b"{ invalid json").unwrap();
 
-        assert_eq!(prepared_compat_id(&paths), None);
+        assert_eq!(prepared_compatibility_metadata(&paths), None);
         let _ = fs::remove_dir_all(root);
     }
 }
