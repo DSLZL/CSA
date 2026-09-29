@@ -236,6 +236,7 @@ fn parse_install(mut args: VecDeque<OsString>, explicit_json: &mut bool) -> Resu
     Ok(Cli::Install { options, yes })
 }
 
+/// Parses doctor options, including remote checks and cache refresh.
 fn parse_doctor(mut args: VecDeque<OsString>, explicit_json: &mut bool) -> Result<Cli> {
     let mut manager_root = None;
     let mut official = None;
@@ -573,10 +574,12 @@ mod tests {
     use crate::i18n::Language;
     use std::ffi::OsString;
 
+    /// Parses string arguments into a CLI value for unit tests.
     fn parse(args: &[&str]) -> crate::error::Result<Cli> {
         Cli::parse(args.iter().map(OsString::from))
     }
 
+    /// Checks that refresh requires remote mode and invalid combinations are rejected.
     #[test]
     fn doctor_remote_refresh_flags_have_strict_dependencies() {
         let Cli::Doctor(options) = parse(&["doctor", "--remote", "--refresh"]).unwrap() else {

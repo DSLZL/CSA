@@ -84,6 +84,7 @@ pub struct RemoteCompatibilityReport {
     pub checked_at_unix_seconds: Option<u64>,
 }
 
+/// Compares target candidates with the official version and selects the install recommendation.
 fn remote_compatibility_report(
     candidates: &[InstallCandidate],
     official_version: &str,
@@ -157,6 +158,7 @@ fn remote_compatibility_report(
     }
 }
 
+/// Builds an unreachable report while preserving any known prepared metadata.
 fn unreachable_remote_report(
     manager_target: &str,
     prepared: Option<&PreparedCompatibilityMetadata>,
@@ -176,6 +178,7 @@ fn unreachable_remote_report(
     }
 }
 
+/// Reports an update only when the prepared release is known to be older.
 fn prepared_update_available(
     prepared: Option<&PreparedCompatibilityMetadata>,
     official_version: &str,
@@ -205,11 +208,13 @@ const REMOTE_REGION_PROBE_TIMEOUT: Duration = Duration::from_millis(1_500);
 const REMOTE_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
 
 trait RemoteMetadataSource {
+    /// Fetches repository refs from an injectable metadata source before the deadline.
     fn repository_refs(
         &mut self,
         repository: &'static str,
         deadline: Instant,
     ) -> Result<Option<BTreeMap<String, String>>>;
+    /// Fetches catalog bytes from an injectable metadata source before the deadline.
     fn catalog(
         &mut self,
         repository: &'static str,
@@ -224,6 +229,7 @@ struct GitHubRemoteMetadata {
 }
 
 impl GitHubRemoteMetadata {
+    /// Creates a remote metadata source with no client or route selected yet.
     fn new() -> Self {
         Self {
             route: None,
@@ -231,6 +237,7 @@ impl GitHubRemoteMetadata {
         }
     }
 
+    /// Reuses a repository client and selects a responsive proxy when needed.
     fn client(&mut self, repository: &'static str, deadline: Instant) -> Result<&GitHubClient> {
         if self.client.as_ref().map(|(current, _)| *current) != Some(repository) {
             if let Some((_, client)) = self.client.take() {
@@ -256,6 +263,7 @@ impl GitHubRemoteMetadata {
 }
 
 impl RemoteMetadataSource for GitHubRemoteMetadata {
+    /// Fetches refs through the selected GitHub client.
     fn repository_refs(
         &mut self,
         repository: &'static str,
@@ -265,6 +273,7 @@ impl RemoteMetadataSource for GitHubRemoteMetadata {
             .repository_refs_with_deadline(deadline)
     }
 
+    /// Fetches catalog bytes through the selected GitHub client.
     fn catalog(
         &mut self,
         repository: &'static str,
@@ -276,6 +285,7 @@ impl RemoteMetadataSource for GitHubRemoteMetadata {
     }
 }
 
+/// Keeps direct routing or selects a live proxy for a detected proxy route.
 fn select_detected_remote_route(
     detected: GitHubRoute,
     repository: &'static str,
@@ -288,6 +298,7 @@ fn select_detected_remote_route(
     }
 }
 
+/// Checks remote compatibility without downloading release executables.
 pub(crate) fn diagnose_remote_compatibility(
     official_version: &str,
     manager_target: &str,
@@ -307,6 +318,7 @@ pub(crate) fn diagnose_remote_compatibility(
     )
 }
 
+/// Runs remote discovery with the default five-second deadline.
 fn diagnose_remote_with_source(
     official_version: &str,
     manager_target: &str,
@@ -326,6 +338,7 @@ fn diagnose_remote_with_source(
     )
 }
 
+/// Runs remote discovery with a caller-provided deadline.
 fn diagnose_remote_with_deadline(
     official_version: &str,
     manager_target: &str,
@@ -355,6 +368,7 @@ struct RemoteDiagnosticTiming {
     now: SystemTime,
 }
 
+/// Uses cached candidates when valid, otherwise fetches and reports remote candidates.
 fn diagnose_remote_with_deadline_at(
     official_version: &str,
     manager_target: &str,
@@ -405,12 +419,14 @@ fn diagnose_remote_with_deadline_at(
     }
 }
 
+/// Converts a system time to Unix seconds when representable.
 fn system_time_unix_seconds(time: SystemTime) -> Option<u64> {
     time.duration_since(UNIX_EPOCH)
         .ok()
         .map(|age| age.as_secs())
 }
 
+/// Finds a matching repository catalog or retains the best target catalog for no-match reports.
 fn fetch_remote_candidates(
     source: &mut dyn RemoteMetadataSource,
     official_version: &str,
@@ -500,12 +516,14 @@ fn fetch_remote_candidates(
     Ok(latest_catalog)
 }
 
+/// Returns the highest official-version and patch-revision candidate.
 fn highest_catalog_candidate(candidates: &[InstallCandidate]) -> Option<&InstallCandidate> {
     candidates
         .iter()
         .max_by(|left, right| compare_catalog_candidates(left, right))
 }
 
+/// Orders catalog candidates by version, revision, then stable compatibility ID.
 fn compare_catalog_candidates(
     left: &InstallCandidate,
     right: &InstallCandidate,
@@ -513,6 +531,7 @@ fn compare_catalog_candidates(
     compare_catalog_revisions(left, right).then_with(|| right.compat_id.cmp(&left.compat_id))
 }
 
+/// Compares catalog candidates by official version and numeric patch revision.
 fn compare_catalog_revisions(
     left: &InstallCandidate,
     right: &InstallCandidate,
@@ -523,6 +542,7 @@ fn compare_catalog_revisions(
         .then_with(|| left.patch_revision.cmp(&right.patch_revision))
 }
 
+/// Returns time remaining or a diagnostic timeout when the deadline has passed.
 fn remaining_deadline(deadline: Instant) -> Result<Duration> {
     deadline
         .checked_duration_since(Instant::now())
@@ -535,6 +555,7 @@ fn remaining_deadline(deadline: Instant) -> Result<Duration> {
         })
 }
 
+/// Writes normalized candidates to a private cache using an atomic replacement.
 fn write_remote_cache(path: &Path, candidates: &[InstallCandidate]) {
     if candidates.is_empty() {
         return;
@@ -585,6 +606,7 @@ fn write_remote_cache(path: &Path, candidates: &[InstallCandidate]) {
     }
 }
 
+/// Creates a process-unique suffix for temporary cache files.
 fn cache_nonce() -> u128 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -593,6 +615,7 @@ fn cache_nonce() -> u128 {
         ^ u128::from(std::process::id())
 }
 
+/// Validates cached candidates against repository, target, identity, and date rules.
 fn valid_cached_candidates(candidates: &[InstallCandidate], manager_target: &str) -> bool {
     let target = compatibility_artifact_target(manager_target);
     let Some(repository) = candidates
@@ -628,11 +651,13 @@ fn valid_cached_candidates(candidates: &[InstallCandidate], manager_target: &str
     })
 }
 
+/// Reads a fresh, valid remote cache for the requested target.
 #[cfg(test)]
 fn read_remote_cache(path: &Path, manager_target: &str) -> Option<Vec<InstallCandidate>> {
     read_remote_cache_at(path, manager_target, SystemTime::now())
 }
 
+/// Reads and validates a remote cache at a supplied reference time.
 fn read_remote_cache_at(
     path: &Path,
     manager_target: &str,
@@ -662,6 +687,7 @@ fn read_remote_cache_at(
     valid_cached_candidates(&candidates, manager_target).then_some(candidates)
 }
 
+/// Creates the cache directory with user-only permissions where supported.
 fn ensure_private_cache_directory(path: &Path) -> io::Result<()> {
     #[cfg(unix)]
     {
@@ -694,6 +720,7 @@ fn ensure_private_cache_directory(path: &Path) -> io::Result<()> {
     Ok(())
 }
 
+/// Checks whether a cache directory has restrictive permissions.
 fn cache_directory_is_private(path: &Path) -> bool {
     let Ok(metadata) = fs::symlink_metadata(path) else {
         return false;
@@ -712,6 +739,7 @@ fn cache_directory_is_private(path: &Path) -> bool {
     }
 }
 
+/// Builds a cache identity from both artifact target and official version.
 fn cache_key(target: &str, official_version: &str) -> String {
     target
         .bytes()
@@ -1032,6 +1060,7 @@ fn discover_install_candidates(
     ))
 }
 
+/// Filters catalog entries by exact official version and target using install rules.
 fn install_candidates(
     catalog: InstallCatalog,
     official_version: &str,
@@ -1042,6 +1071,7 @@ fn install_candidates(
     matching_install_candidates(&candidates, official_version, manager_target)
 }
 
+/// Converts catalog entries for the requested artifact target into candidates.
 fn catalog_candidates_for_target(
     catalog: &InstallCatalog,
     manager_target: &str,
@@ -1066,6 +1096,7 @@ fn catalog_candidates_for_target(
         .collect()
 }
 
+/// Returns only candidates matching both official version and artifact target.
 fn matching_install_candidates(
     candidates: &[InstallCandidate],
     official_version: &str,
@@ -1439,6 +1470,7 @@ struct ProgressReader<'a, R> {
 }
 
 impl<R: Read> Read for ProgressReader<'_, R> {
+    /// Copies bytes while reporting download progress when a callback is configured.
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         let read = self.inner.read(buffer)?;
         if read != 0 {
@@ -1480,6 +1512,7 @@ impl GitHubClient {
         Self::with_route(repository, route)
     }
 
+    /// Creates a GitHub client using install's normal routing and timeout behavior.
     fn with_route(repository: &'static str, route: GitHubRoute) -> Self {
         let config = Agent::config_builder()
             .https_only(true)
@@ -1501,12 +1534,14 @@ impl GitHubClient {
         }
     }
 
+    /// Creates a GitHub client whose requests share the supplied diagnostic deadline.
     fn with_deadline(repository: &'static str, route: GitHubRoute, deadline: Instant) -> Self {
         let mut client = Self::with_route(repository, route);
         client.deadline = Some(deadline);
         client
     }
 
+    /// Reads public Git refs with the diagnostic request deadline.
     fn repository_refs_with_deadline(
         &self,
         deadline: Instant,
@@ -1516,6 +1551,7 @@ impl GitHubClient {
         Ok(refs)
     }
 
+    /// Reads a tagged install catalog with the diagnostic request deadline.
     fn read_catalog_bytes_with_deadline(
         &self,
         release_tag: &str,
@@ -1778,6 +1814,7 @@ impl GitHubClient {
         true
     }
 
+    /// Tries the configured GitHub route and applies the direct-to-proxy fallback policy.
     fn get_response(
         &self,
         direct_url: &str,
@@ -1833,6 +1870,7 @@ impl GitHubClient {
         }
     }
 
+    /// Tries proxy routes in order and returns the first valid response.
     fn request_from_proxy_pool(
         &self,
         first: usize,
@@ -1881,6 +1919,7 @@ impl GitHubClient {
         ))
     }
 
+    /// Sends one request through a selected route while enforcing its remaining time.
     fn request_on_route(
         &self,
         route: GitHubRoute,
@@ -1914,6 +1953,7 @@ impl GitHubClient {
         }
     }
 
+    /// Builds and sends an HTTP request using the configured agent.
     fn request_with_agent(
         agent: &Agent,
         url: &str,
@@ -1931,6 +1971,7 @@ impl GitHubClient {
     }
 }
 
+/// Creates the stable timeout error used by remote diagnostics.
 fn remote_diagnostic_timeout() -> ManagerError {
     ManagerError::new(
         "remote_diagnostic_timeout",
@@ -1950,6 +1991,7 @@ fn detect_github_route() -> Option<GitHubRoute> {
     route_from_region_probes(probes)
 }
 
+/// Detects the region with a short probe deadline and defaults to direct routing.
 fn detect_github_route_until(deadline: Instant) -> Result<Option<GitHubRoute>> {
     let probe_deadline = remote_region_probe_deadline(Instant::now(), deadline);
     let probes = std::thread::scope(|scope| {
@@ -1964,6 +2006,7 @@ fn detect_github_route_until(deadline: Instant) -> Result<Option<GitHubRoute>> {
     Ok(Some(remote_route_from_region_probes(probes)))
 }
 
+/// Caps the region-probe deadline at both its short limit and the overall deadline.
 fn remote_region_probe_deadline(start: Instant, overall_deadline: Instant) -> Instant {
     start
         .checked_add(REMOTE_REGION_PROBE_TIMEOUT)
@@ -1975,6 +2018,7 @@ fn detect_cloudflare_country() -> Option<bool> {
     country_from_cloudflare_trace(&bytes)
 }
 
+/// Reads Cloudflare's country result before the supplied deadline.
 fn detect_cloudflare_country_until(deadline: Instant) -> Option<bool> {
     let timeout = remaining_deadline(deadline).ok()?;
     let bytes = read_region_response_with_timeout(
@@ -1991,6 +2035,7 @@ fn detect_alibaba_country() -> Option<bool> {
     country_from_alibaba_region(&bytes)
 }
 
+/// Reads Alibaba's country result before the supplied deadline.
 fn detect_alibaba_country_until(deadline: Instant) -> Option<bool> {
     let timeout = remaining_deadline(deadline).ok()?;
     let bytes = read_region_response_with_timeout(
@@ -2002,10 +2047,12 @@ fn detect_alibaba_country_until(deadline: Instant) -> Option<bool> {
     country_from_alibaba_region(&bytes)
 }
 
+/// Reads a region response using the standard non-diagnostic timeout.
 fn read_region_response(url: &str, accept: &str, allowed_hosts: &[&str]) -> Option<Vec<u8>> {
     read_region_response_with_timeout(url, accept, allowed_hosts, Duration::from_secs(5))
 }
 
+/// Fetches a bounded region response and validates its final host.
 fn read_region_response_with_timeout(
     url: &str,
     accept: &str,
@@ -2090,6 +2137,7 @@ fn route_from_region_probes(probes: [Option<bool>; 2]) -> Option<GitHubRoute> {
     }
 }
 
+/// Uses the detected route, or direct routing when both region probes fail.
 fn remote_route_from_region_probes(probes: [Option<bool>; 2]) -> GitHubRoute {
     route_from_region_probes(probes).unwrap_or(GitHubRoute::Direct)
 }
@@ -2227,10 +2275,12 @@ fn select_proxy_index(repository: &'static str) -> usize {
     receiver.recv_timeout(Duration::from_secs(4)).unwrap_or(0)
 }
 
+/// Selects a responsive proxy before the diagnostic deadline.
 fn select_proxy_index_until(repository: &'static str, deadline: Instant) -> Result<usize> {
     select_proxy_index_until_with(repository, deadline, proxy_responds_until)
 }
 
+/// Probes proxy routes concurrently and returns a responsive route or an error.
 fn select_proxy_index_until_with(
     repository: &'static str,
     deadline: Instant,
@@ -2263,16 +2313,19 @@ fn select_proxy_index_until_with(
     Ok(selected)
 }
 
+/// Checks proxy responsiveness with the normal probe timeout.
 fn proxy_responds(index: usize, repository: &str) -> bool {
     proxy_responds_with_timeout(index, repository, Duration::from_secs(4))
 }
 
+/// Checks proxy responsiveness using only the remaining diagnostic time.
 fn proxy_responds_until(index: usize, repository: &'static str, deadline: Instant) -> bool {
     remaining_deadline(deadline)
         .ok()
         .is_some_and(|timeout| proxy_responds_with_timeout(index, repository, timeout))
 }
 
+/// Probes a proxy with bounded connect, response, and total timeouts.
 fn proxy_responds_with_timeout(index: usize, repository: &str, timeout: Duration) -> bool {
     let config = Agent::config_builder()
         .https_only(true)
@@ -2802,6 +2855,7 @@ fn validate_sha256(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Maps a GitHub request failure to a stable manager error code.
 fn network_error(context: &str, error: impl std::fmt::Display) -> ManagerError {
     ManagerError::new("network_error", format!("{context}: {error}"))
 }
@@ -2826,6 +2880,7 @@ mod tests {
     }
 
     impl RemoteMetadataSource for FixtureSource {
+        /// Returns fixture refs for a repository and records the request.
         fn repository_refs(
             &mut self,
             repository: &'static str,
@@ -2838,6 +2893,7 @@ mod tests {
             Ok(self.refs.get(repository).cloned().flatten())
         }
 
+        /// Returns fixture catalog bytes for a tag and records the request.
         fn catalog(
             &mut self,
             repository: &'static str,
@@ -2859,6 +2915,7 @@ mod tests {
     struct TestTempDir(PathBuf);
 
     impl TestTempDir {
+        /// Creates an empty fixture metadata source.
         fn new() -> Self {
             let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
             let path =
@@ -2869,11 +2926,13 @@ mod tests {
     }
 
     impl Drop for TestTempDir {
+        /// Removes the temporary test directory when its fixture is dropped.
         fn drop(&mut self) {
             let _ = fs::remove_dir_all(&self.0);
         }
     }
 
+    /// Builds a valid install candidate fixture from a version, ID, and target.
     fn candidate(version: &str, compat_id: &str, target: &str) -> InstallCandidate {
         let revision = patch_revision(compat_id).unwrap();
         InstallCandidate {
@@ -2889,6 +2948,7 @@ mod tests {
         }
     }
 
+    /// Adds a catalog and matching refs to a fixture metadata source.
     fn add_catalog(
         source: &mut FixtureSource,
         repository: &'static str,
@@ -2951,10 +3011,12 @@ mod tests {
         refs
     }
 
+    /// Formats a compatibility ID with the requested numeric revision.
     fn release_id(version: &str, revision: u64, variant: &str) -> String {
         format!("rust-v{version}-{variant}-p{revision}")
     }
 
+    /// Builds prepared compatibility metadata for remote-report tests.
     fn prepared_metadata(
         compat_id: &str,
         codex_version: Option<&str>,
@@ -2965,6 +3027,7 @@ mod tests {
         }
     }
 
+    /// Checks that report selection follows install rules and retains the latest candidate.
     #[test]
     fn remote_report_uses_install_selection_and_preserves_latest_candidate() {
         let target = "x86_64-unknown-linux-musl";
@@ -3008,6 +3071,7 @@ mod tests {
         assert_eq!(latest.patch_revision, 8);
     }
 
+    /// Covers installed, unprepared, outdated, unknown-revision, and version-mismatch cases.
     #[test]
     fn remote_report_covers_current_match_and_both_version_relations() {
         let matching = vec![
@@ -3088,6 +3152,7 @@ mod tests {
         assert_eq!(official_is_newer.official_version_relation, Some("newer"));
     }
 
+    /// Checks that doctor and install select the same candidates and recommendation.
     #[test]
     fn doctor_and_install_share_catalog_target_and_version_selection() {
         let manager_target = "x86_64-unknown-linux-gnu";
@@ -3163,6 +3228,7 @@ mod tests {
         );
     }
 
+    /// Checks that equal maximum revisions report install's ambiguity status.
     #[test]
     fn remote_revision_ties_are_reported_as_install_ambiguity() {
         let candidates = vec![
@@ -3178,6 +3244,7 @@ mod tests {
         assert_eq!(report.recommended_compat_id, None);
     }
 
+    /// Checks discovery falls back when the primary catalog lacks the official version.
     #[test]
     fn remote_discovery_falls_back_after_a_catalog_without_the_official_version() {
         let mut source = FixtureSource::default();
@@ -3209,6 +3276,7 @@ mod tests {
         );
     }
 
+    /// Checks no-match reports retain the highest candidate across repositories.
     #[test]
     fn remote_no_match_keeps_the_highest_catalog_across_repository_fallbacks() {
         let official = "0.160.0";
@@ -3276,6 +3344,7 @@ mod tests {
         );
     }
 
+    /// Checks legacy discovery can use the bundled bootstrap catalog.
     #[test]
     fn remote_legacy_discovery_uses_the_install_bootstrap_catalog() {
         let catalog: InstallCatalog = serde_json::from_str(INSTALL_CATALOG_BOOTSTRAP).unwrap();
@@ -3306,6 +3375,7 @@ mod tests {
         assert!(!source.catalog_requests.is_empty());
     }
 
+    /// Checks timeouts and invalid catalog data become unreachable reports.
     #[test]
     fn remote_timeout_and_invalid_catalogs_fail_as_unreachable() {
         let mut slow_source = FixtureSource {
@@ -3355,6 +3425,7 @@ mod tests {
         assert_eq!(report.status, "unreachable");
     }
 
+    /// Covers cache hits, expiry, refresh, replacement, and version-specific identity.
     #[test]
     fn remote_cache_is_private_validated_refreshable_and_replaced() {
         let directory = TestTempDir::new();
@@ -3493,6 +3564,7 @@ mod tests {
         );
     }
 
+    /// Checks malformed and oversized cache entries are ignored.
     #[test]
     fn malformed_or_oversized_remote_cache_is_ignored() {
         let directory = TestTempDir::new();
@@ -3924,6 +3996,7 @@ mod tests {
         assert!(!client.proxy_order.borrow().contains(&2));
     }
 
+    /// Simulates a slow first proxy while a later proxy responds.
     fn delayed_first_proxy_with_healthy_second(
         index: usize,
         _repository: &'static str,
@@ -3936,10 +4009,12 @@ mod tests {
         index == 1 && remaining_deadline(deadline).is_ok()
     }
 
+    /// Simulates a proxy pool where every route is unavailable.
     fn no_proxy_responds(_index: usize, _repository: &'static str, _deadline: Instant) -> bool {
         false
     }
 
+    /// Selects a test proxy through the injected proxy probe.
     fn select_test_proxy_route(repository: &'static str, deadline: Instant) -> Result<usize> {
         select_proxy_index_until_with(
             repository,
@@ -3948,10 +4023,12 @@ mod tests {
         )
     }
 
+    /// Fails the test if direct routing unexpectedly probes the proxy pool.
     fn unexpected_proxy_selection(_repository: &'static str, _deadline: Instant) -> Result<usize> {
         panic!("direct route must not select a proxy")
     }
 
+    /// Checks remote initialization selects a healthy proxy before creating a client.
     #[test]
     fn remote_cn_route_selects_a_healthy_proxy_before_creating_the_client() {
         let deadline = Instant::now() + Duration::from_secs(2);
@@ -3974,6 +4051,7 @@ mod tests {
         assert_eq!(direct, GitHubRoute::Direct);
     }
 
+    /// Checks proxy selection fails instead of defaulting to a dead first route.
     #[test]
     fn remote_proxy_selection_fails_when_no_route_responds() {
         let error = select_proxy_index_until_with(
@@ -3985,6 +4063,7 @@ mod tests {
         assert_eq!(error.code, "network_error");
     }
 
+    /// Checks region probes are bounded and missing results fall back to direct.
     #[test]
     fn remote_region_probes_use_a_short_deadline_and_fall_back_to_direct() {
         let now = Instant::now();
@@ -4105,6 +4184,7 @@ mod tests {
         format!("{:04x}{payload}", payload.len() + 4).into_bytes()
     }
 
+    /// Checks release bodies remain readable within the configured global timeout.
     #[test]
     fn github_client_allows_large_release_bodies_within_global_timeout() {
         let timeouts = GitHubClient::with_route(LEGACY_COMPAT_REPOSITORY, GitHubRoute::Direct)

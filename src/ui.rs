@@ -1084,6 +1084,7 @@ fn status_view(report: &StatusReport, language: Language) -> StatusView {
     }
 }
 
+/// Evaluates doctor checks and derives the remote compatibility assessment.
 fn doctor_assessment(
     report: &DoctorReport,
     status: &StatusReport,
@@ -1913,6 +1914,7 @@ impl HumanReport for StatusReport {
     }
 }
 
+/// Writes the localized resolution detail for one doctor check.
 fn write_resolution(
     writer: &mut dyn Write,
     language: Language,
@@ -2041,6 +2043,7 @@ mod tests {
         }
     }
 
+    /// Builds a stable doctor report fixture for rendering tests.
     fn doctor_fixture(resolves_to_managed_shim: bool) -> DoctorReport {
         DoctorReport {
             schema: 1,
@@ -2075,6 +2078,7 @@ mod tests {
         render_doctor_in(report, status, Language::English)
     }
 
+    /// Renders a doctor report in the selected language for tests.
     fn render_doctor_in(
         report: &DoctorReport,
         status: &StatusReport,
@@ -2092,6 +2096,7 @@ mod tests {
         (exit_code, String::from_utf8(output).unwrap())
     }
 
+    /// Checks localized output explains remote updates and no-match guidance.
     #[test]
     fn remote_human_report_shows_updates_and_no_match_without_install_hint() {
         let mut report = doctor_fixture(true);
@@ -2181,6 +2186,7 @@ mod tests {
         assert!(!chinese.contains("csa install"));
     }
 
+    /// Checks unreachable remote results warn without changing default output.
     #[test]
     fn remote_unreachable_is_warning_and_default_output_omits_remote_fields() {
         let mut report = doctor_fixture(true);

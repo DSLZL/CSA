@@ -635,6 +635,7 @@ fn official_runtime_is_discovered_from_the_launcher_and_requires_all_helpers() {
     assert!(!overlap_root.join("state.json").exists());
 }
 
+/// Verifies Linux runtime discovery and shell activation behavior.
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_real_runtime_discovery_and_shell_activation_contract() {

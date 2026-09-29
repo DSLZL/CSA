@@ -222,6 +222,7 @@ impl ArtifactProvider for OfflineArtifactProvider {
     }
 }
 
+/// Builds the local doctor report and optionally adds remote compatibility findings.
 pub fn doctor(options: DoctorOptions, runner: &dyn ProcessRunner) -> Result<DoctorReport> {
     let paths = ManagerPaths::resolve(options.manager_root)?;
     let path_value = std::env::var_os("PATH");
@@ -277,6 +278,7 @@ pub fn doctor(options: DoctorOptions, runner: &dyn ProcessRunner) -> Result<Doct
     })
 }
 
+/// Reads the prepared ID and version from manager state and its runtime manifest.
 fn prepared_compatibility_metadata(paths: &ManagerPaths) -> Option<PreparedCompatibilityMetadata> {
     let state = StateStore::new(paths).load().ok().flatten()?;
     let codex_version = load_prepared_runtime(&state, paths)
@@ -1612,6 +1614,7 @@ fn captured_text(result: CommandResult, context: &str) -> Result<String> {
         .map_err(|_| ManagerError::new("invalid_command_output", format!("{context} is not UTF-8")))
 }
 
+/// Converts a path-like value into an owned operating-system string.
 fn os(value: impl AsRef<OsStr>) -> OsString {
     value.as_ref().to_os_string()
 }
@@ -1628,6 +1631,7 @@ mod doctor_remote_tests {
 
     static NEXT_TEMP: AtomicU64 = AtomicU64::new(0);
 
+    /// Checks that remote diagnostics use the installed manifest rather than a diagnostic manifest.
     #[test]
     fn remote_prepared_metadata_comes_from_manager_state_and_manifest() {
         let root = std::env::temp_dir().join(format!(
@@ -1683,6 +1687,7 @@ mod doctor_remote_tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    /// Checks that unreadable manager state does not produce prepared compatibility metadata.
     #[test]
     fn remote_prepared_id_ignores_unreadable_manager_state() {
         let root = std::env::temp_dir().join(format!(
