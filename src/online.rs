@@ -7,15 +7,16 @@ use crate::manager::{InstallEvent, OnlineInstallOptions};
 use crate::platform::{ensure_executable, runtime_artifact_target};
 use crate::process::ProcessRunner;
 use crate::state::{ManagerPaths, ensure_managed_directory, remove_managed_tree};
+use directories::ProjectDirs;
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet};
-use std::fs::{self, OpenOptions};
+use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
 use std::path::{Path, PathBuf};
 use std::sync::mpsc;
-use std::time::{Duration, Instant};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 use ureq::{Agent, ResponseExt};
 
 const OPENAI_REPOSITORY: &str = "openai/codex";
@@ -41,13 +42,15 @@ const MAX_REGION_TRACE_BYTES: u64 = 8 * 1024;
 const MAX_GIT_REFS_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_RELEASE_FILE_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_INSTALL_CATALOG_BYTES: u64 = 1024 * 1024;
+const MAX_REMOTE_CACHE_BYTES: u64 = 2 * 1024 * 1024;
 const MAX_ARTIFACT_BYTES: u64 = 1024 * 1024 * 1024;
 const GH_PROXY_SAMPLE_BYTES: u64 = 256 * 1024;
 const GH_PROXY_SAMPLE_TIMEOUT: Duration = Duration::from_secs(3);
 const MAX_COMPATIBILITY_TAGS: usize = 1_000;
 const MAX_INSTALL_CATALOG_PROBES: usize = 16;
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
 pub struct InstallCandidate {
     pub repository: String,
     pub compat_id: String,
@@ -58,6 +61,694 @@ pub struct InstallCandidate {
     pub recommended: bool,
     pub release_tag: String,
     pub release_commit: String,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub(crate) struct PreparedCompatibilityMetadata {
+    pub compat_id: String,
+    pub codex_version: Option<String>,
+}
+
+#[derive(Clone, Debug, Eq, PartialEq, serde::Serialize)]
+pub struct RemoteCompatibilityReport {
+    pub status: &'static str,
+    pub repository: Option<String>,
+    pub artifact_target: String,
+    pub compat_ids: Vec<String>,
+    pub recommended_compat_id: Option<String>,
+    pub prepared_compat_id: Option<String>,
+    pub update_available: bool,
+    pub latest_candidate: Option<InstallCandidate>,
+    pub official_version_relation: Option<&'static str>,
+    pub source: Option<&'static str>,
+    pub checked_at_unix_seconds: Option<u64>,
+}
+
+/// Compares target candidates with the official version and selects the install recommendation.
+fn remote_compatibility_report(
+    candidates: &[InstallCandidate],
+    official_version: &str,
+    manager_target: &str,
+    prepared: Option<&PreparedCompatibilityMetadata>,
+) -> RemoteCompatibilityReport {
+    let artifact_target = compatibility_artifact_target(manager_target);
+    let matching = matching_install_candidates(candidates, official_version, manager_target);
+    if !matching.is_empty() {
+        let selection = select_automatic(&matching);
+        let (status, recommended) = match selection {
+            Ok(index) => ("match", Some(&matching[index])),
+            Err(error) if error.code == "ambiguous_compatibility_revision" => {
+                ("ambiguous_compatibility_revision", None)
+            }
+            Err(_) => ("none_for_version", None),
+        };
+        let ids = matching
+            .iter()
+            .map(|candidate| candidate.compat_id.clone())
+            .collect();
+        let recommended_id = recommended.map(|candidate| candidate.compat_id.clone());
+        return RemoteCompatibilityReport {
+            status,
+            repository: matching
+                .first()
+                .map(|candidate| candidate.repository.clone()),
+            artifact_target: artifact_target.to_owned(),
+            compat_ids: ids,
+            recommended_compat_id: recommended_id.clone(),
+            prepared_compat_id: prepared.map(|prepared| prepared.compat_id.clone()),
+            update_available: status == "match"
+                && recommended.is_some_and(|recommended| {
+                    prepared_update_available(prepared, official_version, &matching, recommended)
+                }),
+            latest_candidate: None,
+            official_version_relation: None,
+            source: None,
+            checked_at_unix_seconds: None,
+        };
+    }
+    let latest = candidates
+        .iter()
+        .filter(|candidate| candidate.build_target == artifact_target)
+        .max_by(|left, right| compare_catalog_candidates(left, right))
+        .cloned();
+    let relation = latest.as_ref().and_then(|candidate| {
+        match (
+            version_key(official_version).ok()?,
+            version_key(&candidate.codex_version).ok()?,
+        ) {
+            (official, latest) if official < latest => Some("older"),
+            (official, latest) if official > latest => Some("newer"),
+            _ => Some("same"),
+        }
+    });
+    RemoteCompatibilityReport {
+        status: "none_for_version",
+        repository: candidates
+            .first()
+            .map(|candidate| candidate.repository.clone()),
+        artifact_target: artifact_target.to_owned(),
+        compat_ids: Vec::new(),
+        recommended_compat_id: None,
+        prepared_compat_id: prepared.map(|prepared| prepared.compat_id.clone()),
+        update_available: false,
+        latest_candidate: latest,
+        official_version_relation: relation,
+        source: None,
+        checked_at_unix_seconds: None,
+    }
+}
+
+/// Builds an unreachable report while preserving any known prepared metadata.
+fn unreachable_remote_report(
+    manager_target: &str,
+    prepared: Option<&PreparedCompatibilityMetadata>,
+) -> RemoteCompatibilityReport {
+    RemoteCompatibilityReport {
+        status: "unreachable",
+        repository: None,
+        artifact_target: compatibility_artifact_target(manager_target).to_owned(),
+        compat_ids: Vec::new(),
+        recommended_compat_id: None,
+        prepared_compat_id: prepared.map(|prepared| prepared.compat_id.clone()),
+        update_available: false,
+        latest_candidate: None,
+        official_version_relation: None,
+        source: None,
+        checked_at_unix_seconds: None,
+    }
+}
+
+/// Reports an update only when the prepared release is known to be older.
+fn prepared_update_available(
+    prepared: Option<&PreparedCompatibilityMetadata>,
+    official_version: &str,
+    matching: &[InstallCandidate],
+    recommended: &InstallCandidate,
+) -> bool {
+    let Some(prepared) = prepared else {
+        return false;
+    };
+    if prepared.compat_id == recommended.compat_id {
+        return false;
+    }
+    let Some(prepared_version) = prepared.codex_version.as_deref() else {
+        return false;
+    };
+    if prepared_version != official_version {
+        return true;
+    }
+    matching
+        .iter()
+        .find(|candidate| candidate.compat_id == prepared.compat_id)
+        .is_some_and(|candidate| candidate.patch_revision < recommended.patch_revision)
+}
+
+const REMOTE_DIAGNOSTIC_TIMEOUT: Duration = Duration::from_secs(5);
+const REMOTE_REGION_PROBE_TIMEOUT: Duration = Duration::from_millis(1_500);
+const REMOTE_CACHE_TTL: Duration = Duration::from_secs(60 * 60);
+
+trait RemoteMetadataSource {
+    /// Fetches repository refs from an injectable metadata source before the deadline.
+    fn repository_refs(
+        &mut self,
+        repository: &'static str,
+        deadline: Instant,
+    ) -> Result<Option<BTreeMap<String, String>>>;
+    /// Fetches catalog bytes from an injectable metadata source before the deadline.
+    fn catalog(
+        &mut self,
+        repository: &'static str,
+        tag: &str,
+        deadline: Instant,
+    ) -> Result<Option<Vec<u8>>>;
+}
+
+struct GitHubRemoteMetadata {
+    route: Option<GitHubRoute>,
+    client: Option<(&'static str, GitHubClient)>,
+}
+
+impl GitHubRemoteMetadata {
+    /// Creates a remote metadata source with no client or route selected yet.
+    fn new() -> Self {
+        Self {
+            route: None,
+            client: None,
+        }
+    }
+
+    /// Reuses a repository client and selects a responsive proxy when needed.
+    fn client(&mut self, repository: &'static str, deadline: Instant) -> Result<&GitHubClient> {
+        if self.client.as_ref().map(|(current, _)| *current) != Some(repository) {
+            if let Some((_, client)) = self.client.take() {
+                self.route = Some(client.route.get());
+            }
+            let route = match self.route {
+                Some(route) => route,
+                None => select_detected_remote_route(
+                    detect_github_route_until(deadline)?.unwrap_or(GitHubRoute::Direct),
+                    repository,
+                    deadline,
+                    select_proxy_index_until,
+                )?,
+            };
+            self.route = Some(route);
+            self.client = Some((
+                repository,
+                GitHubClient::with_deadline(repository, route, deadline),
+            ));
+        }
+        Ok(&self.client.as_ref().expect("client was initialized").1)
+    }
+}
+
+impl RemoteMetadataSource for GitHubRemoteMetadata {
+    /// Fetches refs through the selected GitHub client.
+    fn repository_refs(
+        &mut self,
+        repository: &'static str,
+        deadline: Instant,
+    ) -> Result<Option<BTreeMap<String, String>>> {
+        self.client(repository, deadline)?
+            .repository_refs_with_deadline(deadline)
+    }
+
+    /// Fetches catalog bytes through the selected GitHub client.
+    fn catalog(
+        &mut self,
+        repository: &'static str,
+        tag: &str,
+        deadline: Instant,
+    ) -> Result<Option<Vec<u8>>> {
+        self.client(repository, deadline)?
+            .read_catalog_bytes_with_deadline(tag, deadline)
+    }
+}
+
+/// Keeps direct routing or selects a live proxy for a detected proxy route.
+fn select_detected_remote_route(
+    detected: GitHubRoute,
+    repository: &'static str,
+    deadline: Instant,
+    select_proxy: fn(&'static str, Instant) -> Result<usize>,
+) -> Result<GitHubRoute> {
+    match detected {
+        GitHubRoute::Proxy(_) => Ok(GitHubRoute::Proxy(select_proxy(repository, deadline)?)),
+        GitHubRoute::Direct => Ok(GitHubRoute::Direct),
+    }
+}
+
+/// Checks remote compatibility without downloading release executables.
+pub(crate) fn diagnose_remote_compatibility(
+    official_version: &str,
+    manager_target: &str,
+    prepared: Option<&PreparedCompatibilityMetadata>,
+    refresh: bool,
+) -> RemoteCompatibilityReport {
+    let mut source = GitHubRemoteMetadata::new();
+    let cache_dir = ProjectDirs::from("org", "DSLZL", "csa")
+        .map(|directories| directories.cache_dir().join("remote-doctor"));
+    diagnose_remote_with_source(
+        official_version,
+        manager_target,
+        prepared,
+        refresh,
+        &mut source,
+        cache_dir.as_deref(),
+    )
+}
+
+/// Runs remote discovery with the default five-second deadline.
+fn diagnose_remote_with_source(
+    official_version: &str,
+    manager_target: &str,
+    prepared: Option<&PreparedCompatibilityMetadata>,
+    refresh: bool,
+    source: &mut dyn RemoteMetadataSource,
+    cache_dir: Option<&Path>,
+) -> RemoteCompatibilityReport {
+    diagnose_remote_with_deadline(
+        official_version,
+        manager_target,
+        prepared,
+        refresh,
+        source,
+        cache_dir,
+        Instant::now() + REMOTE_DIAGNOSTIC_TIMEOUT,
+    )
+}
+
+/// Runs remote discovery with a caller-provided deadline.
+fn diagnose_remote_with_deadline(
+    official_version: &str,
+    manager_target: &str,
+    prepared: Option<&PreparedCompatibilityMetadata>,
+    refresh: bool,
+    source: &mut dyn RemoteMetadataSource,
+    cache_dir: Option<&Path>,
+    deadline: Instant,
+) -> RemoteCompatibilityReport {
+    diagnose_remote_with_deadline_at(
+        official_version,
+        manager_target,
+        prepared,
+        refresh,
+        source,
+        cache_dir,
+        RemoteDiagnosticTiming {
+            deadline,
+            now: SystemTime::now(),
+        },
+    )
+}
+
+#[derive(Clone, Copy)]
+struct RemoteDiagnosticTiming {
+    deadline: Instant,
+    now: SystemTime,
+}
+
+/// Uses cached candidates when valid, otherwise fetches and reports remote candidates.
+fn diagnose_remote_with_deadline_at(
+    official_version: &str,
+    manager_target: &str,
+    prepared: Option<&PreparedCompatibilityMetadata>,
+    refresh: bool,
+    source: &mut dyn RemoteMetadataSource,
+    cache_dir: Option<&Path>,
+    timing: RemoteDiagnosticTiming,
+) -> RemoteCompatibilityReport {
+    let cache_path = cache_dir.map(|directory| {
+        directory.join(format!(
+            "csa-doctor-{}.json",
+            cache_key(manager_target, official_version)
+        ))
+    });
+    if !refresh
+        && let Some(candidates) = cache_path
+            .as_deref()
+            .and_then(|path| read_remote_cache_at(path, manager_target, timing.now))
+    {
+        let mut report =
+            remote_compatibility_report(&candidates, official_version, manager_target, prepared);
+        report.source = Some("cache");
+        report.checked_at_unix_seconds = cache_path
+            .as_deref()
+            .and_then(|path| fs::metadata(path).ok())
+            .and_then(|metadata| metadata.modified().ok())
+            .and_then(system_time_unix_seconds);
+        return report;
+    }
+    match fetch_remote_candidates(source, official_version, manager_target, timing.deadline) {
+        Ok(Some((repository, candidates))) => {
+            if let Some(cache_path) = cache_path.as_deref() {
+                write_remote_cache(cache_path, &candidates);
+            }
+            let mut report = remote_compatibility_report(
+                &candidates,
+                official_version,
+                manager_target,
+                prepared,
+            );
+            report.repository = Some(repository.to_owned());
+            report.source = Some("network");
+            report.checked_at_unix_seconds = system_time_unix_seconds(SystemTime::now());
+            report
+        }
+        _ => unreachable_remote_report(manager_target, prepared),
+    }
+}
+
+/// Converts a system time to Unix seconds when representable.
+fn system_time_unix_seconds(time: SystemTime) -> Option<u64> {
+    time.duration_since(UNIX_EPOCH)
+        .ok()
+        .map(|age| age.as_secs())
+}
+
+/// Finds a matching repository catalog or retains the best target catalog for no-match reports.
+fn fetch_remote_candidates(
+    source: &mut dyn RemoteMetadataSource,
+    official_version: &str,
+    manager_target: &str,
+    deadline: Instant,
+) -> Result<Option<(&'static str, Vec<InstallCandidate>)>> {
+    let mut latest_catalog: Option<(&'static str, Vec<InstallCandidate>)> = None;
+    for repository in [PRIMARY_COMPAT_REPOSITORY, LEGACY_COMPAT_REPOSITORY] {
+        remaining_deadline(deadline)?;
+        let refs = match source.repository_refs(repository, deadline) {
+            Ok(Some(refs)) => refs,
+            Ok(None) => continue,
+            Err(error) => return Err(error),
+        };
+        remaining_deadline(deadline)?;
+        let tags = compatibility_tags(&refs)?;
+        if tags.is_empty() {
+            continue;
+        }
+        let mut catalog = None;
+        for tag in tags.into_iter().take(MAX_INSTALL_CATALOG_PROBES) {
+            remaining_deadline(deadline)?;
+            match source.catalog(repository, &tag, deadline)? {
+                Some(bytes) => {
+                    remaining_deadline(deadline)?;
+                    if bytes.len() as u64 > MAX_INSTALL_CATALOG_BYTES {
+                        return Err(invalid_install_catalog(
+                            "install catalog exceeds the supported size",
+                        ));
+                    }
+                    let value: InstallCatalog =
+                        serde_json::from_slice(&bytes).map_err(|error| {
+                            invalid_install_catalog(format!(
+                                "install catalog is invalid JSON: {error}"
+                            ))
+                        })?;
+                    validate_install_catalog(&value, repository, &refs, Some(&tag))?;
+                    catalog = Some(value);
+                    break;
+                }
+                None => continue,
+            }
+        }
+        let catalog = match catalog {
+            Some(catalog) => catalog,
+            None if repository == LEGACY_COMPAT_REPOSITORY => {
+                let catalog: InstallCatalog = serde_json::from_str(INSTALL_CATALOG_BOOTSTRAP)
+                    .map_err(|error| {
+                        invalid_install_catalog(format!(
+                            "bundled install catalog is invalid JSON: {error}"
+                        ))
+                    })?;
+                validate_install_catalog(&catalog, repository, &refs, None)?;
+                catalog
+            }
+            None => {
+                return Err(invalid_install_catalog(
+                    "authoritative repository has no readable valid install catalog",
+                ));
+            }
+        };
+        let all = catalog_candidates_for_target(&catalog, manager_target, repository);
+        let has_install_match =
+            !matching_install_candidates(&all, official_version, manager_target).is_empty();
+        if has_install_match {
+            return Ok(Some((repository, all)));
+        }
+        let replace_latest = match latest_catalog.as_ref() {
+            None => true,
+            Some((_, current)) => {
+                match (
+                    highest_catalog_candidate(&all),
+                    highest_catalog_candidate(current),
+                ) {
+                    (Some(next), Some(previous)) => {
+                        compare_catalog_revisions(next, previous).is_gt()
+                    }
+                    (Some(_), None) => true,
+                    _ => false,
+                }
+            }
+        };
+        if replace_latest {
+            latest_catalog = Some((repository, all));
+        }
+    }
+    Ok(latest_catalog)
+}
+
+/// Returns the highest official-version and patch-revision candidate.
+fn highest_catalog_candidate(candidates: &[InstallCandidate]) -> Option<&InstallCandidate> {
+    candidates
+        .iter()
+        .max_by(|left, right| compare_catalog_candidates(left, right))
+}
+
+/// Orders catalog candidates by version, revision, then stable compatibility ID.
+fn compare_catalog_candidates(
+    left: &InstallCandidate,
+    right: &InstallCandidate,
+) -> std::cmp::Ordering {
+    compare_catalog_revisions(left, right).then_with(|| right.compat_id.cmp(&left.compat_id))
+}
+
+/// Compares catalog candidates by official version and numeric patch revision.
+fn compare_catalog_revisions(
+    left: &InstallCandidate,
+    right: &InstallCandidate,
+) -> std::cmp::Ordering {
+    version_key(&left.codex_version)
+        .ok()
+        .cmp(&version_key(&right.codex_version).ok())
+        .then_with(|| left.patch_revision.cmp(&right.patch_revision))
+}
+
+/// Returns time remaining or a diagnostic timeout when the deadline has passed.
+fn remaining_deadline(deadline: Instant) -> Result<Duration> {
+    deadline
+        .checked_duration_since(Instant::now())
+        .filter(|value| !value.is_zero())
+        .ok_or_else(|| {
+            ManagerError::new(
+                "remote_diagnostic_timeout",
+                "remote diagnostic deadline exceeded",
+            )
+        })
+}
+
+/// Writes normalized candidates to a private cache using an atomic replacement.
+fn write_remote_cache(path: &Path, candidates: &[InstallCandidate]) {
+    if candidates.is_empty() {
+        return;
+    }
+    let Ok(bytes) = serde_json::to_vec(candidates) else {
+        return;
+    };
+    if bytes.len() as u64 > MAX_REMOTE_CACHE_BYTES
+        || path
+            .parent()
+            .is_none_or(|directory| ensure_private_cache_directory(directory).is_err())
+    {
+        return;
+    }
+    let temporary = path.with_extension(format!("{}.{}.tmp", std::process::id(), cache_nonce()));
+    let Ok(mut file) = OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .open(&temporary)
+    else {
+        return;
+    };
+    let result = file.write_all(&bytes).and_then(|()| file.sync_all());
+    drop(file);
+    if result.is_ok() {
+        let replacement: io::Result<()> = {
+            #[cfg(windows)]
+            {
+                fs::remove_file(path).or_else(|error| {
+                    if error.kind() == io::ErrorKind::NotFound {
+                        Ok(())
+                    } else {
+                        Err(error)
+                    }
+                })
+            }
+            #[cfg(not(windows))]
+            {
+                Ok(())
+            }
+        };
+        if replacement.is_ok() && fs::rename(&temporary, path).is_ok() {
+            return;
+        }
+    }
+    {
+        let _ = fs::remove_file(&temporary);
+    }
+}
+
+/// Creates a process-unique suffix for temporary cache files.
+fn cache_nonce() -> u128 {
+    SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_nanos()
+        ^ u128::from(std::process::id())
+}
+
+/// Validates cached candidates against repository, target, identity, and date rules.
+fn valid_cached_candidates(candidates: &[InstallCandidate], manager_target: &str) -> bool {
+    let target = compatibility_artifact_target(manager_target);
+    let Some(repository) = candidates
+        .first()
+        .map(|candidate| candidate.repository.as_str())
+    else {
+        return false;
+    };
+    if repository != PRIMARY_COMPAT_REPOSITORY && repository != LEGACY_COMPAT_REPOSITORY {
+        return false;
+    }
+    let mut compat_ids = BTreeSet::new();
+    let mut release_tags = BTreeSet::new();
+    candidates.iter().all(|candidate| {
+        let key = version_key(&candidate.codex_version);
+        (candidate.repository == repository
+            && candidate.build_target == target
+            && key.is_ok_and(|key| {
+                format!("{}.{}.{}", key.0, key.1, key.2) == candidate.codex_version
+            })
+            && candidate
+                .compat_id
+                .starts_with(&format!("rust-v{}-", candidate.codex_version))
+            && patch_revision(&candidate.compat_id).ok() == Some(candidate.patch_revision)
+            && validate_asset_name(&candidate.compat_id).is_ok()
+            && candidate.release_tag == format!("compat-{}", candidate.compat_id)
+            && validate_asset_name(&candidate.release_tag).is_ok()
+            && validate_sha(&candidate.release_commit).is_ok()
+            && valid_recorded_on(&candidate.recorded_on)
+            && !candidate.recommended)
+            && compat_ids.insert(&candidate.compat_id)
+            && release_tags.insert(&candidate.release_tag)
+    })
+}
+
+/// Reads a fresh, valid remote cache for the requested target.
+#[cfg(test)]
+fn read_remote_cache(path: &Path, manager_target: &str) -> Option<Vec<InstallCandidate>> {
+    read_remote_cache_at(path, manager_target, SystemTime::now())
+}
+
+/// Reads and validates a remote cache at a supplied reference time.
+fn read_remote_cache_at(
+    path: &Path,
+    manager_target: &str,
+    now: SystemTime,
+) -> Option<Vec<InstallCandidate>> {
+    let directory = path.parent()?;
+    if !cache_directory_is_private(directory) {
+        return None;
+    }
+    let metadata = fs::symlink_metadata(path).ok()?;
+    if !metadata.file_type().is_file() || metadata.len() > MAX_REMOTE_CACHE_BYTES {
+        return None;
+    }
+    let age = now.duration_since(metadata.modified().ok()?).ok()?;
+    if age >= REMOTE_CACHE_TTL {
+        return None;
+    }
+    let file = File::open(path).ok()?;
+    let mut bytes = Vec::new();
+    file.take(MAX_REMOTE_CACHE_BYTES + 1)
+        .read_to_end(&mut bytes)
+        .ok()?;
+    if bytes.len() as u64 > MAX_REMOTE_CACHE_BYTES {
+        return None;
+    }
+    let candidates: Vec<InstallCandidate> = serde_json::from_slice(&bytes).ok()?;
+    valid_cached_candidates(&candidates, manager_target).then_some(candidates)
+}
+
+/// Creates the cache directory with user-only permissions where supported.
+fn ensure_private_cache_directory(path: &Path) -> io::Result<()> {
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::DirBuilderExt;
+
+        let mut builder = fs::DirBuilder::new();
+        builder.recursive(true).mode(0o700);
+        builder.create(path)?;
+    }
+    #[cfg(not(unix))]
+    fs::create_dir_all(path)?;
+    let metadata = fs::symlink_metadata(path)?;
+    if !metadata.file_type().is_dir() {
+        return Err(io::Error::new(
+            io::ErrorKind::PermissionDenied,
+            "remote cache directory is not a private directory",
+        ));
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+
+        if metadata.permissions().mode() & 0o077 != 0 {
+            return Err(io::Error::new(
+                io::ErrorKind::PermissionDenied,
+                "remote cache directory is not private to the current user",
+            ));
+        }
+    }
+    Ok(())
+}
+
+/// Checks whether a cache directory has restrictive permissions.
+fn cache_directory_is_private(path: &Path) -> bool {
+    let Ok(metadata) = fs::symlink_metadata(path) else {
+        return false;
+    };
+    if !metadata.file_type().is_dir() {
+        return false;
+    }
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        metadata.permissions().mode() & 0o077 == 0
+    }
+    #[cfg(not(unix))]
+    {
+        true
+    }
+}
+
+/// Builds a cache identity from both artifact target and official version.
+fn cache_key(target: &str, official_version: &str) -> String {
+    target
+        .bytes()
+        .chain(std::iter::once(0))
+        .chain(official_version.bytes())
+        .fold(0xcbf29ce484222325u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x100000001b3)
+        })
+        .to_string()
 }
 
 pub type InstallSelector<'a> = dyn FnMut(&[InstallCandidate]) -> Result<String> + 'a;
@@ -369,32 +1060,56 @@ fn discover_install_candidates(
     ))
 }
 
+/// Filters catalog entries by exact official version and target using install rules.
 fn install_candidates(
     catalog: InstallCatalog,
     official_version: &str,
     manager_target: &str,
     repository: &str,
 ) -> Vec<InstallCandidate> {
+    let candidates = catalog_candidates_for_target(&catalog, manager_target, repository);
+    matching_install_candidates(&candidates, official_version, manager_target)
+}
+
+/// Converts catalog entries for the requested artifact target into candidates.
+fn catalog_candidates_for_target(
+    catalog: &InstallCatalog,
+    manager_target: &str,
+    repository: &str,
+) -> Vec<InstallCandidate> {
     let artifact_target = compatibility_artifact_target(manager_target);
-    let candidates: Vec<_> = catalog
+    catalog
         .entries
-        .into_iter()
-        .filter(|entry| {
-            entry.codex_version == official_version && entry.supports_target(artifact_target)
-        })
+        .iter()
+        .filter(|entry| entry.supports_target(artifact_target))
         .map(|entry| InstallCandidate {
             repository: repository.to_owned(),
-            compat_id: entry.compat_id,
-            codex_version: entry.codex_version,
+            compat_id: entry.compat_id.clone(),
+            codex_version: entry.codex_version.clone(),
             build_target: artifact_target.to_owned(),
             patch_revision: entry.patch_revision,
-            recorded_on: entry.recorded_on,
+            recorded_on: entry.recorded_on.clone(),
             recommended: false,
-            release_tag: entry.release_tag,
-            release_commit: entry.release_commit,
+            release_tag: entry.release_tag.clone(),
+            release_commit: entry.release_commit.clone(),
         })
-        .collect();
+        .collect()
+}
+
+/// Returns only candidates matching both official version and artifact target.
+fn matching_install_candidates(
+    candidates: &[InstallCandidate],
+    official_version: &str,
+    manager_target: &str,
+) -> Vec<InstallCandidate> {
+    let artifact_target = compatibility_artifact_target(manager_target);
     candidates
+        .iter()
+        .filter(|candidate| {
+            candidate.codex_version == official_version && candidate.build_target == artifact_target
+        })
+        .cloned()
+        .collect()
 }
 
 fn compatibility_artifact_target(manager_target: &str) -> &str {
@@ -755,6 +1470,7 @@ struct ProgressReader<'a, R> {
 }
 
 impl<R: Read> Read for ProgressReader<'_, R> {
+    /// Copies bytes while reporting download progress when a callback is configured.
     fn read(&mut self, buffer: &mut [u8]) -> io::Result<usize> {
         let read = self.inner.read(buffer)?;
         if read != 0 {
@@ -773,12 +1489,18 @@ struct GitHubClient {
     agent: Agent,
     route: Cell<GitHubRoute>,
     proxy_order: RefCell<Vec<usize>>,
+    deadline: Option<Instant>,
 }
 
 #[derive(Clone, Copy, Debug, Eq, PartialEq)]
 enum GitHubRoute {
     Direct,
     Proxy(usize),
+}
+
+enum GitHubRequestError {
+    DeadlineExceeded,
+    Request(ureq::Error),
 }
 
 impl GitHubClient {
@@ -790,6 +1512,7 @@ impl GitHubClient {
         Self::with_route(repository, route)
     }
 
+    /// Creates a GitHub client using install's normal routing and timeout behavior.
     fn with_route(repository: &'static str, route: GitHubRoute) -> Self {
         let config = Agent::config_builder()
             .https_only(true)
@@ -807,7 +1530,64 @@ impl GitHubClient {
             agent: Agent::new_with_config(config),
             route: Cell::new(route),
             proxy_order: RefCell::new(proxy_order),
+            deadline: None,
         }
+    }
+
+    /// Creates a GitHub client whose requests share the supplied diagnostic deadline.
+    fn with_deadline(repository: &'static str, route: GitHubRoute, deadline: Instant) -> Self {
+        let mut client = Self::with_route(repository, route);
+        client.deadline = Some(deadline);
+        client
+    }
+
+    /// Reads public Git refs with the diagnostic request deadline.
+    fn repository_refs_with_deadline(
+        &self,
+        deadline: Instant,
+    ) -> Result<Option<BTreeMap<String, String>>> {
+        let refs = self.repository_refs()?;
+        remaining_deadline(deadline)?;
+        Ok(refs)
+    }
+
+    /// Reads a tagged install catalog with the diagnostic request deadline.
+    fn read_catalog_bytes_with_deadline(
+        &self,
+        release_tag: &str,
+        deadline: Instant,
+    ) -> Result<Option<Vec<u8>>> {
+        remaining_deadline(deadline)?;
+        validate_asset_name(release_tag)?;
+        let url = release_asset_url(self.repository, release_tag, INSTALL_CATALOG_ASSET);
+        let Some(mut response) = self.get_response(
+            &url,
+            "application/octet-stream",
+            false,
+            &[
+                "github.com",
+                "objects.githubusercontent.com",
+                "release-assets.githubusercontent.com",
+            ],
+            "read compatibility install catalog",
+            false,
+        )?
+        else {
+            return Ok(None);
+        };
+        let bytes = response
+            .body_mut()
+            .with_config()
+            .limit(MAX_INSTALL_CATALOG_BYTES + 1)
+            .read_to_vec()
+            .map_err(|error| network_error("read compatibility install catalog", error))?;
+        if bytes.len() as u64 > MAX_INSTALL_CATALOG_BYTES {
+            return Err(invalid_install_catalog(
+                "install catalog exceeds the supported size",
+            ));
+        }
+        remaining_deadline(deadline)?;
+        Ok(Some(bytes))
     }
 
     fn repository_refs(&self) -> Result<Option<BTreeMap<String, String>>> {
@@ -1034,6 +1814,7 @@ impl GitHubClient {
         true
     }
 
+    /// Tries the configured GitHub route and applies the direct-to-proxy fallback policy.
     fn get_response(
         &self,
         direct_url: &str,
@@ -1059,10 +1840,14 @@ impl GitHubClient {
                 require_route_host(&response, GitHubRoute::Direct, direct_hosts)?;
                 Ok(Some(response))
             }
-            Err(ureq::Error::StatusCode(404)) => Ok(None),
-            Err(error) if should_try_proxy(&error) => {
+            Err(GitHubRequestError::DeadlineExceeded) => Err(remote_diagnostic_timeout()),
+            Err(GitHubRequestError::Request(ureq::Error::StatusCode(404))) => Ok(None),
+            Err(GitHubRequestError::Request(error)) if should_try_proxy(&error) => {
                 let direct_error = error.to_string();
-                let index = select_proxy_index(self.repository);
+                let index = match self.deadline {
+                    Some(deadline) => select_proxy_index_until(self.repository, deadline)?,
+                    None => select_proxy_index(self.repository),
+                };
                 self.route.set(GitHubRoute::Proxy(index));
                 self.request_from_proxy_pool(
                     index,
@@ -1081,10 +1866,11 @@ impl GitHubClient {
                     )
                 })
             }
-            Err(error) => Err(network_error(context, error)),
+            Err(GitHubRequestError::Request(error)) => Err(network_error(context, error)),
         }
     }
 
+    /// Tries proxy routes in order and returns the first valid response.
     fn request_from_proxy_pool(
         &self,
         first: usize,
@@ -1105,15 +1891,20 @@ impl GitHubClient {
                     self.route.set(route);
                     return Ok(Some(response));
                 }
-                Err(ureq::Error::StatusCode(404)) if !retry_404 => {
+                Err(GitHubRequestError::DeadlineExceeded) => {
+                    return Err(remote_diagnostic_timeout());
+                }
+                Err(GitHubRequestError::Request(ureq::Error::StatusCode(404))) if !retry_404 => {
                     self.route.set(route);
                     return Ok(None);
                 }
-                Err(ureq::Error::StatusCode(404)) => {
+                Err(GitHubRequestError::Request(ureq::Error::StatusCode(404))) => {
                     not_found += 1;
                     failures.push(format!("{}: 404", GH_PROXY_ROUTES[index].1));
                 }
-                Err(error) => failures.push(format!("{}: {error}", GH_PROXY_ROUTES[index].1)),
+                Err(GitHubRequestError::Request(error)) => {
+                    failures.push(format!("{}: {error}", GH_PROXY_ROUTES[index].1));
+                }
             }
         }
         if !order.is_empty() && not_found == order.len() {
@@ -1128,17 +1919,49 @@ impl GitHubClient {
         ))
     }
 
+    /// Sends one request through a selected route while enforcing its remaining time.
     fn request_on_route(
         &self,
         route: GitHubRoute,
         direct_url: &str,
         accept: &str,
         git_protocol: bool,
-    ) -> std::result::Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+    ) -> std::result::Result<ureq::http::Response<ureq::Body>, GitHubRequestError> {
         let url = routed_url(route, direct_url);
-        let mut request = self
-            .agent
-            .get(&url)
+        if let Some(deadline) = self.deadline {
+            let timeout =
+                remaining_deadline(deadline).map_err(|_| GitHubRequestError::DeadlineExceeded)?;
+            let config = Agent::config_builder()
+                .https_only(true)
+                .max_redirects(5)
+                .timeout_global(Some(timeout))
+                .timeout_connect(Some(timeout))
+                .timeout_recv_response(Some(timeout))
+                .timeout_recv_body(Some(timeout))
+                .build();
+            let agent = Agent::new_with_config(config);
+            let result = Self::request_with_agent(&agent, &url, accept, git_protocol)
+                .map_err(GitHubRequestError::Request);
+            if Instant::now() >= deadline {
+                Err(GitHubRequestError::DeadlineExceeded)
+            } else {
+                result
+            }
+        } else {
+            Self::request_with_agent(&self.agent, &url, accept, git_protocol)
+                .map_err(GitHubRequestError::Request)
+        }
+    }
+
+    /// Builds and sends an HTTP request using the configured agent.
+    fn request_with_agent(
+        agent: &Agent,
+        url: &str,
+        accept: &str,
+        git_protocol: bool,
+    ) -> std::result::Result<ureq::http::Response<ureq::Body>, ureq::Error> {
+        let mut request = agent
+            .get(url)
             .header("Accept", accept)
             .header("User-Agent", concat!("csa/", env!("CARGO_PKG_VERSION")));
         if git_protocol {
@@ -1146,6 +1969,14 @@ impl GitHubClient {
         }
         request.call()
     }
+}
+
+/// Creates the stable timeout error used by remote diagnostics.
+fn remote_diagnostic_timeout() -> ManagerError {
+    ManagerError::new(
+        "remote_diagnostic_timeout",
+        "remote diagnostic deadline exceeded",
+    )
 }
 
 fn detect_github_route() -> Option<GitHubRoute> {
@@ -1160,8 +1991,42 @@ fn detect_github_route() -> Option<GitHubRoute> {
     route_from_region_probes(probes)
 }
 
+/// Detects the region with a short probe deadline and defaults to direct routing.
+fn detect_github_route_until(deadline: Instant) -> Result<Option<GitHubRoute>> {
+    let probe_deadline = remote_region_probe_deadline(Instant::now(), deadline);
+    let probes = std::thread::scope(|scope| {
+        let cloudflare = scope.spawn(|| detect_cloudflare_country_until(probe_deadline));
+        let alibaba = scope.spawn(|| detect_alibaba_country_until(probe_deadline));
+        [
+            cloudflare.join().ok().flatten(),
+            alibaba.join().ok().flatten(),
+        ]
+    });
+    remaining_deadline(deadline)?;
+    Ok(Some(remote_route_from_region_probes(probes)))
+}
+
+/// Caps the region-probe deadline at both its short limit and the overall deadline.
+fn remote_region_probe_deadline(start: Instant, overall_deadline: Instant) -> Instant {
+    start
+        .checked_add(REMOTE_REGION_PROBE_TIMEOUT)
+        .map_or(overall_deadline, |limit| limit.min(overall_deadline))
+}
+
 fn detect_cloudflare_country() -> Option<bool> {
     let bytes = read_region_response(CLOUDFLARE_TRACE_URL, "text/plain", &["www.cloudflare.com"])?;
+    country_from_cloudflare_trace(&bytes)
+}
+
+/// Reads Cloudflare's country result before the supplied deadline.
+fn detect_cloudflare_country_until(deadline: Instant) -> Option<bool> {
+    let timeout = remaining_deadline(deadline).ok()?;
+    let bytes = read_region_response_with_timeout(
+        CLOUDFLARE_TRACE_URL,
+        "text/plain",
+        &["www.cloudflare.com"],
+        timeout,
+    )?;
     country_from_cloudflare_trace(&bytes)
 }
 
@@ -1170,14 +2035,37 @@ fn detect_alibaba_country() -> Option<bool> {
     country_from_alibaba_region(&bytes)
 }
 
+/// Reads Alibaba's country result before the supplied deadline.
+fn detect_alibaba_country_until(deadline: Instant) -> Option<bool> {
+    let timeout = remaining_deadline(deadline).ok()?;
+    let bytes = read_region_response_with_timeout(
+        ALIBABA_REGION_URL,
+        "application/json",
+        &["ip.taobao.com"],
+        timeout,
+    )?;
+    country_from_alibaba_region(&bytes)
+}
+
+/// Reads a region response using the standard non-diagnostic timeout.
 fn read_region_response(url: &str, accept: &str, allowed_hosts: &[&str]) -> Option<Vec<u8>> {
+    read_region_response_with_timeout(url, accept, allowed_hosts, Duration::from_secs(5))
+}
+
+/// Fetches a bounded region response and validates its final host.
+fn read_region_response_with_timeout(
+    url: &str,
+    accept: &str,
+    allowed_hosts: &[&str],
+    timeout: Duration,
+) -> Option<Vec<u8>> {
     let config = Agent::config_builder()
         .https_only(true)
         .max_redirects(0)
-        .timeout_global(Some(Duration::from_secs(5)))
-        .timeout_connect(Some(Duration::from_secs(3)))
-        .timeout_recv_response(Some(Duration::from_secs(3)))
-        .timeout_recv_body(Some(Duration::from_secs(3)))
+        .timeout_global(Some(timeout.min(Duration::from_secs(5))))
+        .timeout_connect(Some(timeout.min(Duration::from_secs(3))))
+        .timeout_recv_response(Some(timeout.min(Duration::from_secs(3))))
+        .timeout_recv_body(Some(timeout.min(Duration::from_secs(3))))
         .build();
     let agent = Agent::new_with_config(config);
     let mut response = agent
@@ -1247,6 +2135,11 @@ fn route_from_region_probes(probes: [Option<bool>; 2]) -> Option<GitHubRoute> {
     } else {
         None
     }
+}
+
+/// Uses the detected route, or direct routing when both region probes fail.
+fn remote_route_from_region_probes(probes: [Option<bool>; 2]) -> GitHubRoute {
+    route_from_region_probes(probes).unwrap_or(GitHubRoute::Direct)
 }
 
 fn routed_url(route: GitHubRoute, direct_url: &str) -> String {
@@ -1382,13 +2275,64 @@ fn select_proxy_index(repository: &'static str) -> usize {
     receiver.recv_timeout(Duration::from_secs(4)).unwrap_or(0)
 }
 
+/// Selects a responsive proxy before the diagnostic deadline.
+fn select_proxy_index_until(repository: &'static str, deadline: Instant) -> Result<usize> {
+    select_proxy_index_until_with(repository, deadline, proxy_responds_until)
+}
+
+/// Probes proxy routes concurrently and returns a responsive route or an error.
+fn select_proxy_index_until_with(
+    repository: &'static str,
+    deadline: Instant,
+    probe: fn(usize, &'static str, Instant) -> bool,
+) -> Result<usize> {
+    let (sender, receiver) = mpsc::channel();
+    for index in 0..GH_PROXY_ROUTES.len() {
+        let sender = sender.clone();
+        std::thread::spawn(move || {
+            if probe(index, repository, deadline) {
+                let _ = sender.send(index);
+            }
+        });
+    }
+    drop(sender);
+    let timeout = remaining_deadline(deadline)?.min(Duration::from_secs(4));
+    let selected = match receiver.recv_timeout(timeout) {
+        Ok(selected) => selected,
+        Err(mpsc::RecvTimeoutError::Timeout) if Instant::now() >= deadline => {
+            return Err(remote_diagnostic_timeout());
+        }
+        Err(_) => {
+            return Err(ManagerError::new(
+                "network_error",
+                "no GitHub proxy route responded to the probe",
+            ));
+        }
+    };
+    remaining_deadline(deadline)?;
+    Ok(selected)
+}
+
+/// Checks proxy responsiveness with the normal probe timeout.
 fn proxy_responds(index: usize, repository: &str) -> bool {
+    proxy_responds_with_timeout(index, repository, Duration::from_secs(4))
+}
+
+/// Checks proxy responsiveness using only the remaining diagnostic time.
+fn proxy_responds_until(index: usize, repository: &'static str, deadline: Instant) -> bool {
+    remaining_deadline(deadline)
+        .ok()
+        .is_some_and(|timeout| proxy_responds_with_timeout(index, repository, timeout))
+}
+
+/// Probes a proxy with bounded connect, response, and total timeouts.
+fn proxy_responds_with_timeout(index: usize, repository: &str, timeout: Duration) -> bool {
     let config = Agent::config_builder()
         .https_only(true)
         .max_redirects(2)
-        .timeout_global(Some(Duration::from_secs(4)))
-        .timeout_connect(Some(Duration::from_secs(3)))
-        .timeout_recv_response(Some(Duration::from_secs(3)))
+        .timeout_global(Some(timeout.min(Duration::from_secs(4))))
+        .timeout_connect(Some(timeout.min(Duration::from_secs(3))))
+        .timeout_recv_response(Some(timeout.min(Duration::from_secs(3))))
         .build();
     let agent = Agent::new_with_config(config);
     let response = agent
@@ -1911,30 +2855,759 @@ fn validate_sha256(value: &str) -> Result<()> {
     Ok(())
 }
 
+/// Maps a GitHub request failure to a stable manager error code.
 fn network_error(context: &str, error: impl std::fmt::Display) -> ManagerError {
     ManagerError::new("network_error", format!("{context}: {error}"))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{
-        BUILD_TARGET, CompatibilityRelease, GH_PROXY_ROUTES, GitHubClient, GitHubRoute,
-        InstallCandidate, InstallCatalog, InstallCatalogEntry, LEGACY_COMPAT_REPOSITORY,
-        MAX_ARTIFACT_BYTES, OPENAI_REPOSITORY, PRIMARY_COMPAT_REPOSITORY, ProgressReader,
-        ReleaseFile, UpstreamRelease, compatibility_artifact_target, compatibility_tags,
-        content_range_matches, country_from_alibaba_region, country_from_cloudflare_trace,
-        descriptor_artifact, descriptor_assets, git_refs_url, install_candidates,
-        invalid_install_catalog, parse_checksums, parse_git_refs, patch_revision,
-        peel_tag_from_refs, proxy_indices_from, rank_proxy_indices, release_asset_url,
-        require_uri_host, resolve_ordered_authority, route_from_region_probes, routed_url,
-        select_automatic, should_try_proxy, stable_release_version, take_selected_candidate,
-        valid_recorded_on, validate_catalog_descriptor, validate_declared_asset,
-        validate_install_catalog,
-    };
-    use crate::manager::InstallEvent;
-    use std::collections::BTreeMap;
-    use std::io::{self, Cursor};
-    use std::time::Duration;
+    use super::*;
+    use std::io::Cursor;
+    use std::sync::atomic::{AtomicU64, Ordering};
+    use std::time::{Duration, Instant};
+
+    const WINDOWS_TARGET: &str = "x86_64-pc-windows-msvc";
+    static TEMP_ID: AtomicU64 = AtomicU64::new(0);
+
+    #[derive(Default)]
+    struct FixtureSource {
+        refs: BTreeMap<&'static str, Option<BTreeMap<String, String>>>,
+        catalogs: BTreeMap<(&'static str, String), Option<Vec<u8>>>,
+        refs_requests: Vec<&'static str>,
+        catalog_requests: Vec<(&'static str, String)>,
+        delay: Option<Duration>,
+    }
+
+    impl RemoteMetadataSource for FixtureSource {
+        /// Returns fixture refs for a repository and records the request.
+        fn repository_refs(
+            &mut self,
+            repository: &'static str,
+            _deadline: Instant,
+        ) -> Result<Option<BTreeMap<String, String>>> {
+            self.refs_requests.push(repository);
+            if let Some(delay) = self.delay {
+                std::thread::sleep(delay);
+            }
+            Ok(self.refs.get(repository).cloned().flatten())
+        }
+
+        /// Returns fixture catalog bytes for a tag and records the request.
+        fn catalog(
+            &mut self,
+            repository: &'static str,
+            tag: &str,
+            _deadline: Instant,
+        ) -> Result<Option<Vec<u8>>> {
+            self.catalog_requests.push((repository, tag.to_owned()));
+            if let Some(delay) = self.delay {
+                std::thread::sleep(delay);
+            }
+            Ok(self
+                .catalogs
+                .get(&(repository, tag.to_owned()))
+                .cloned()
+                .flatten())
+        }
+    }
+
+    struct TestTempDir(PathBuf);
+
+    impl TestTempDir {
+        /// Creates an empty fixture metadata source.
+        fn new() -> Self {
+            let id = TEMP_ID.fetch_add(1, Ordering::Relaxed);
+            let path =
+                std::env::temp_dir().join(format!("csa-online-test-{}-{id}", std::process::id()));
+            ensure_private_cache_directory(&path).unwrap();
+            Self(path)
+        }
+    }
+
+    impl Drop for TestTempDir {
+        /// Removes the temporary test directory when its fixture is dropped.
+        fn drop(&mut self) {
+            let _ = fs::remove_dir_all(&self.0);
+        }
+    }
+
+    /// Builds a valid install candidate fixture from a version, ID, and target.
+    fn candidate(version: &str, compat_id: &str, target: &str) -> InstallCandidate {
+        let revision = patch_revision(compat_id).unwrap();
+        InstallCandidate {
+            repository: LEGACY_COMPAT_REPOSITORY.to_owned(),
+            compat_id: compat_id.to_owned(),
+            codex_version: version.to_owned(),
+            build_target: target.to_owned(),
+            patch_revision: revision,
+            recorded_on: "2026-09-26".to_owned(),
+            recommended: false,
+            release_tag: format!("compat-{compat_id}"),
+            release_commit: "a".repeat(40),
+        }
+    }
+
+    /// Adds a catalog and matching refs to a fixture metadata source.
+    fn add_catalog(
+        source: &mut FixtureSource,
+        repository: &'static str,
+        target: &str,
+        mut entries: Vec<(&str, &str, u64)>,
+    ) -> BTreeMap<String, String> {
+        entries.sort_by(|left, right| {
+            version_key(right.0)
+                .unwrap()
+                .cmp(&version_key(left.0).unwrap())
+                .then_with(|| right.2.cmp(&left.2))
+                .then_with(|| left.1.cmp(right.1))
+        });
+        let catalog_entries: Vec<_> = entries
+            .iter()
+            .enumerate()
+            .map(
+                |(index, (version, compat_id, revision))| InstallCatalogEntry {
+                    compat_id: (*compat_id).to_owned(),
+                    release_tag: format!("compat-{compat_id}"),
+                    release_commit: format!("{:040x}", index + 1),
+                    codex_version: (*version).to_owned(),
+                    build_target: Some(target.to_owned()),
+                    build_targets: Vec::new(),
+                    patch_revision: *revision,
+                    recorded_on: "2026-09-26".to_owned(),
+                },
+            )
+            .collect();
+        let first = catalog_entries.first().unwrap();
+        let refs: BTreeMap<_, _> = catalog_entries
+            .iter()
+            .map(|entry| {
+                (
+                    format!("refs/tags/{}", entry.release_tag),
+                    entry.release_commit.clone(),
+                )
+            })
+            .collect();
+        let catalog = serde_json::json!({
+            "schema": 1,
+            "repository": repository,
+            "source_release_tag": first.release_tag,
+            "source_commit": first.release_commit,
+            "entries": catalog_entries.iter().map(|entry| serde_json::json!({
+                "compat_id": entry.compat_id,
+                "release_tag": entry.release_tag,
+                "release_commit": entry.release_commit,
+                "codex_version": entry.codex_version,
+                "build_target": entry.build_target,
+                "patch_revision": entry.patch_revision,
+                "recorded_on": entry.recorded_on,
+            })).collect::<Vec<_>>(),
+        });
+        source.refs.insert(repository, Some(refs.clone()));
+        source.catalogs.insert(
+            (repository, first.release_tag.clone()),
+            Some(serde_json::to_vec(&catalog).unwrap()),
+        );
+        refs
+    }
+
+    /// Formats a compatibility ID with the requested numeric revision.
+    fn release_id(version: &str, revision: u64, variant: &str) -> String {
+        format!("rust-v{version}-{variant}-p{revision}")
+    }
+
+    /// Builds prepared compatibility metadata for remote-report tests.
+    fn prepared_metadata(
+        compat_id: &str,
+        codex_version: Option<&str>,
+    ) -> PreparedCompatibilityMetadata {
+        PreparedCompatibilityMetadata {
+            compat_id: compat_id.to_owned(),
+            codex_version: codex_version.map(str::to_owned),
+        }
+    }
+
+    /// Checks that report selection follows install rules and retains the latest candidate.
+    #[test]
+    fn remote_report_uses_install_selection_and_preserves_latest_candidate() {
+        let target = "x86_64-unknown-linux-musl";
+        let matching = vec![
+            candidate("0.150.1", &release_id("0.150.1", 14, "native-join"), target),
+            candidate("0.150.1", &release_id("0.150.1", 15, "native-join"), target),
+        ];
+        let report = remote_compatibility_report(
+            &matching,
+            "0.150.1",
+            "x86_64-unknown-linux-gnu",
+            Some(&prepared_metadata(
+                "rust-v0.150.1-native-join-p14",
+                Some("0.150.1"),
+            )),
+        );
+        assert_eq!(report.status, "match");
+        assert_eq!(report.artifact_target, target);
+        assert_eq!(
+            serde_json::to_value(&report).unwrap()["artifact_target"],
+            target
+        );
+        assert_eq!(
+            report.recommended_compat_id.as_deref(),
+            Some("rust-v0.150.1-native-join-p15")
+        );
+        assert!(report.update_available);
+
+        let latest = vec![
+            candidate("0.149.0", &release_id("0.149.0", 99, "native-join"), target),
+            candidate("0.152.0", &release_id("0.152.0", 3, "native-join"), target),
+            candidate("0.152.0", &release_id("0.152.0", 8, "native-join"), target),
+        ];
+        let report =
+            remote_compatibility_report(&latest, "0.150.1", "x86_64-unknown-linux-gnu", None);
+        assert_eq!(report.status, "none_for_version");
+        assert_eq!(report.official_version_relation, Some("older"));
+        let latest = report.latest_candidate.unwrap();
+        assert_eq!(latest.codex_version, "0.152.0");
+        assert_eq!(latest.compat_id, "rust-v0.152.0-native-join-p8");
+        assert_eq!(latest.patch_revision, 8);
+    }
+
+    /// Covers installed, unprepared, outdated, unknown-revision, and version-mismatch cases.
+    #[test]
+    fn remote_report_covers_current_match_and_both_version_relations() {
+        let matching = vec![
+            candidate("0.150.1", "rust-v0.150.1-native-join-p14", WINDOWS_TARGET),
+            candidate("0.150.1", "rust-v0.150.1-native-join-p15", WINDOWS_TARGET),
+        ];
+        let unprepared = remote_compatibility_report(&matching, "0.150.1", WINDOWS_TARGET, None);
+        assert_eq!(unprepared.status, "match");
+        assert_eq!(
+            unprepared.recommended_compat_id.as_deref(),
+            Some("rust-v0.150.1-native-join-p15")
+        );
+        assert!(!unprepared.update_available);
+
+        let current = remote_compatibility_report(
+            &matching,
+            "0.150.1",
+            WINDOWS_TARGET,
+            Some(&prepared_metadata(
+                "rust-v0.150.1-native-join-p15",
+                Some("0.150.1"),
+            )),
+        );
+        assert_eq!(current.status, "match");
+        assert!(!current.update_available);
+
+        let newer_available = remote_compatibility_report(
+            &matching,
+            "0.150.1",
+            WINDOWS_TARGET,
+            Some(&prepared_metadata(
+                "rust-v0.150.1-native-join-p14",
+                Some("0.150.1"),
+            )),
+        );
+        assert_eq!(newer_available.status, "match");
+        assert!(newer_available.update_available);
+
+        let unknown_prepared_revision = remote_compatibility_report(
+            &matching,
+            "0.150.1",
+            WINDOWS_TARGET,
+            Some(&prepared_metadata("custom-local-build", Some("0.150.1"))),
+        );
+        assert!(!unknown_prepared_revision.update_available);
+
+        let different_prepared_official = remote_compatibility_report(
+            &matching,
+            "0.150.1",
+            WINDOWS_TARGET,
+            Some(&prepared_metadata(
+                "rust-v0.149.0-native-join-p20",
+                Some("0.149.0"),
+            )),
+        );
+        assert!(different_prepared_official.update_available);
+
+        let latest = vec![candidate(
+            "0.152.0",
+            "rust-v0.152.0-native-join-p8",
+            WINDOWS_TARGET,
+        )];
+        let official_is_older =
+            remote_compatibility_report(&latest, "0.150.1", WINDOWS_TARGET, None);
+        assert_eq!(official_is_older.status, "none_for_version");
+        assert_eq!(official_is_older.official_version_relation, Some("older"));
+        assert_eq!(
+            official_is_older
+                .latest_candidate
+                .as_ref()
+                .map(|candidate| candidate.compat_id.as_str()),
+            Some("rust-v0.152.0-native-join-p8")
+        );
+
+        let official_is_newer =
+            remote_compatibility_report(&latest, "0.153.0", WINDOWS_TARGET, None);
+        assert_eq!(official_is_newer.status, "none_for_version");
+        assert_eq!(official_is_newer.official_version_relation, Some("newer"));
+    }
+
+    /// Checks that doctor and install select the same candidates and recommendation.
+    #[test]
+    fn doctor_and_install_share_catalog_target_and_version_selection() {
+        let manager_target = "x86_64-unknown-linux-gnu";
+        let artifact_target = "x86_64-unknown-linux-musl";
+        let repository = LEGACY_COMPAT_REPOSITORY;
+        let catalog = InstallCatalog {
+            schema: 1,
+            repository: repository.to_owned(),
+            source_release_tag: "compat-rust-v0.150.1-native-join-p15".to_owned(),
+            source_commit: "a".repeat(40),
+            entries: vec![
+                InstallCatalogEntry {
+                    compat_id: "rust-v0.150.1-native-join-p14".to_owned(),
+                    release_tag: "compat-rust-v0.150.1-native-join-p14".to_owned(),
+                    release_commit: "b".repeat(40),
+                    codex_version: "0.150.1".to_owned(),
+                    build_target: Some(artifact_target.to_owned()),
+                    build_targets: Vec::new(),
+                    patch_revision: 14,
+                    recorded_on: "2026-09-26".to_owned(),
+                },
+                InstallCatalogEntry {
+                    compat_id: "rust-v0.150.1-native-join-p15".to_owned(),
+                    release_tag: "compat-rust-v0.150.1-native-join-p15".to_owned(),
+                    release_commit: "c".repeat(40),
+                    codex_version: "0.150.1".to_owned(),
+                    build_target: Some(artifact_target.to_owned()),
+                    build_targets: Vec::new(),
+                    patch_revision: 15,
+                    recorded_on: "2026-09-26".to_owned(),
+                },
+                InstallCatalogEntry {
+                    compat_id: "rust-v0.150.1-native-join-p20".to_owned(),
+                    release_tag: "compat-rust-v0.150.1-native-join-p20".to_owned(),
+                    release_commit: "d".repeat(40),
+                    codex_version: "0.150.1".to_owned(),
+                    build_target: Some(WINDOWS_TARGET.to_owned()),
+                    build_targets: Vec::new(),
+                    patch_revision: 20,
+                    recorded_on: "2026-09-26".to_owned(),
+                },
+                InstallCatalogEntry {
+                    compat_id: "rust-v0.151.0-native-join-p99".to_owned(),
+                    release_tag: "compat-rust-v0.151.0-native-join-p99".to_owned(),
+                    release_commit: "e".repeat(40),
+                    codex_version: "0.151.0".to_owned(),
+                    build_target: Some(artifact_target.to_owned()),
+                    build_targets: Vec::new(),
+                    patch_revision: 99,
+                    recorded_on: "2026-09-26".to_owned(),
+                },
+            ],
+        };
+        let all_target_candidates =
+            catalog_candidates_for_target(&catalog, manager_target, repository);
+        let report =
+            remote_compatibility_report(&all_target_candidates, "0.150.1", manager_target, None);
+        let install_candidates = install_candidates(catalog, "0.150.1", manager_target, repository);
+        assert_eq!(
+            report.compat_ids,
+            install_candidates
+                .iter()
+                .map(|candidate| candidate.compat_id.clone())
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(
+            report.recommended_compat_id.as_deref(),
+            Some(
+                install_candidates[select_automatic(&install_candidates).unwrap()]
+                    .compat_id
+                    .as_str()
+            )
+        );
+    }
+
+    /// Checks that equal maximum revisions report install's ambiguity status.
+    #[test]
+    fn remote_revision_ties_are_reported_as_install_ambiguity() {
+        let candidates = vec![
+            candidate("0.150.1", "rust-v0.150.1-native-join-p15", WINDOWS_TARGET),
+            candidate("0.150.1", "rust-v0.150.1-orbit-p15", WINDOWS_TARGET),
+        ];
+        assert_eq!(
+            select_automatic(&candidates).unwrap_err().code,
+            "ambiguous_compatibility_revision"
+        );
+        let report = remote_compatibility_report(&candidates, "0.150.1", WINDOWS_TARGET, None);
+        assert_eq!(report.status, "ambiguous_compatibility_revision");
+        assert_eq!(report.recommended_compat_id, None);
+    }
+
+    /// Checks discovery falls back when the primary catalog lacks the official version.
+    #[test]
+    fn remote_discovery_falls_back_after_a_catalog_without_the_official_version() {
+        let mut source = FixtureSource::default();
+        add_catalog(
+            &mut source,
+            PRIMARY_COMPAT_REPOSITORY,
+            WINDOWS_TARGET,
+            vec![("0.151.0", "rust-v0.151.0-native-join-p3", 3)],
+        );
+        add_catalog(
+            &mut source,
+            LEGACY_COMPAT_REPOSITORY,
+            WINDOWS_TARGET,
+            vec![("0.150.1", "rust-v0.150.1-native-join-p14", 14)],
+        );
+        let result = fetch_remote_candidates(
+            &mut source,
+            "0.150.1",
+            WINDOWS_TARGET,
+            Instant::now() + REMOTE_DIAGNOSTIC_TIMEOUT,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.0, LEGACY_COMPAT_REPOSITORY);
+        assert_eq!(result.1[0].compat_id, "rust-v0.150.1-native-join-p14");
+        assert_eq!(
+            source.refs_requests,
+            [PRIMARY_COMPAT_REPOSITORY, LEGACY_COMPAT_REPOSITORY]
+        );
+    }
+
+    /// Checks no-match reports retain the highest candidate across repositories.
+    #[test]
+    fn remote_no_match_keeps_the_highest_catalog_across_repository_fallbacks() {
+        let official = "0.160.0";
+        let mut older_legacy = FixtureSource::default();
+        add_catalog(
+            &mut older_legacy,
+            PRIMARY_COMPAT_REPOSITORY,
+            WINDOWS_TARGET,
+            vec![("0.152.0", "rust-v0.152.0-native-join-p12", 12)],
+        );
+        add_catalog(
+            &mut older_legacy,
+            LEGACY_COMPAT_REPOSITORY,
+            WINDOWS_TARGET,
+            vec![("0.149.0", "rust-v0.149.0-native-join-p99", 99)],
+        );
+        let primary_latest = fetch_remote_candidates(
+            &mut older_legacy,
+            official,
+            WINDOWS_TARGET,
+            Instant::now() + REMOTE_DIAGNOSTIC_TIMEOUT,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(primary_latest.0, PRIMARY_COMPAT_REPOSITORY);
+        let report = remote_compatibility_report(&primary_latest.1, official, WINDOWS_TARGET, None);
+        assert_eq!(report.status, "none_for_version");
+        assert_eq!(
+            report
+                .latest_candidate
+                .as_ref()
+                .map(|candidate| candidate.compat_id.as_str()),
+            Some("rust-v0.152.0-native-join-p12")
+        );
+
+        let mut empty_legacy_target = FixtureSource::default();
+        add_catalog(
+            &mut empty_legacy_target,
+            PRIMARY_COMPAT_REPOSITORY,
+            WINDOWS_TARGET,
+            vec![("0.152.0", "rust-v0.152.0-native-join-p12", 12)],
+        );
+        add_catalog(
+            &mut empty_legacy_target,
+            LEGACY_COMPAT_REPOSITORY,
+            "aarch64-pc-windows-msvc",
+            vec![("0.149.0", "rust-v0.149.0-native-join-p99", 99)],
+        );
+        let primary_latest = fetch_remote_candidates(
+            &mut empty_legacy_target,
+            official,
+            WINDOWS_TARGET,
+            Instant::now() + REMOTE_DIAGNOSTIC_TIMEOUT,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(primary_latest.0, PRIMARY_COMPAT_REPOSITORY);
+        let report = remote_compatibility_report(&primary_latest.1, official, WINDOWS_TARGET, None);
+        assert_eq!(
+            report
+                .latest_candidate
+                .as_ref()
+                .map(|candidate| candidate.compat_id.as_str()),
+            Some("rust-v0.152.0-native-join-p12")
+        );
+    }
+
+    /// Checks legacy discovery can use the bundled bootstrap catalog.
+    #[test]
+    fn remote_legacy_discovery_uses_the_install_bootstrap_catalog() {
+        let catalog: InstallCatalog = serde_json::from_str(INSTALL_CATALOG_BOOTSTRAP).unwrap();
+        let refs = catalog
+            .entries
+            .iter()
+            .map(|entry| {
+                (
+                    format!("refs/tags/{}", entry.release_tag),
+                    entry.release_commit.clone(),
+                )
+            })
+            .collect();
+        let mut source = FixtureSource::default();
+        source.refs.insert(LEGACY_COMPAT_REPOSITORY, Some(refs));
+        let result = fetch_remote_candidates(
+            &mut source,
+            "0.150.1",
+            WINDOWS_TARGET,
+            Instant::now() + REMOTE_DIAGNOSTIC_TIMEOUT,
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(result.0, LEGACY_COMPAT_REPOSITORY);
+        assert!(result.1.iter().any(|candidate| {
+            candidate.codex_version == "0.150.1" && candidate.build_target == WINDOWS_TARGET
+        }));
+        assert!(!source.catalog_requests.is_empty());
+    }
+
+    /// Checks timeouts and invalid catalog data become unreachable reports.
+    #[test]
+    fn remote_timeout_and_invalid_catalogs_fail_as_unreachable() {
+        let mut slow_source = FixtureSource {
+            delay: Some(Duration::from_millis(20)),
+            ..FixtureSource::default()
+        };
+        let deadline = Instant::now() + Duration::from_millis(5);
+        let report = diagnose_remote_with_deadline(
+            "0.150.1",
+            WINDOWS_TARGET,
+            Some(&prepared_metadata(
+                "rust-v0.150.1-native-join-p14",
+                Some("0.150.1"),
+            )),
+            true,
+            &mut slow_source,
+            None,
+            deadline,
+        );
+        assert_eq!(report.status, "unreachable");
+        assert_eq!(
+            report.prepared_compat_id.as_deref(),
+            Some("rust-v0.150.1-native-join-p14")
+        );
+
+        let mut invalid_source = FixtureSource::default();
+        let tag = "compat-rust-v0.150.1-native-join-p14";
+        invalid_source.refs.insert(
+            PRIMARY_COMPAT_REPOSITORY,
+            Some(BTreeMap::from([(
+                format!("refs/tags/{tag}"),
+                "a".repeat(40),
+            )])),
+        );
+        invalid_source.catalogs.insert(
+            (PRIMARY_COMPAT_REPOSITORY, tag.to_owned()),
+            Some(b"{invalid json".to_vec()),
+        );
+        let report = diagnose_remote_with_source(
+            "0.150.1",
+            WINDOWS_TARGET,
+            None,
+            true,
+            &mut invalid_source,
+            None,
+        );
+        assert_eq!(report.status, "unreachable");
+    }
+
+    /// Covers cache hits, expiry, refresh, replacement, and version-specific identity.
+    #[test]
+    fn remote_cache_is_private_validated_refreshable_and_replaced() {
+        let directory = TestTempDir::new();
+        let mut original = FixtureSource::default();
+        add_catalog(
+            &mut original,
+            LEGACY_COMPAT_REPOSITORY,
+            WINDOWS_TARGET,
+            vec![
+                ("0.150.1", "rust-v0.150.1-native-join-p14", 14),
+                ("0.150.1", "rust-v0.150.1-native-join-p15", 15),
+            ],
+        );
+        let report = diagnose_remote_with_source(
+            "0.150.1",
+            WINDOWS_TARGET,
+            Some(&prepared_metadata(
+                "rust-v0.150.1-native-join-p14",
+                Some("0.150.1"),
+            )),
+            false,
+            &mut original,
+            Some(&directory.0),
+        );
+        assert_eq!(
+            report.recommended_compat_id.as_deref(),
+            Some("rust-v0.150.1-native-join-p15")
+        );
+        assert!(report.update_available);
+        assert_eq!(report.source, Some("network"));
+        assert!(report.checked_at_unix_seconds.is_some());
+        let serialized = serde_json::to_value(&report).unwrap();
+        assert_eq!(serialized["source"], "network");
+        assert_eq!(
+            serialized["checked_at_unix_seconds"].as_u64(),
+            report.checked_at_unix_seconds
+        );
+
+        let mut cache_only = FixtureSource::default();
+        let cached = diagnose_remote_with_source(
+            "0.150.1",
+            WINDOWS_TARGET,
+            None,
+            false,
+            &mut cache_only,
+            Some(&directory.0),
+        );
+        assert_eq!(
+            cached.recommended_compat_id.as_deref(),
+            Some("rust-v0.150.1-native-join-p15")
+        );
+        assert_eq!(cached.source, Some("cache"));
+        assert!(cached.checked_at_unix_seconds.is_some());
+        assert_eq!(serde_json::to_value(&cached).unwrap()["source"], "cache");
+        assert!(cache_only.refs_requests.is_empty());
+
+        assert_ne!(
+            cache_key(WINDOWS_TARGET, "0.150.1"),
+            cache_key(WINDOWS_TARGET, "0.151.0")
+        );
+        let mut changed_official_source = FixtureSource::default();
+        add_catalog(
+            &mut changed_official_source,
+            PRIMARY_COMPAT_REPOSITORY,
+            WINDOWS_TARGET,
+            vec![("0.151.0", "rust-v0.151.0-native-join-p3", 3)],
+        );
+        let changed_official = diagnose_remote_with_source(
+            "0.151.0",
+            WINDOWS_TARGET,
+            None,
+            false,
+            &mut changed_official_source,
+            Some(&directory.0),
+        );
+        assert_eq!(changed_official.status, "match");
+        assert_eq!(
+            changed_official.recommended_compat_id.as_deref(),
+            Some("rust-v0.151.0-native-join-p3")
+        );
+        assert!(!changed_official_source.refs_requests.is_empty());
+
+        let cache_path = directory.0.join(format!(
+            "csa-doctor-{}.json",
+            cache_key(WINDOWS_TARGET, "0.150.1")
+        ));
+        let cache_modified = fs::metadata(&cache_path).unwrap().modified().unwrap();
+        let mut expired_cache_source = FixtureSource::default();
+        let expired = diagnose_remote_with_deadline_at(
+            "0.150.1",
+            WINDOWS_TARGET,
+            None,
+            false,
+            &mut expired_cache_source,
+            Some(&directory.0),
+            RemoteDiagnosticTiming {
+                deadline: Instant::now() + Duration::from_secs(1),
+                now: cache_modified + REMOTE_CACHE_TTL + Duration::from_secs(1),
+            },
+        );
+        assert_eq!(expired.status, "unreachable");
+        assert!(!expired_cache_source.refs_requests.is_empty());
+
+        let mut refreshed = FixtureSource::default();
+        add_catalog(
+            &mut refreshed,
+            LEGACY_COMPAT_REPOSITORY,
+            WINDOWS_TARGET,
+            vec![("0.150.1", "rust-v0.150.1-native-join-p16", 16)],
+        );
+        let fresh = diagnose_remote_with_source(
+            "0.150.1",
+            WINDOWS_TARGET,
+            None,
+            true,
+            &mut refreshed,
+            Some(&directory.0),
+        );
+        assert_eq!(
+            fresh.recommended_compat_id.as_deref(),
+            Some("rust-v0.150.1-native-join-p16")
+        );
+        assert!(!refreshed.refs_requests.is_empty());
+
+        let path = directory.0.join(format!(
+            "csa-doctor-{}.json",
+            cache_key(WINDOWS_TARGET, "0.150.1")
+        ));
+        assert_eq!(
+            read_remote_cache(&path, WINDOWS_TARGET)
+                .unwrap()
+                .first()
+                .unwrap()
+                .compat_id,
+            "rust-v0.150.1-native-join-p16"
+        );
+    }
+
+    /// Checks malformed and oversized cache entries are ignored.
+    #[test]
+    fn malformed_or_oversized_remote_cache_is_ignored() {
+        let directory = TestTempDir::new();
+        assert!(cache_directory_is_private(&directory.0));
+        assert!(!valid_cached_candidates(&[], WINDOWS_TARGET));
+        let valid = candidate("0.150.1", "rust-v0.150.1-native-join-p14", WINDOWS_TARGET);
+        assert!(valid_cached_candidates(
+            std::slice::from_ref(&valid),
+            WINDOWS_TARGET
+        ));
+        let mut invalid_date = valid.clone();
+        invalid_date.recorded_on = "2025-02-29".to_owned();
+        assert!(!valid_cached_candidates(
+            std::slice::from_ref(&invalid_date),
+            WINDOWS_TARGET
+        ));
+        assert!(!valid_cached_candidates(
+            &[valid.clone(), valid],
+            WINDOWS_TARGET
+        ));
+        let path = directory.0.join(format!(
+            "csa-doctor-{}.json",
+            cache_key(WINDOWS_TARGET, "0.150.1")
+        ));
+        let mut invalid = candidate("0.150.1", "rust-v0.150.1-native-join-p14", WINDOWS_TARGET);
+        invalid.release_commit = "not-a-commit".to_owned();
+        fs::write(&path, serde_json::to_vec(&[invalid]).unwrap()).unwrap();
+        assert!(read_remote_cache(&path, WINDOWS_TARGET).is_none());
+        let mut network_after_corrupt_cache = FixtureSource::default();
+        let report = diagnose_remote_with_source(
+            "0.150.1",
+            WINDOWS_TARGET,
+            None,
+            false,
+            &mut network_after_corrupt_cache,
+            Some(&directory.0),
+        );
+        assert_eq!(report.status, "unreachable");
+        assert!(!network_after_corrupt_cache.refs_requests.is_empty());
+
+        fs::write(&path, vec![b' '; (MAX_REMOTE_CACHE_BYTES + 1) as usize]).unwrap();
+        assert!(read_remote_cache(&path, WINDOWS_TARGET).is_none());
+    }
 
     #[test]
     fn only_exact_formal_rust_release_tags_are_stable() {
@@ -2323,6 +3996,94 @@ mod tests {
         assert!(!client.proxy_order.borrow().contains(&2));
     }
 
+    /// Simulates a slow first proxy while a later proxy responds.
+    fn delayed_first_proxy_with_healthy_second(
+        index: usize,
+        _repository: &'static str,
+        deadline: Instant,
+    ) -> bool {
+        if index == 0 {
+            std::thread::sleep(Duration::from_millis(50));
+            return false;
+        }
+        index == 1 && remaining_deadline(deadline).is_ok()
+    }
+
+    /// Simulates a proxy pool where every route is unavailable.
+    fn no_proxy_responds(_index: usize, _repository: &'static str, _deadline: Instant) -> bool {
+        false
+    }
+
+    /// Selects a test proxy through the injected proxy probe.
+    fn select_test_proxy_route(repository: &'static str, deadline: Instant) -> Result<usize> {
+        select_proxy_index_until_with(
+            repository,
+            deadline,
+            delayed_first_proxy_with_healthy_second,
+        )
+    }
+
+    /// Fails the test if direct routing unexpectedly probes the proxy pool.
+    fn unexpected_proxy_selection(_repository: &'static str, _deadline: Instant) -> Result<usize> {
+        panic!("direct route must not select a proxy")
+    }
+
+    /// Checks remote initialization selects a healthy proxy before creating a client.
+    #[test]
+    fn remote_cn_route_selects_a_healthy_proxy_before_creating_the_client() {
+        let deadline = Instant::now() + Duration::from_secs(2);
+        let route = select_detected_remote_route(
+            GitHubRoute::Proxy(0),
+            PRIMARY_COMPAT_REPOSITORY,
+            deadline,
+            select_test_proxy_route,
+        )
+        .unwrap();
+        assert_eq!(route, GitHubRoute::Proxy(1));
+
+        let direct = select_detected_remote_route(
+            GitHubRoute::Direct,
+            PRIMARY_COMPAT_REPOSITORY,
+            deadline,
+            unexpected_proxy_selection,
+        )
+        .unwrap();
+        assert_eq!(direct, GitHubRoute::Direct);
+    }
+
+    /// Checks proxy selection fails instead of defaulting to a dead first route.
+    #[test]
+    fn remote_proxy_selection_fails_when_no_route_responds() {
+        let error = select_proxy_index_until_with(
+            PRIMARY_COMPAT_REPOSITORY,
+            Instant::now() + Duration::from_secs(2),
+            no_proxy_responds,
+        )
+        .unwrap_err();
+        assert_eq!(error.code, "network_error");
+    }
+
+    /// Checks region probes are bounded and missing results fall back to direct.
+    #[test]
+    fn remote_region_probes_use_a_short_deadline_and_fall_back_to_direct() {
+        let now = Instant::now();
+        let overall_deadline = now + Duration::from_secs(5);
+        assert_eq!(
+            remote_region_probe_deadline(now, overall_deadline),
+            now + REMOTE_REGION_PROBE_TIMEOUT
+        );
+
+        let short_overall_deadline = now + Duration::from_millis(500);
+        assert_eq!(
+            remote_region_probe_deadline(now, short_overall_deadline),
+            short_overall_deadline
+        );
+        assert_eq!(
+            remote_route_from_region_probes([None, None]),
+            GitHubRoute::Direct
+        );
+    }
+
     #[test]
     fn git_refs_drive_no_login_catalog_and_proxy_urls() {
         let tag = "compat-rust-v1.2.3-native-join-p1";
@@ -2423,13 +4184,15 @@ mod tests {
         format!("{:04x}{payload}", payload.len() + 4).into_bytes()
     }
 
+    /// Checks release bodies remain readable within the configured global timeout.
     #[test]
     fn github_client_allows_large_release_bodies_within_global_timeout() {
         let timeouts = GitHubClient::with_route(LEGACY_COMPAT_REPOSITORY, GitHubRoute::Direct)
             .agent
             .config()
             .timeouts();
-        assert_eq!(timeouts.global, Some(Duration::from_secs(15 * 60)));
+        let install_timeout = Duration::from_secs(15 * 60);
+        assert_eq!(timeouts.global, Some(install_timeout));
         assert_eq!(timeouts.connect, Some(Duration::from_secs(15)));
         assert_eq!(timeouts.recv_response, Some(Duration::from_secs(30)));
         assert_eq!(timeouts.recv_body, None);

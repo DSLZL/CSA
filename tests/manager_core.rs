@@ -635,6 +635,7 @@ fn official_runtime_is_discovered_from_the_launcher_and_requires_all_helpers() {
     assert!(!overlap_root.join("state.json").exists());
 }
 
+/// Verifies Linux runtime discovery and shell activation behavior.
 #[cfg(target_os = "linux")]
 #[test]
 fn linux_real_runtime_discovery_and_shell_activation_contract() {
@@ -652,6 +653,8 @@ fn linux_real_runtime_discovery_and_shell_activation_contract() {
             official: Some(fixture.official.clone()),
             official_native: None,
             manifest: Some(fixture.manifest.clone()),
+            remote: false,
+            refresh: false,
         },
         &RealProcessRunner,
     )
@@ -683,6 +686,8 @@ fn linux_real_runtime_discovery_and_shell_activation_contract() {
             official: Some(fixture.official),
             official_native: None,
             manifest: None,
+            remote: false,
+            refresh: false,
         },
         &RealProcessRunner,
     )

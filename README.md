@@ -106,9 +106,13 @@ eval (csa shell env fish)
 
 ```powershell
 csa doctor
+csa doctor --remote
+csa doctor --remote --refresh
 csa install
 csa status
 ```
+
+`doctor --remote` checks the public compatibility catalog for the installed Codex version and artifact target. A compatible Release is reported as PASS; no match, an unavailable check, or an ambiguous maximum revision is WARN. The catalog cache is stored in the OS per-user cache directory for one hour, outside `--manager-root`; expired or invalid cache data is ignored. `--refresh` skips the cache and requires `--remote`. The check does not download a patched executable or modify Manager installation state.
 
 In an interactive terminal, `install` opens a five-row picker after filtering Releases to the current target and official Codex version. Use the arrow keys, paging keys, Home/End, or search, then press Enter. Escape or Ctrl+C cancels before the large executable download and exits with code 130.
 
